@@ -141,3 +141,87 @@ def test_audit_logging(tmp_path):
     payload_str = str([dict(row) for row in rows])
     assert "secret123" not in payload_str
     assert "[REDACTED]" in payload_str
+
+
+def test_non_over_redaction_dict_keys():
+    gateway = ToolGateway()
+    payload = {
+        "author": "John Doe",
+        "keyword": "python",
+        "token_count": 150,
+        "api_key": "sk-1234567890abcdef1234567890abcdef",
+        "secret": "supersecret",
+    }
+    redacted = gateway.redact_secrets(payload)
+    assert redacted["author"] == "John Doe"
+    assert redacted["keyword"] == "python"
+    assert redacted["token_count"] == 150
+    assert redacted["api_key"] == "[REDACTED]"
+    assert redacted["secret"] == "[REDACTED]"
+
+
+def test_error_message_secret_redaction():
+    gateway = ToolGateway()
+
+    # 1. executor_func returns ToolCallResult with secret in error
+    def executor_with_error(req: ToolCallRequest) -> ToolCallResult:
+        return ToolCallResult(
+            call_id=req.call_id,
+            tool_name=req.tool_name,
+            output=None,
+            error="Connection failed with token ghp_1234567890abcdef1234567890abcdef",
+            is_success=False,
+        )
+
+    req1 = ToolCallRequest(call_id="c1", tool_name="test_tool", arguments={}, requested_by="user")
+    res1 = gateway.execute_tool(req1, executor_func=executor_with_error)
+    assert "ghp_" not in res1.error
+    assert "[REDACTED]" in res1.error
+
+    # 2. executor_func raises Exception containing a secret
+    def executor_raises(req: ToolCallRequest) -> ToolCallResult:
+        raise RuntimeError("Database error at postgres://user:secret123@localhost:5432/db")
+
+    req2 = ToolCallRequest(call_id="c2", tool_name="test_tool", arguments={}, requested_by="user")
+    res2 = gateway.execute_tool(req2, executor_func=executor_raises)
+    assert "secret123@" not in res2.error
+    assert "[REDACTED]" in res2.error
+
+
+def test_pem_key_and_pat_redaction():
+    gateway = ToolGateway()
+
+    # GitHub fine-grained PAT
+    pat_text = "Token: github_pat_11AAAAAAA0123456789abcdef_1234567890abcdef1234567890abcdef1234567890"
+    redacted_pat = gateway.redact_secrets(pat_text)
+    assert "github_pat_" not in redacted_pat
+    assert "[REDACTED]" in redacted_pat
+
+    # Slack token
+    slack_text = "Slack token xoxb-1234567890-1234567890-abcdefghij"
+    redacted_slack = gateway.redact_secrets(slack_text)
+    assert "xoxb-" not in redacted_slack
+    assert "[REDACTED]" in redacted_slack
+
+    # PEM key
+    pem_text = "-----BEGIN RSA PRIVATE KEY-----\nMIIE..."
+    redacted_pem = gateway.redact_secrets(pem_text)
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in redacted_pem
+    assert "[REDACTED]" in redacted_pem
+
+    # DB connection URI
+    db_text = "Connecting to redis://admin:password123@127.0.0.1:6379"
+    redacted_db = gateway.redact_secrets(db_text)
+    assert "password123@" not in redacted_db
+    assert "[REDACTED]" in redacted_db
+
+
+def test_rm_flag_permutations_risk_scoring():
+    engine = RiskPolicyEngine()
+
+    assert engine.evaluate_risk("run_command", {"command": "rm -fr /tmp/data"}) == RiskLevel.CRITICAL
+    assert engine.evaluate_risk("run_command", {"command": "rm -r -f /tmp/data"}) == RiskLevel.CRITICAL
+    assert engine.evaluate_risk("run_command", {"command": "rm -f -r /tmp/data"}) == RiskLevel.CRITICAL
+    assert engine.evaluate_risk("run_command", {"command": "rm --recursive /tmp/data"}) == RiskLevel.CRITICAL
+    assert engine.evaluate_risk("run_command", {"command": "rm -rf /tmp/data"}) == RiskLevel.CRITICAL
+

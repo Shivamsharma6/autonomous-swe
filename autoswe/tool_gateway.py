@@ -4,26 +4,53 @@ from autoswe.models import RiskLevel, ToolCallRequest, ToolCallResult
 from autoswe.storage import StorageEngine
 
 
-SENSITIVE_KEY_SUBSTRINGS = [
+SENSITIVE_KEY_EXACT = {
     "key",
+    "api_key",
+    "apikey",
     "secret",
     "password",
     "token",
     "auth",
+    "authorization",
     "credential",
+    "credentials",
     "private_key",
     "access_key",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+    "secret_key",
+    "client_secret",
+    "aws_secret",
+}
+
+SENSITIVE_KEY_PATTERNS = [
+    re.compile(r"^.*_(key|secret|password|token|credentials|auth)$", re.IGNORECASE),
+    re.compile(r"^(api_key|secret|password|auth_token|access_key|private_key|credentials|token|auth)$", re.IGNORECASE),
 ]
+
+
+def is_sensitive_key(key: str) -> bool:
+    k_lower = str(key).lower()
+    if k_lower in SENSITIVE_KEY_EXACT:
+        return True
+    return any(pattern.match(k_lower) for pattern in SENSITIVE_KEY_PATTERNS)
+
 
 SECRET_PATTERNS = [
     re.compile(r"ghp_[A-Za-z0-9_]{10,}"),
+    re.compile(r"github_pat_[a-zA-Z0-9_]{30,}"),
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{10,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]+"),
+    re.compile(r"xox[baprs]-[a-zA-Z0-9_-]{10,}"),
+    re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE)(?:\s+PRIVATE)? KEY-----"),
+    re.compile(r"(?:postgres|mysql|mongodb|redis)://[^:\s]+:[^@\s]+@"),
 ]
 
 CRITICAL_ARG_PATTERNS = [
-    re.compile(r"\brm\s+-rf\b", re.IGNORECASE),
+    re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\s+-f|-f\s+-r|--recursive)", re.IGNORECASE),
     re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
     re.compile(r"\bdrop\s+table\b", re.IGNORECASE),
     re.compile(r"\btruncate\s+table\b", re.IGNORECASE),
@@ -90,8 +117,7 @@ class ToolGateway:
         if isinstance(data, dict):
             redacted_dict = {}
             for k, v in data.items():
-                k_lower = str(k).lower()
-                if any(sub in k_lower for sub in SENSITIVE_KEY_SUBSTRINGS):
+                if is_sensitive_key(k):
                     redacted_dict[k] = "[REDACTED]"
                 else:
                     redacted_dict[k] = self.redact_secrets(v)
@@ -156,11 +182,12 @@ class ToolGateway:
             try:
                 res = executor_func(request)
                 redacted_output = self.redact_secrets(res.output)
+                redacted_error = self.redact_secrets(res.error) if res.error is not None else None
                 final_result = ToolCallResult(
                     call_id=res.call_id,
                     tool_name=res.tool_name,
                     output=redacted_output,
-                    error=res.error,
+                    error=redacted_error,
                     is_success=res.is_success,
                 )
             except Exception as e:
@@ -168,7 +195,7 @@ class ToolGateway:
                     call_id=request.call_id,
                     tool_name=request.tool_name,
                     output=None,
-                    error=str(e),
+                    error=self.redact_secrets(str(e)),
                     is_success=False,
                 )
 
@@ -200,3 +227,4 @@ class ToolGateway:
             output=None,
             is_success=True,
         )
+
