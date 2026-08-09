@@ -1,8 +1,13 @@
 import asyncio
+import json
+import os
 import sqlite3
 import time
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from autoswe.models import TaskNode, TaskStatus, ModelProviderConfig
@@ -10,8 +15,32 @@ from autoswe.scheduler import TaskScheduler
 from autoswe.storage import StorageEngine
 
 app = FastAPI(title="Autonomous Software Engineering Control Plane API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 storage = StorageEngine()
 scheduler = TaskScheduler()
+
+def _auto_detect_unsloth_key() -> str:
+    key_path = os.path.expanduser("~/.unsloth/studio/auth/agent_api_key.json")
+    if os.path.exists(key_path):
+        try:
+            with open(key_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            servers = data.get("servers", {})
+            for server_url, s_data in servers.items():
+                minted = s_data.get("minted", [])
+                if minted:
+                    return minted[0]
+        except Exception:
+            pass
+    return ""
 
 active_provider_config = ModelProviderConfig(
     provider="gemini",
@@ -20,6 +49,7 @@ active_provider_config = ModelProviderConfig(
     api_key="",
     temperature=0.2,
 )
+
 
 
 class ConnectionManager:
@@ -73,8 +103,68 @@ def get_provider_config() -> Dict[str, Any]:
 @app.post("/api/v1/provider-config")
 def update_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
     global active_provider_config
+    # If key is blank and provider is unsloth or custom, attempt auto-detection
+    if not config.api_key:
+        auto_key = _auto_detect_unsloth_key()
+        if auto_key:
+            config.api_key = auto_key
     active_provider_config = config
     return {"status": "updated", "config": active_provider_config.model_dump()}
+
+
+@app.post("/api/v1/provider-config/test")
+def test_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
+    base_url = config.base_url.rstrip("/")
+    if not base_url:
+        if config.provider == "ollama":
+            base_url = "http://localhost:11434/v1"
+        elif config.provider in ("custom", "unsloth", "local"):
+            base_url = "http://localhost:8888/v1"
+
+    api_key = config.api_key
+    if not api_key:
+        api_key = _auto_detect_unsloth_key()
+
+    models_url = f"{base_url}/models"
+    req = urllib.request.Request(models_url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            body = response.read().decode("utf-8")
+            data = json.loads(body)
+            models = []
+            if isinstance(data, dict) and "data" in data:
+                models = [m.get("id") for m in data["data"] if isinstance(m, dict)]
+            return {
+                "success": True,
+                "status_code": response.status,
+                "base_url": base_url,
+                "api_key_detected": bool(api_key),
+                "api_key": api_key,
+                "available_models": models,
+                "message": f"Successfully connected to {config.provider.upper()} server at {base_url}! Available models: {', '.join(models[:3]) or 'Loaded'}",
+            }
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        return {
+            "success": False,
+            "status_code": e.code,
+            "base_url": base_url,
+            "api_key_detected": bool(api_key),
+            "message": f"HTTP {e.code} Error connecting to {base_url}: {e.reason}",
+            "error_detail": err_body,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "status_code": 500,
+            "base_url": base_url,
+            "api_key_detected": bool(api_key),
+            "message": f"Connection failed to {base_url}: {str(e)}",
+        }
+
 
 
 

@@ -110,8 +110,11 @@ document.addEventListener('DOMContentLoaded', () => {
         modelNameInput: document.getElementById('modelNameInput'),
         tempInput: document.getElementById('tempInput'),
         tempValue: document.getElementById('tempValue'),
-        saveProviderBtn: document.getElementById('saveProviderBtn')
+        testProviderBtn: document.getElementById('testProviderBtn'),
+        saveProviderBtn: document.getElementById('saveProviderBtn'),
+        connectionStatusBox: document.getElementById('connectionStatusBox')
     };
+
 
     // --- Core Initialization ---
     init();
@@ -205,10 +208,15 @@ document.addEventListener('DOMContentLoaded', () => {
             dom.tempValue.textContent = e.target.value;
         });
 
+        dom.testProviderBtn.addEventListener('click', () => {
+            testProviderConnection();
+        });
+
         dom.saveProviderBtn.addEventListener('click', () => {
             saveProviderConfig();
         });
     }
+
 
 
     // --- WebSocket Stream Client ---
@@ -690,6 +698,54 @@ document.addEventListener('DOMContentLoaded', () => {
             dom.providerModal.classList.add('hidden');
         });
     }
+
+    function testProviderConnection() {
+        const statusBox = dom.connectionStatusBox;
+        statusBox.classList.remove('hidden', 'success', 'error', 'info');
+        statusBox.classList.add('info');
+        statusBox.textContent = 'Testing connection to model provider server...';
+
+        const config = {
+            provider: dom.providerSelect.value,
+            base_url: dom.baseUrlInput.value.trim(),
+            api_key: dom.apiKeyInput.value.trim(),
+            model_name: dom.modelNameInput.value.trim() || 'gemini-3.6-flash',
+            temperature: parseFloat(dom.tempInput.value)
+        };
+
+        let host = window.location.host;
+        if (!host || window.location.protocol === 'file:') host = '127.0.0.1:8000';
+        const testUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config/test`;
+
+        fetch(testUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        })
+        .then(res => res.json())
+        .then(data => {
+            statusBox.classList.remove('info');
+            if (data.success) {
+                statusBox.classList.add('success');
+                statusBox.textContent = data.message;
+                if (data.api_key && !dom.apiKeyInput.value) {
+                    dom.apiKeyInput.value = data.api_key;
+                }
+                if (data.available_models && data.available_models.length > 0) {
+                    dom.modelNameInput.value = data.available_models[0];
+                }
+            } else {
+                statusBox.classList.add('error');
+                statusBox.textContent = `${data.message} ${data.error_detail || ''}`;
+            }
+        })
+        .catch(err => {
+            statusBox.classList.remove('info');
+            statusBox.classList.add('error');
+            statusBox.textContent = `Connection error: ${err.message}`;
+        });
+    }
+
 
     // --- Helpers ---
     function escapeHtml(str) {

@@ -320,12 +320,21 @@
                     <label for="tempInput">Temperature: <span id="tempValue">0.2</span></label>
                     <input type="range" id="tempInput" min="0" max="1" step="0.05" value="0.2" class="form-range">
                 </div>
+
+                <div id="connectionStatusBox" class="connection-status-box hidden"></div>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="gap: 0.5rem;">
+                <button id="testProviderBtn" class="btn btn-secondary">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="5 3 19 12 5 21 5 3"/>
+                    </svg>
+                    Test Connection
+                </button>
                 <button id="saveProviderBtn" class="btn btn-primary">Save Provider Config</button>
             </div>
         </div>
     </div>
+
 
     <!-- Scripts -->
     <script src="app.js"></script>
