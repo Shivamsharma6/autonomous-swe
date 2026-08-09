@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -30,7 +31,7 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except Exception:
-                pass
+                self.disconnect(connection)
 
 
 manager = ConnectionManager()
@@ -70,13 +71,16 @@ def create_project(req: ProjectCreateReq) -> Dict[str, Any]:
 @app.post("/api/v1/tasks")
 def create_task(req: TaskCreateReq) -> Dict[str, Any]:
     task_id = req.task_id or f"task-{int(time.time() * 1000)}"
-    task_dict = storage.create_task(
-        task_id=task_id,
-        project_id=req.project_id,
-        title=req.user_request,
-        description=req.description,
-        status=TaskStatus.PENDING,
-    )
+    try:
+        task_dict = storage.create_task(
+            task_id=task_id,
+            project_id=req.project_id,
+            title=req.user_request,
+            description=req.description,
+            status=TaskStatus.PENDING,
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=404, detail="Project not found")
     node = TaskNode(
         id=task_id,
         title=req.user_request,
@@ -110,13 +114,16 @@ def cancel_task(task_id: str) -> Dict[str, Any]:
 async def websocket_stream(websocket: WebSocket, task_id: str) -> None:
     await manager.connect(websocket)
     try:
-        task = storage.get_task(task_id)
+        task = await asyncio.to_thread(storage.get_task, task_id)
         await websocket.send_json({"task_id": task_id, "task": task, "timestamp": time.time()})
         while True:
             data = await websocket.receive_text()
-            task = storage.get_task(task_id)
+            task = await asyncio.to_thread(storage.get_task, task_id)
             await websocket.send_json(
                 {"task_id": task_id, "data": data, "task": task, "timestamp": time.time()}
             )
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket)
+

@@ -105,3 +105,45 @@ def test_websocket_stream_endpoint(client):
         assert reply["task_id"] == task_id
         assert reply["data"] == "ping"
         assert reply["task"]["id"] == task_id
+
+
+def test_create_task_invalid_project_id(client):
+    res = client.post(
+        "/api/v1/tasks",
+        json={"project_id": "nonexistent-proj-id", "user_request": "Test request"}
+    )
+    assert res.status_code == 404
+    assert res.json()["detail"] == "Project not found"
+
+
+def test_websocket_disconnect_cleanup(client):
+    from autoswe.control_plane import manager
+    res_proj = client.post("/api/v1/projects", json={"name": "Cleanup Demo", "repo_path": "/tmp/cleanup"})
+    proj_id = res_proj.json()["project_id"]
+    res_task = client.post("/api/v1/tasks", json={"project_id": proj_id, "user_request": "Cleanup task"})
+    task_id = res_task.json()["task_id"]
+
+    initial_connections = len(manager.active_connections)
+    with client.websocket_connect(f"/api/v1/tasks/{task_id}/stream") as websocket:
+        initial_msg = websocket.receive_json()
+        assert initial_msg["task_id"] == task_id
+        assert len(manager.active_connections) == initial_connections + 1
+
+    assert len(manager.active_connections) == initial_connections
+
+
+def test_broadcast_removes_failed_connection():
+    import asyncio
+    from autoswe.control_plane import ConnectionManager
+
+    class MockWS:
+        async def send_json(self, msg):
+            raise RuntimeError("Connection closed")
+
+    cm = ConnectionManager()
+    mock_ws = MockWS()
+    cm.active_connections.append(mock_ws)
+    assert mock_ws in cm.active_connections
+    asyncio.run(cm.broadcast({"test": "data"}))
+    assert mock_ws not in cm.active_connections
+
