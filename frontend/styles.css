@@ -976,4 +976,30 @@ body {
     border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
+.task-input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    max-width: 680px;
+}
+
+.task-prompt-input {
+    flex: 1;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.85rem;
+    color: var(--text-primary);
+    font-size: 0.825rem;
+    outline: none;
+    transition: border-color var(--transition-fast);
+}
+
+.task-prompt-input:focus {
+    border-color: var(--primary-cyan);
+    box-shadow: 0 0 10px rgba(0, 242, 254, 0.15);
+}
+
+
 

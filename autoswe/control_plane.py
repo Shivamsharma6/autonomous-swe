@@ -168,6 +168,27 @@ def test_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
 
 
 
+async def _run_workflow_background(task_id: str, project_id: str, user_request: str):
+    from autoswe.orchestrator import WorkflowOrchestrator
+    orchestrator = WorkflowOrchestrator(storage_engine=storage)
+    
+    await manager.broadcast({
+        "task_id": task_id,
+        "event_type": "SYSTEM",
+        "message": f"Multi-agent SDLC workflow initialized for task: {user_request}",
+        "payload": {"project_id": project_id, "provider": active_provider_config.provider, "model": active_provider_config.model_name}
+    })
+
+    res = await asyncio.to_thread(orchestrator.run_workflow, user_request=user_request, project_id=project_id)
+    
+    await manager.broadcast({
+        "task_id": task_id,
+        "event_type": "SYSTEM",
+        "message": f"Task execution completed with status: {res.get('workflow_status')}",
+        "payload": res
+    })
+
+
 @app.post("/api/v1/projects")
 def create_project(req: ProjectCreateReq) -> Dict[str, Any]:
     project_id = req.project_id or f"proj-{int(time.time() * 1000)}"
@@ -181,7 +202,7 @@ def create_project(req: ProjectCreateReq) -> Dict[str, Any]:
 
 
 @app.post("/api/v1/tasks")
-def create_task(req: TaskCreateReq) -> Dict[str, Any]:
+async def create_task(req: TaskCreateReq) -> Dict[str, Any]:
     task_id = req.task_id or f"task-{int(time.time() * 1000)}"
     try:
         task_dict = storage.create_task(
@@ -192,7 +213,20 @@ def create_task(req: TaskCreateReq) -> Dict[str, Any]:
             status=TaskStatus.PENDING,
         )
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=404, detail="Project not found")
+        # Auto-create project if missing
+        storage.create_project(
+            project_id=req.project_id,
+            name="Default Project",
+            description="Auto-created project",
+        )
+        task_dict = storage.create_task(
+            task_id=task_id,
+            project_id=req.project_id,
+            title=req.user_request,
+            description=req.description,
+            status=TaskStatus.PENDING,
+        )
+
     node = TaskNode(
         id=task_id,
         title=req.user_request,
@@ -201,7 +235,12 @@ def create_task(req: TaskCreateReq) -> Dict[str, Any]:
         status=TaskStatus.PENDING,
     )
     scheduler.register_task(node)
+
+    # Launch live background execution of agent workflow
+    asyncio.create_task(_run_workflow_background(task_id, req.project_id, req.user_request))
+
     return {"task_id": task_dict["id"], "project_id": req.project_id, "status": "PENDING"}
+
 
 
 @app.get("/api/v1/tasks/{task_id}")

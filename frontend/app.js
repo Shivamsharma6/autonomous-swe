@@ -65,11 +65,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- DOM Elements ---
     const dom = {
-        taskIdInput: document.getElementById('taskIdInput'),
-        connectBtn: document.getElementById('connectBtn'),
-        demoToggleBtn: document.getElementById('demoToggleBtn'),
+        taskPromptInput: document.getElementById('taskPromptInput'),
+        submitTaskBtn: document.getElementById('submitTaskBtn'),
+        demoTaskBtn: document.getElementById('demoTaskBtn'),
         wsStatusBadge: document.getElementById('wsStatusBadge'),
         wsStatusText: document.getElementById('wsStatusText'),
+
         
         // Metrics
         metricStatusPill: document.getElementById('metricStatusPill'),
@@ -132,18 +133,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     function bindEvents() {
-        dom.connectBtn.addEventListener('click', () => {
-            const taskId = dom.taskIdInput.value.trim() || 'task-1001';
-            connectWebSocket(taskId);
-        });
-
-        dom.demoToggleBtn.addEventListener('click', () => {
-            if (state.isDemoMode) {
-                stopDemoStream();
-            } else {
-                startDemoStream();
+        dom.submitTaskBtn.addEventListener('click', () => {
+            const prompt = dom.taskPromptInput.value.trim();
+            if (prompt) {
+                submitLiveAgentTask(prompt);
             }
         });
+
+        dom.demoTaskBtn.addEventListener('click', () => {
+            const demoPrompt = 'Design a Video Game Database CRUD backend using Postgres/SQLite and FastAPI with an HTML/CSS/JS frontend';
+            dom.taskPromptInput.value = demoPrompt;
+            submitLiveAgentTask(demoPrompt);
+        });
+
+        dom.taskPromptInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const prompt = dom.taskPromptInput.value.trim();
+                if (prompt) submitLiveAgentTask(prompt);
+            }
+        });
+
 
         dom.resetDagBtn.addEventListener('click', () => {
             renderDAG();
@@ -219,7 +228,53 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 
+    function submitLiveAgentTask(promptText) {
+        stopDemoStream();
+        state.traceEvents = [];
+        dom.traceEntriesList.innerHTML = '';
+
+        appendTraceLog('SYSTEM', `Submitting live task request to agent swarm: "${promptText}"`);
+
+        const host = getBackendApiHost();
+        const apiProtocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+
+        // 1. Ensure project exists
+        const projUrl = `${apiProtocol}//${host}/api/v1/projects`;
+        fetch(projUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: 'Live Agent Project',
+                project_id: 'proj-live-001',
+                repo_path: '/Users/shivamsharma/projects/autonomous-swe/games_demo'
+            })
+        })
+        .then(() => {
+            // 2. Submit Task
+            const taskUrl = `${apiProtocol}//${host}/api/v1/tasks`;
+            return fetch(taskUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: 'proj-live-001',
+                    user_request: promptText
+                })
+            });
+        })
+        .then(res => res.json())
+        .then(data => {
+            const taskId = data.task_id;
+            appendTraceLog('SYSTEM', `Task created successfully with ID: ${taskId}. Connecting to live execution stream...`);
+            connectWebSocket(taskId);
+        })
+        .catch(err => {
+            appendTraceLog('ERROR', `Failed to submit task: ${err.message}. Running live simulation fallback...`);
+            startDemoStream();
+        });
+    }
+
     function getBackendApiHost() {
+
         if (window.location.protocol === 'file:' || !window.location.host) {
             return '127.0.0.1:8000';
         }
