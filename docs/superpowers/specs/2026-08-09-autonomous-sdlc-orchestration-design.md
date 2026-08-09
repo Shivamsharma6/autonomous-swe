@@ -1,194 +1,251 @@
 # Autonomous Software Engineering Platform — Multi-Agent SDLC Orchestration Design Document
 
 **Date:** 2026-08-09  
-**Status:** Production-Ready (V2 - Architecturally Enhanced)  
+**Status:** Approved & Production-Ready (V3 - Final Architecture)  
 **Author:** Antigravity AI Assistant & Engineering Team  
 
 ---
 
-## 1. Executive Summary & Objectives
+## 1. Executive Summary & Core Objectives
 
-The **Autonomous Software Engineering Platform** is a production-grade multi-agent software engineering system built with **LangGraph**, **LangChain**, and **LangSmith**. It orchestrates specialized AI agents (**Architect**, **Coder**, **Test Generator**, **Reviewer**, **Researcher**, **Debugger**, and **Final Reviewer**) across complex, multi-task software development lifecycles (SDLC).
+The **Autonomous Software Engineering Platform** is a production-grade control plane for multi-agent software engineering workflows. Built on **LangGraph**, **FastAPI**, **PostgreSQL**, **Redis**, and **LangSmith**, it orchestrates 7 specialized AI agents (**Architect**, **Researcher**, **Coder**, **Test Generator**, **Reviewer**, **Debugger**, and **Final Reviewer**) across complex, multi-task software development lifecycles.
 
 ### Key Architectural Pillars:
-1. **Decoupled Workflow State & External Artifact Persistence**: Light `WorkflowState` containing workflow metadata and artifact handles. Large payloads (patches, logs, generated code, traces) are persisted in dedicated storage systems (PostgreSQL, Object/File Storage, Git working trees, Vector DB).
-2. **First-Class Task DAG & Scheduler Engine**: Clear separation between high-level **Task Planning** (dependency graph generation), **Task Scheduling** (stateful lifecycle management: `PENDING`, `READY`, `RUNNING`, `BLOCKED`, `COMPLETED`), and **LangGraph Worker Execution**.
-3. **Dynamic Risk Engine for Tool Execution**: Evaluates tool calls using a risk engine (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), automatically executing safe commands (pytest, git diff) while enforcing interactive human approval gates for high-risk actions (git push, deployment).
-4. **Declarative Agent Runtime & `AgentSpec`**: Standardized agent execution layer decoupling agent configuration (`role`, `model_policy`, `tools`, `permissions`, `context_policy`, `budget`) from orchestration plumbing.
-5. **Context Engineering Subsystem**: Dedicated `ContextEngine` & `ContextBuilder` managing repository AST, memory history, symbol resolution, and context window pruning to handle large codebases without context stuffing.
-6. **LLM Observability & Evaluation**: Integrated LangSmith end-to-end tracing, prompt/version tracking, real-time token/latency/cost metrics, and regression benchmarks.
-7. **Control Plane & Web Dashboard**: FastAPI control plane backend paired with a modern single-page dashboard for real-time DAG state visualization, diff inspection, and live execution tracing.
+1. **Durable Control Plane & Clean Persistence Layers**:
+   - **PostgreSQL**: Absolute system of record (task state, worker leases, RBAC, audit logs).
+   - **Redis / Redis Streams**: Ephemeral caching, distributed locks, pub/sub WebSocket event streaming.
+   - **Object / File Storage**: Artifacts (git patches, test execution stdout/stderr logs, build traces).
+   - **Vector / AST Database**: Codebase structural embeddings and symbol dependency graphs.
+2. **First-Class Task Scheduler with Worker Leases & Heartbeats**:
+   - Manages dependency resolution, concurrency bounds, task priorities, worker lease renewal via periodic heartbeats, cancellation propagation, and dead-letter queue (DLQ) handling.
+3. **Idempotent Tool Execution & Dynamic Risk Engine**:
+   - Intercepts tool calls via `RiskPolicyEngine` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
+   - Ensures exactly-once execution semantics using `idempotency_key` verification for side-effecting operations (e.g. `git push`).
+4. **Declarative `AgentSpec` & Standardized `AgentRuntime`**:
+   - Decouples agent capabilities from orchestration logic via structured declarations (`role`, `model_policy`, `tools`, `permissions`, `context_policy`, `budget`).
+5. **4-Dimensional Context Engineering Subsystem**:
+   - `ContextEngine` constructs prompts across 4 dimensions: **Repository Context**, **Task Context**, **Memory Context**, and **Execution Context** (diffs, stack traces, previous attempts).
+6. **Task Cancellation & Worker Lifecycle Management**:
+   - Real-time cancellation propagation from API (`POST /api/v1/tasks/{id}/cancel`) down through Scheduler, LangGraph Workers, and running Sandbox subprocesses.
+7. **Controlled PR Policy Gate**:
+   - Final Reviewer submits changes through a policy gate. Low-risk changes create PRs automatically; high-risk changes require interactive human approval in the UI. (No automated auto-merges by default).
 
 ---
 
-## 2. Architecture & Subsystem Boundaries
+## 2. Target High-Level Architecture (HLD)
 
 ```
-                         ┌─────────────────────────────┐
-                         │    Web Dashboard UI (SPA)   │
-                         └──────────────┬──────────────┘
-                                        │ (REST / WebSockets)
-                         ┌──────────────▼──────────────┐
-                         │    FastAPI Control Plane    │
-                         └──────┬───────────────┬──────┘
-                                │               │
-                    ┌───────────▼──┐        ┌───▼───────────┐
-                    │ Postgres DB  │        │ Redis Queue   │
-                    │ (Metadata)   │        │ (Events/State)│
-                    └──────────────┘        └───┬───────────┘
-                                                │
-                                    ┌───────────▼───────────┐
-                                    │ Task DAG & Scheduler  │
-                                    └───────────┬───────────┘
-                                                │ (Dispatches Ready Tasks)
-                                    ┌───────────▼───────────┐
-                                    │ LangGraph Worker Exec │
-                                    └───────────┬───────────┘
-                                                │
-            ┌───────────────────────────────────┼───────────────────────────────────┐
-            ▼                                   ▼                                   ▼
-┌───────────────────────┐           ┌───────────────────────┐           ┌───────────────────────┐
-│   Context Engine      │           │    Agent Runtime      │           │     Model Gateway     │
-│ (Repo, Memory, Task)  │           │  (Declarative Specs)  │           │ (Multi-LLM & Budget)  │
-└───────────┬───────────┘           └───────────┬───────────┘           └───────────────────────┘
-            │                                   │
-            └─────────────────┬─────────────────┘
-                              ▼
-                   ┌────────────────────┐
-                   │ Dynamic Risk Engine│
-                   └──────────┬─────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-     Git Repository     Docker Sandbox       Artifact Store
-     (Working Tree)     (Test Execution)     (Patches & Logs)
-```
-
----
-
-## 3. Core Subsystems Specification
-
-### 3.1 Decoupled State & Artifact Storage Model
-- **`WorkflowState` Schema**:
-  ```python
-  from typing import TypedDict, List, Dict, Any, Optional
-
-  class WorkflowState(TypedDict):
-      workflow_id: str
-      task_id: str
-      project_id: str
-      user_request: str
-      current_node: str
-      dag_state: Dict[str, Any]  # Node statuses: PENDING, READY, RUNNING, BLOCKED, COMPLETED
-      retry_budget_state: Dict[str, Any]  # retry_count, max_retries, budget_consumed_usd, budget_cap_usd
-      approval_state: Dict[str, Any]  # pending_gate_id, status
-      artifact_references: Dict[str, str]  # Handle URIs to external stores: patch_uri, log_uri, test_result_uri
-  ```
-- **Storage Mapping**:
-  - **PostgreSQL**: Task records, project metadata, workflow status, audit trails.
-  - **Object/File Storage (`/artifacts/`)**: Git patch files, build logs, complete test output dumps.
-  - **Git Working Tree**: Target codebase source code, committed branches.
-  - **Vector DB / AST Index**: Workspace code embeddings, symbol graph definitions.
-  - **Redis**: Ephemeral workflow state checkpoints, pub/sub WebSocket channels, event queue.
-
----
-
-### 3.2 First-Class Task DAG & Scheduler Engine
-
-The task workflow is split into two explicit services:
-
-1. **Task Planner (`autoswe.planner`)**:
-   - Analyzes high-level goals and generates a dependency DAG (`TaskDAG`).
-   - Supports dynamic parallel branching (e.g. Backend Task branch and Frontend Task branch executing concurrently).
-
-2. **Task Scheduler (`autoswe.scheduler`)**:
-   - Manages task node state machines (`PENDING` ➔ `READY` ➔ `RUNNING` ➔ `BLOCKED` ➔ `COMPLETED` / `FAILED`).
-   - Monitors node dependencies: when parent tasks complete, dependent tasks automatically shift from `PENDING` to `READY` and dispatch to available LangGraph Workers.
-
----
-
-### 3.3 Dynamic Risk Policy Engine for Tool Gateway
-
-Tool executions are intercepted by `RiskPolicyEngine` before reaching the execution environment:
-
-```
-  Tool Call Request
-        │
-        ▼
-[Risk Policy Engine]
-        │
-        ├── LOW      (e.g., pytest, git diff, npm test, flake8) ──────► Auto-Execute in Sandbox
-        ├── MEDIUM   (e.g., pip install, curl external API)      ──────► Restricted Sandbox Sandbox Exec
-        ├── HIGH     (e.g., git push to remote, branch merge)    ──────► Requires Human UI Approval Gate
-        └── CRITICAL (e.g., terraform apply, production deploy)  ──────► Requires Admin Dual Approval Gate
+                        ┌─────────────────┐
+                        │   Web / CLI / API│
+                        └────────┬────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │  Control Plane  │ (Auth / RBAC / Cancel API)
+                        └────────┬────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │ Task / Workflow │
+                        │    Manager      │
+                        └────────┬────────┘
+                                 ▼
+                    ┌────────────────────────┐
+                    │   Planner + Task DAG   │
+                    └───────────┬────────────┘
+                                ▼
+                    ┌────────────────────────┐
+                    │ Scheduler / Dispatcher │ (Leases, Heartbeats, DLQ,
+                    │                        │  Retries, Idempotency)
+                    └───────────┬────────────┘
+                                ▼
+                    ┌────────────────────────┐
+                    │    LangGraph Worker    │
+                    └───────────┬────────────┘
+                                ▼
+                    ┌────────────────────────┐
+                    │     Agent Runtime      │ (AgentSpec / Lifecycle)
+                    └──────┬───────┬─────────┘
+                           │       │
+                 ┌─────────┘       └─────────┐
+                 ▼                           ▼
+          ┌─────────────┐             ┌─────────────┐
+          │ Context     │             │ Model       │
+          │ Engine      │             │ Gateway     │
+          └─────────────┘             └─────────────┘
+                           │
+                           ▼
+                    ┌────────────────┐
+                    │  Tool Gateway  │ (Idempotency Key Check)
+                    └───────┬────────┘
+                            ▼
+                    ┌────────────────┐
+                    │  Risk Engine   │ (LOW ➔ Auto, MED ➔ Sandbox, HIGH/CRIT ➔ Gate)
+                    └───────┬────────┘
+                            ▼
+          ┌─────────────────┼──────────────────┐
+          ▼                 ▼                  ▼
+       GitHub             Sandbox          Artifact Store
+          │                 │                  │
+          └─────────────────┼──────────────────┘
+                            ▼
+                     CI / Test / Scan
+                            │
+                            ▼
+                      Review / Policy ──► Approval Gate ──► Create PR
 ```
 
 ---
 
-### 3.4 Declarative Agent Runtime & `AgentSpec`
+## 3. Deep-Dive Design: The 4 Core Subsystems
 
-Agents are defined declaratively via `AgentSpec`:
+### 3.1 Subsystem 1: Task DAG & Scheduler Semantics
 
+The **`TaskScheduler`** manages the life cycle of individual tasks in a workflow DAG.
+
+#### State Machine:
+`PENDING` ➔ `READY` ➔ `LEASED (RUNNING)` ➔ `COMPLETED` / `FAILED` / `RECOVERABLE` / `CANCELLED`
+
+#### Scheduler Capabilities:
+- **Dependency Resolution**: Evaluates DAG parent node completion before transitioning child nodes from `PENDING` to `READY`.
+- **Worker Leases & Heartbeats**:
+  - When a LangGraph Worker picks up a task, it acquires a lease (e.g. `ttl=30s`).
+  - Worker sends heartbeats every 5 seconds.
+  - If a worker crashes and lease expires without heartbeat, task shifts to `RECOVERABLE` ➔ `READY` and is re-leased to another worker.
+- **Concurrency & Priority Controls**: Enforces max parallel workers per project and executes highest priority task nodes first.
+- **Dead-Letter Queue (DLQ)**: If a task exceeds `max_retries` (default: 3), it is moved to DLQ with detailed failure metadata for human inspection.
+- **Cancellation Propagation**: When a user cancels a task, Scheduler broadcasts a cancellation token to active worker threads and sends `SIGTERM`/`SIGKILL` to sandboxed container processes.
+
+---
+
+### 3.2 Subsystem 2: Agent Runtime & Context Engineering
+
+#### Declarative `AgentSpec`
 ```python
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
 @dataclass
 class AgentSpec:
-    role: str                       # e.g., "Coder", "Architect", "Reviewer"
+    role: str                       # Architect, Researcher, Coder, Test Generator, Reviewer, Debugger, Final Reviewer
     description: str
     model_policy: Dict[str, Any]     # primary_model, fallback_model, temperature
     tools: List[str]                # allowed tool names
-    permissions: List[str]          # permission boundaries
-    context_policy: Dict[str, Any]   # max_token_limit, include_memory, symbol_depth
-    budget: Dict[str, Any]          # max_cost_usd, max_execution_time_sec
+    permissions: List[str]          # permission limits
+    context_policy: Dict[str, Any]   # token_budget, max_symbol_depth, include_memory
+    budget: Dict[str, Any]          # max_cost_usd, max_time_sec
     termination_policy: Dict[str, Any]
 ```
 
-The **`AgentRuntime`** manages:
-- Context assembly via `ContextEngine`.
-- Agent execution loop with token budget enforcement.
-- Tool authorization checking via `RiskPolicyEngine`.
-- Trace propagation to LangSmith.
-
----
-
-### 3.5 Dedicated Context Engineering Layer
-
-The **`ContextEngine`** controls what enters the agent's LLM context window:
-
+#### 4-Dimensional `ContextEngine`
 ```
                     ContextEngine
                           │
-       ┌──────────────────┼──────────────────┐
-       ▼                  ▼                  ▼
- Repository Context    Memory Context    Task Context
- (AST, Symbols, Files) (Past Decisions)  (Goal, Constraints)
-       │                  │                  │
-       └──────────────────┼──────────────────┘
+    ┌─────────────────────┼─────────────────────┬─────────────────────┐
+    ▼                     ▼                     ▼                     ▼
+Repository Context    Task Context         Memory Context     Execution Context
+(AST, Symbols, Files) (Goal, Criteria)     (Past Decisions)   (Diffs, Stack Traces,
+                                                               Failed Commands)
+    │                     │                     │                     │
+    └─────────────────────┼─────────────────────┴─────────────────────┘
                           ▼
-                   ContextBuilder
+                    ContextBuilder
                           │
-                          ├── Token Window Allocation
-                          ├── Relevance Scoring & Pruning
-                          └── AST Symbol Resolution
+                          ├── Token Window Budget Allocation
+                          ├── Relevance Pruning & Compression
+                          └── Symbol Graph Resolution
                           │
                           ▼
-                Optimized Model Prompt
+               Optimized Agent Prompt
+```
+
+- **Execution Context**: Crucial for the Debugger agent. Injects exact current git diff, failing command line, pytest/jest stack trace, environment configuration, and previous fix attempts.
+
+---
+
+### 3.3 Subsystem 3: Tool Execution Gateway, Risk Engine & Idempotency
+
+#### Idempotency & Exactly-Once Semantics
+Every tool invocation payload includes:
+```json
+{
+  "idempotency_key": "task-102_attempt-1_git_commit_a8f9c",
+  "task_id": "task-102",
+  "execution_id": "exec-4912",
+  "attempt": 1,
+  "tool_name": "git_commit",
+  "arguments": { "message": "feat: add user authentication endpoint" }
+}
+```
+- Tools declare `idempotent: bool`.
+- `ToolGateway` checks PostgreSQL/Redis for `idempotency_key` before execution. If an execution with the same key completed previously, the cached result is returned without re-executing side effects.
+
+#### Risk Engine Policy
+```
+  Tool Call Request
+        │
+        ▼
+ [Risk Policy Engine]
+        │
+        ├── LOW      (e.g., pytest, git diff, npm test, flake8) ──────► Auto-Execute in Sandbox
+        ├── MEDIUM   (e.g., pip install, curl external API)      ──────► Restricted Sandbox Exec
+        ├── HIGH     (e.g., git push to remote, branch merge)    ──────► Requires Human UI Approval Gate
+        └── CRITICAL (e.g., terraform apply, production deploy)  ──────► Requires Admin Dual Approval Gate
 ```
 
 ---
 
-## 4. End-to-End Multi-Agent SDLC Workflow Flow
+### 3.4 Subsystem 4: Durability, Fault Recovery & Storage Separation
 
+#### Strict Storage Responsibilities:
+- **PostgreSQL**: System of record. Holds `projects`, `tasks`, `workflow_runs`, `worker_leases`, `audit_logs`, and `idempotency_records`.
+- **Redis / Redis Streams**: Ephemeral state coordination, worker pub/sub events, WebSocket channels, and cache.
+- **Object / File Storage (`/artifacts/`)**: Storage for git patch files (`.patch`), raw execution log dumps (`.log`), and coverage reports (`.json`).
+- **Vector DB / AST Store**: Codebase embeddings and symbol trees.
+
+#### Task Cancellation Flow:
+```
+User clicks Cancel in UI / CLI
+       │
+       ▼
+POST /api/v1/tasks/{id}/cancel
+       │
+       ▼
+Control Plane updates PostgreSQL state -> CANCELLED
+       │
+       ▼
+Scheduler emits cancellation event over Redis
+       │
+       ▼
+LangGraph Worker receives cancellation token
+       │
+       ▼
+AgentRuntime terminates LLM generation
+       │
+       ▼
+ToolGateway issues SIGKILL to Sandboxed Subprocess/Docker Container
+```
+
+---
+
+## 4. Fixed Set of 7 Agents & SDLC Workflow
+
+### 4.1 Agent Roster
+1. **Architect Agent**: Requirement analysis & Task DAG generation.
+2. **Researcher Agent**: Codebase indexing, AST parsing, RAG retrieval.
+3. **Coder Agent**: Writes code implementations and edits files.
+4. **Test Generator Agent**: Writes pytest/jest unit tests matching Coder changes.
+5. **Reviewer Agent**: Code quality, security, and lint inspection.
+6. **Debugger Agent**: Parses stack traces & formulates targeted fixes during self-healing loops.
+7. **Final Reviewer Agent**: Evaluates completed feature against risk policy and prepares Pull Requests (PR).
+
+### 4.2 End-to-End SDLC Flow
 ```
 User Goal / Issue
        │
        ▼
- [Architect] ──► Generates Task DAG
+ [Architect] ──► Task DAG Generation
        │
        ▼
- [Researcher] ──► ContextEngine Indexes Repo & AST
+ [Researcher] ──► ContextEngine Indexes AST & Symbols
        │
        ▼
  [Task Scheduler] ──► Dispatches Ready Tasks to LangGraph Workers
@@ -202,7 +259,7 @@ User Goal / Issue
        │                                               │
        └───────────────────────┬───────────────────────┘
                                ▼
-                   [Integration Node / Sandbox Execution]
+                   [Integration Node / Sandbox Run]
                                │
                 ┌──────────────┴──────────────┐
                 ▼                             ▼
@@ -212,45 +269,45 @@ User Goal / Issue
                 │                      [Debugger Agent]
                 │                             │
                 │                             ▼ (Loop to Coder if Retries < Max)
-                │                      Self-Healing Feedback
+                │                      Self-Healing Feedback Loop
                 │
                 ▼
         [Final Reviewer Agent]
                 │
                 ▼
-       [PR / Git Branch Merge]
+      [Policy / Risk Engine]
+                │
+       ┌────────┴────────┐
+       ▼                 ▼
+    [LOW Risk]      [HIGH Risk]
+       │                 │
+    Create PR       Approval Gate in UI
 ```
 
 ---
 
-## 5. Control Plane API & Web Dashboard Specification
+## 5. Control Plane API Specification
 
-### 5.1 FastAPI Control Plane (`autoswe.control_plane`)
-- `POST /api/v1/projects`: Register codebase repositories.
-- `POST /api/v1/tasks`: Submit user software engineering requests.
-- `GET /api/v1/tasks/{id}`: Fetch task state, DAG graph status, and artifact handles.
-- `WS /api/v1/tasks/{id}/stream`: WebSocket endpoint for streaming live DAG graph state changes, agent logs, and cost/token metrics.
+- `POST /api/v1/projects`: Register repository project.
+- `POST /api/v1/tasks`: Submit software engineering workflow request.
+- `GET /api/v1/tasks/{id}`: Query task status, DAG state, and artifact handles.
+- `POST /api/v1/tasks/{id}/cancel`: Cancel running task workflow and terminate active sandbox processes.
+- `WS /api/v1/tasks/{id}/stream`: WebSocket channel for live graph state changes, agent logs, and token/cost metrics.
 - `POST /api/v1/approval/{id}`: Approve or reject pending `HIGH`/`CRITICAL` risk tool execution gates.
-
-### 5.2 Single-Page Web Dashboard UI (`frontend/`)
-- **Dynamic Task-DAG View**: Canvas/SVG interactive graph showing task node statuses, execution branches, and active self-healing retries.
-- **Git Patch & Code Inspector**: Visual split diff preview for code generated by Coder & Debugger.
-- **Risk Policy & Approval Gate Modal**: Popup UI for approving sensitive commands with detailed risk score explanations.
-- **Observability Panel**: Live token counter, execution latency charts, cost estimator ($ USD), and LangSmith trace deep-links.
 
 ---
 
-## 6. Verification Plan & Quality Gates
+## 6. Verification & Quality Assurance Plan
 
-1. **Automated Unit Testing**:
-   - Verify `TaskScheduler` DAG node dependency transitions.
-   - Verify `RiskPolicyEngine` risk scoring (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
-   - Verify `ContextBuilder` token pruning and symbol resolution.
-   - Verify `AgentRuntime` execution with budget limit enforcement.
+1. **Unit & Scheduler Tests**:
+   - Test `TaskScheduler` worker lease timeout and heartbeat recovery.
+   - Test `RiskPolicyEngine` risk scoring and `idempotency_key` deduplication.
+   - Test `ContextEngine` multi-dimensional prompt assembly (including `ExecutionContext`).
+   - Test task cancellation signal propagation.
 
-2. **Integration & Sandbox Verification**:
-   - Execute an end-to-end multi-agent feature build task with unit test generation and self-healing error recovery.
-   - Verify artifact storage offloading (patches and test logs saved to `/artifacts/`).
-   - Confirm WebSocket event delivery to the frontend dashboard.
+2. **End-to-End Integration Tests**:
+   - Execute an end-to-end multi-agent feature development task.
+   - Simulate a worker crash during test execution to verify lease recovery.
+   - Verify artifact offloading to file/object storage and LangSmith tracing integration.
 
 ---
