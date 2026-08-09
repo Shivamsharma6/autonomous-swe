@@ -1,7 +1,8 @@
 import os
 import json
 import sqlite3
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 from autoswe.models import TaskStatus, RiskLevel
 
@@ -9,17 +10,53 @@ from autoswe.models import TaskStatus, RiskLevel
 class StorageEngine:
     def __init__(self, db_path: str = "autoswe.db", storage_dir: str = "artifacts"):
         self.db_path = db_path
-        self.storage_dir = storage_dir
-        os.makedirs(self.storage_dir, exist_ok=True)
+        self.storage_dir = os.path.abspath(storage_dir)
+        self.artifact_dir = self.storage_dir
+        os.makedirs(self.artifact_dir, exist_ok=True)
         self._init_db()
+
+    @contextmanager
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
+    def _row_to_task_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        status_str = row["status"]
+        risk_str = row["risk_level"]
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "title": row["title"],
+            "description": row["description"],
+            "status": TaskStatus(status_str) if status_str in TaskStatus._value2member_map_ else status_str,
+            "assigned_agent": row["assigned_agent"],
+            "dependencies": json.loads(row["dependencies"] or "[]"),
+            "risk_level": RiskLevel(risk_str) if risk_str in RiskLevel._value2member_map_ else risk_str,
+            "metadata": json.loads(row["metadata"] or "{}"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _resolve_artifact_path(self, key: str) -> str:
+        resolved_path = os.path.abspath(os.path.join(self.artifact_dir, key))
+        base_dir = self.artifact_dir
+        if os.path.commonpath([base_dir, resolved_path]) != base_dir:
+            raise ValueError(f"Path traversal detected for key: {key}")
+        return resolved_path
+
     def _init_db(self) -> None:
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -81,8 +118,8 @@ class StorageEngine:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         meta_dict = metadata or {}
-        created_at = datetime.utcnow().isoformat()
-        with self._get_connection() as conn:
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -117,9 +154,9 @@ class StorageEngine:
         risk_str = risk_level.value if isinstance(risk_level, RiskLevel) else str(risk_level)
         deps_list = dependencies or []
         meta_dict = metadata or {}
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -160,7 +197,7 @@ class StorageEngine:
         }
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
@@ -168,22 +205,7 @@ class StorageEngine:
         if row is None:
             return None
 
-        status_str = row["status"]
-        risk_str = row["risk_level"]
-
-        return {
-            "id": row["id"],
-            "project_id": row["project_id"],
-            "title": row["title"],
-            "description": row["description"],
-            "status": TaskStatus(status_str) if status_str in TaskStatus._value2member_map_ else status_str,
-            "assigned_agent": row["assigned_agent"],
-            "dependencies": json.loads(row["dependencies"] or "[]"),
-            "risk_level": RiskLevel(risk_str) if risk_str in RiskLevel._value2member_map_ else risk_str,
-            "metadata": json.loads(row["metadata"] or "{}"),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+        return self._row_to_task_dict(row)
 
     def update_task_state(
         self,
@@ -191,19 +213,20 @@ class StorageEngine:
         status: Union[str, TaskStatus],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        current_task = self.get_task(task_id)
-        if current_task is None:
-            return None
-
         status_str = status.value if isinstance(status, TaskStatus) else str(status)
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
-        updated_meta = current_task["metadata"]
-        if metadata:
-            updated_meta.update(metadata)
-
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            updated_meta = json.loads(row["metadata"] or "{}")
+            if metadata:
+                updated_meta.update(metadata)
+
             cursor.execute(
                 """
                 UPDATE tasks
@@ -214,10 +237,16 @@ class StorageEngine:
             )
             conn.commit()
 
-        return self.get_task(task_id)
+            cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            updated_row = cursor.fetchone()
+
+        if updated_row is None:
+            return None
+
+        return self._row_to_task_dict(updated_row)
 
     def save_artifact(self, key: str, content: Union[str, bytes]) -> str:
-        filepath = os.path.join(self.storage_dir, key)
+        filepath = self._resolve_artifact_path(key)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         if isinstance(content, bytes):
@@ -230,21 +259,24 @@ class StorageEngine:
         return filepath
 
     def read_artifact(self, key: str, is_binary: bool = False) -> Union[str, bytes]:
-        filepath = os.path.join(self.storage_dir, key)
-        if is_binary:
-            with open(filepath, "rb") as f:
-                return f.read()
-        else:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return f.read()
+        filepath = self._resolve_artifact_path(key)
+        try:
+            if is_binary:
+                with open(filepath, "rb") as f:
+                    return f.read()
+            else:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return f.read()
+        except FileNotFoundError:
+            raise ValueError(f"Artifact not found: {key}")
 
     def save_idempotency_record(
         self, key: str, result: Any, status: str = "completed"
     ) -> Dict[str, Any]:
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         result_json = json.dumps(result)
 
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -263,7 +295,7 @@ class StorageEngine:
         }
 
     def get_idempotency_record(self, key: str) -> Optional[Dict[str, Any]]:
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM idempotency_records WHERE key = ?", (key,))
             row = cursor.fetchone()
@@ -282,9 +314,9 @@ class StorageEngine:
         self, event_type: str, actor: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         payload_dict = payload or {}
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
 
-        with self._get_connection() as conn:
+        with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """

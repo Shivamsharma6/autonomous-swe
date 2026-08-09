@@ -1,5 +1,6 @@
 import pytest
 import os
+import sqlite3
 import tempfile
 from autoswe.storage import StorageEngine
 from autoswe.models import TaskStatus, RiskLevel
@@ -117,3 +118,39 @@ def test_log_audit_event(temp_storage):
     assert event["actor"] == "system"
     assert event["payload"] == {"task_id": "task-101"}
     assert "timestamp" in event
+
+
+def test_path_traversal_defense(temp_storage):
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        temp_storage.save_artifact("../outside.txt", "data")
+
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        temp_storage.read_artifact("../outside.txt")
+
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        temp_storage.save_artifact("/etc/passwd", "data")
+
+
+def test_read_missing_artifact(temp_storage):
+    with pytest.raises(ValueError, match="Artifact not found"):
+        temp_storage.read_artifact("non_existent_artifact.txt")
+
+
+def test_connection_cleanup_and_foreign_keys(temp_storage):
+    # Test foreign keys enforcement: creating task with non-existent project_id fails
+    with pytest.raises(sqlite3.IntegrityError):
+        temp_storage.create_task(
+            task_id="task-fk-test",
+            project_id="non-existent-proj",
+            title="FK Test",
+        )
+
+    # Test explicit connection closing in _get_conn
+    conn_instances = []
+    with temp_storage._get_conn() as conn:
+        conn_instances.append(conn)
+
+    assert len(conn_instances) == 1
+    closed_conn = conn_instances[0]
+    with pytest.raises(sqlite3.ProgrammingError):
+        closed_conn.execute("SELECT 1")
