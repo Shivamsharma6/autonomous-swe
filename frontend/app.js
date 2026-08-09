@@ -558,60 +558,62 @@ document.addEventListener('DOMContentLoaded', () => {
             () => {
                 state.dagNodes[0].status = 'RUNNING';
                 renderDAG();
-                appendTraceLog('THOUGHT', 'Analyzing user requirements: Single-page dashboard with glassmorphism UI & live WebSocket stream client.');
+                appendTraceLog('THOUGHT', 'Architect Agent: Analyzing user request: "Design a Video Game Database CRUD Backend & Frontend App using Postgres/SQLite and FastAPI".');
             },
             () => {
-                state.metrics.tokensPrompt += 850;
-                state.metrics.tokensCompletion += 420;
+                state.metrics.tokensPrompt += 1150;
+                state.metrics.tokensCompletion += 520;
                 state.dagNodes[0].status = 'COMPLETED';
                 state.dagNodes[1].status = 'RUNNING';
                 state.metrics.completedSteps = 1;
                 updateMetricsUI();
                 renderDAG();
-                appendTraceLog('TOOL', 'Executing ripgrep search in workspace to locate existing API models & endpoints.', { query: '/api/v1/tasks/{id}/stream', path: 'autoswe/' });
+                appendTraceLog('TOOL', 'Researcher Agent: Indexing schema requirements for video games table: (id, title, genre, platform, rating, release_year, status, cover_url).', { database: 'games.db' });
             },
             () => {
-                state.metrics.tokensPrompt += 1400;
-                state.metrics.tokensCompletion += 610;
+                state.metrics.tokensPrompt += 1800;
+                state.metrics.tokensCompletion += 840;
                 state.dagNodes[1].status = 'COMPLETED';
                 state.dagNodes[2].status = 'RUNNING';
                 state.metrics.completedSteps = 2;
                 updateMetricsUI();
                 renderDAG();
-                appendTraceLog('THOUGHT', 'Inspected control_plane.py. WebSocket route /api/v1/tasks/{task_id}/stream discovered.');
+                
+                updateCodeDiff('games_demo/app.py', [
+                    { type: 'info', text: '@@ -0,0 +1,45 @@' },
+                    { type: 'add', text: '+from fastapi import FastAPI, HTTPException' },
+                    { type: 'add', text: '+import sqlite3, time' },
+                    { type: 'add', text: '+app = FastAPI(title="Video Game Database CRUD API")' },
+                    { type: 'add', text: '+@app.get("/api/games")' },
+                    { type: 'add', text: '+def list_games(): return get_db_games()' },
+                    { type: 'add', text: '+@app.post("/api/games", status_code=201)' },
+                    { type: 'add', text: '+def create_game(game: GameCreateReq): insert_game(game)' },
+                    { type: 'add', text: '+@app.put("/api/games/{id}")' },
+                    { type: 'add', text: '+def update_game(id: int, game: GameUpdateReq): update_game_by_id(id, game)' },
+                    { type: 'add', text: '+@app.delete("/api/games/{id}")' },
+                    { type: 'add', text: '+def delete_game(id: int): delete_game_by_id(id)' }
+                ]);
+                appendTraceLog('CODE', 'Coder Agent: Implemented FastAPI Video Game Database CRUD backend in games_demo/app.py.');
             },
             () => {
+                state.metrics.tokensPrompt += 2400;
+                state.metrics.tokensCompletion += 1100;
                 state.dagNodes[2].status = 'COMPLETED';
                 state.dagNodes[3].status = 'RUNNING';
                 state.metrics.completedSteps = 3;
                 updateMetricsUI();
                 renderDAG();
                 
-                updateCodeDiff('frontend/index.html', [
-                    { type: 'info', text: '@@ -1,10 +1,15 @@' },
-                    { type: 'add', text: '+<!DOCTYPE html>' },
-                    { type: 'add', text: '+<html lang="en">' },
-                    { type: 'add', text: '+<head>' },
-                    { type: 'add', text: '+    <title>Autonomous SWE Platform</title>' },
-                    { type: 'add', text: '+    <link rel="stylesheet" href="styles.css">' },
-                    { type: 'add', text: '+</head>' }
+                updateCodeDiff('games_demo/static/index.html', [
+                    { type: 'info', text: '@@ -1,15 +1,30 @@' },
+                    { type: 'add', text: '+<div class="app-layout">' },
+                    { type: 'add', text: '+  <header class="navbar glass-card"><h1>NEXUS VAULT</h1></header>' },
+                    { type: 'add', text: '+  <section class="stats-grid"><div class="stat-card">Total Games</div></section>' },
+                    { type: 'add', text: '+  <main class="games-grid" id="gamesGrid"></main>' },
+                    { type: 'add', text: '+  <div class="modal-backdrop" id="gameModal"><form id="gameForm">...</form></div>' },
+                    { type: 'add', text: '+</div>' }
                 ]);
-                appendTraceLog('CODE', 'Created frontend/index.html dashboard structure with Header, Metrics, DAG & Event Stream.');
-            },
-            () => {
-                state.metrics.tokensPrompt += 2100;
-                state.metrics.tokensCompletion += 950;
-                updateMetricsUI();
-                appendTraceLog('TOOL', 'Writing frontend/styles.css with dark glassmorphism theme tokens and grid layout.');
-                updateCodeDiff('frontend/styles.css', [
-                    { type: 'info', text: '@@ -0,0 +1,18 @@' },
-                    { type: 'add', text: '+:root {' },
-                    { type: 'add', text: '+    --bg-main: #070a11;' },
-                    { type: 'add', text: '+    --glass-bg: rgba(15, 21, 33, 0.65);' },
-                    { type: 'add', text: '+    --primary-cyan: #00f2fe;' },
-                    { type: 'add', text: '+}' },
-                    { type: 'add', text: '+.glass-card { backdrop-filter: blur(16px); }' }
-                ]);
+                appendTraceLog('CODE', 'Coder Agent: Built Video Game Vault UI frontend in games_demo/static/index.html & app.js.');
             },
             () => {
                 state.dagNodes[3].status = 'COMPLETED';
@@ -619,20 +621,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.metrics.completedSteps = 4;
                 updateMetricsUI();
                 renderDAG();
-                appendTraceLog('TEST', 'Executing automated verification: verifying static files exist and serve cleanly.', { command: 'ls -la frontend/' });
+                appendTraceLog('TEST', 'Tester Agent: Running automated verification: pytest tests/test_games_demo.py', { result: '4/4 tests passed (100% pass rate)' });
             },
             () => {
-                state.metrics.tokensPrompt += 1200;
-                state.metrics.tokensCompletion += 880;
+                state.metrics.tokensPrompt += 1500;
+                state.metrics.tokensCompletion += 920;
                 state.dagNodes[4].status = 'COMPLETED';
                 state.metrics.completedSteps = 5;
                 state.metrics.status = 'COMPLETED';
                 updateMetricsUI();
                 renderDAG();
-                appendTraceLog('SYSTEM', 'Task 10 execution completed successfully! All files created & verified.');
+                appendTraceLog('SYSTEM', 'Final Reviewer Agent: Video Game Database CRUD application built, tested, and live at http://127.0.0.1:5000!');
                 stopDemoStream();
             }
         ];
+
 
         let stepIndex = 0;
         state.demoInterval = setInterval(() => {
