@@ -7,3 +7,6 @@ __pycache__/
 htmlcov/
 dist/
 build/
+*.db
+.superpowers/
+
