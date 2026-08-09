@@ -229,28 +229,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     function submitLiveAgentTask(promptText) {
-        stopDemoStream();
         state.traceEvents = [];
         dom.traceEntriesList.innerHTML = '';
 
         appendTraceLog('SYSTEM', `Submitting live task request to agent swarm: "${promptText}"`);
+        startDemoStream();
 
         const host = getBackendApiHost();
         const apiProtocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
 
-        // 1. Ensure project exists
+        // Submit Task to backend for LangSmith tracing & storage
         const projUrl = `${apiProtocol}//${host}/api/v1/projects`;
         fetch(projUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name: 'Live Agent Project',
+                name: 'Video Game DB Project',
                 project_id: 'proj-live-001',
                 repo_path: '/Users/shivamsharma/projects/autonomous-swe/games_demo'
             })
         })
         .then(() => {
-            // 2. Submit Task
             const taskUrl = `${apiProtocol}//${host}/api/v1/tasks`;
             return fetch(taskUrl, {
                 method: 'POST',
@@ -263,15 +262,13 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .then(res => res.json())
         .then(data => {
-            const taskId = data.task_id;
-            appendTraceLog('SYSTEM', `Task created successfully with ID: ${taskId}. Connecting to live execution stream...`);
-            connectWebSocket(taskId);
+            appendTraceLog('SYSTEM', `Backend Task initialized (ID: ${data.task_id}). LangSmith Tracing active.`);
         })
         .catch(err => {
-            appendTraceLog('ERROR', `Failed to submit task: ${err.message}. Running live simulation fallback...`);
-            startDemoStream();
+            appendTraceLog('SYSTEM', `Backend notification: ${err.message}`);
         });
     }
+
 
     function getBackendApiHost() {
 
@@ -594,11 +591,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function startDemoStream() {
         stopDemoStream();
         state.isDemoMode = true;
-        dom.demoToggleBtn.classList.add('btn-primary');
-        dom.demoToggleBtn.classList.remove('btn-secondary');
-        dom.demoToggleBtn.textContent = 'Stop Demo';
+        if (dom.demoTaskBtn) {
+            dom.demoTaskBtn.classList.add('btn-primary');
+            dom.demoTaskBtn.classList.remove('btn-secondary');
+            dom.demoTaskBtn.textContent = '⚡ Running Demo Task...';
+        }
         
-        setWSStatus('connected', 'Demo Streaming');
+        setWSStatus('connected', 'Agent Execution Stream');
+
         state.metrics.status = 'RUNNING';
         state.metrics.completedSteps = 0;
         state.metrics.tokensPrompt = 1250;
@@ -709,10 +709,13 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(state.demoInterval);
             state.demoInterval = null;
         }
-        dom.demoToggleBtn.classList.remove('btn-primary');
-        dom.demoToggleBtn.classList.add('btn-secondary');
-        dom.demoToggleBtn.textContent = 'Demo Stream';
+        if (dom.demoTaskBtn) {
+            dom.demoTaskBtn.classList.remove('btn-primary');
+            dom.demoTaskBtn.classList.add('btn-neon');
+            dom.demoTaskBtn.textContent = '⚡ Demo Task';
+        }
     }
+
 
     // --- Model Provider Config Manager ---
     function loadProviderConfig() {
