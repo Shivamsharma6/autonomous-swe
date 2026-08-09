@@ -1,3 +1,4 @@
+import threading
 import time
 from typing import Any, Dict, List, Optional
 from autoswe.models import TaskNode, TaskStatus
@@ -45,74 +46,83 @@ class TaskScheduler:
         self.tasks: Dict[str, TaskNode] = {}
         self.leases: Dict[str, Dict[str, Any]] = {}
         self.lease_ttl_sec = lease_ttl_sec
+        self._lock = threading.Lock()
 
     def register_task(self, node: TaskNode) -> None:
-        if not node.dependencies:
-            node.status = TaskStatus.READY
-        else:
-            deps_met = all(
-                dep_id in self.tasks and self.tasks[dep_id].status == TaskStatus.COMPLETED
-                for dep_id in node.dependencies
-            )
-            node.status = TaskStatus.READY if deps_met else TaskStatus.PENDING
-        self.tasks[node.id] = node
-
-    def get_ready_tasks(self) -> List[TaskNode]:
-        ready = []
-        for task_id, task in self.tasks.items():
-            if task.status == TaskStatus.PENDING:
+        with self._lock:
+            if not node.dependencies:
+                node.status = TaskStatus.READY
+            else:
                 deps_met = all(
                     dep_id in self.tasks and self.tasks[dep_id].status == TaskStatus.COMPLETED
-                    for dep_id in task.dependencies
+                    for dep_id in node.dependencies
                 )
-                if deps_met:
-                    task.status = TaskStatus.READY
-            if task.status == TaskStatus.READY:
-                ready.append(task)
-        return ready
+                node.status = TaskStatus.READY if deps_met else TaskStatus.PENDING
+            self.tasks[node.id] = node
+
+    def get_ready_tasks(self) -> List[TaskNode]:
+        with self._lock:
+            ready = []
+            for task_id, task in self.tasks.items():
+                if task.status == TaskStatus.PENDING:
+                    deps_met = all(
+                        dep_id in self.tasks and self.tasks[dep_id].status == TaskStatus.COMPLETED
+                        for dep_id in task.dependencies
+                    )
+                    if deps_met:
+                        task.status = TaskStatus.READY
+                if task.status == TaskStatus.READY:
+                    ready.append(task)
+            return ready
 
     def lease_task(self, task_id: str, worker_id: str) -> Optional[TaskNode]:
-        task = self.tasks.get(task_id)
-        if not task or task.status != TaskStatus.READY:
-            return None
-        task.status = TaskStatus.LEASED
-        self.leases[task_id] = {
-            "worker_id": worker_id,
-            "last_heartbeat": time.time(),
-        }
-        return task
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if not task or task.status != TaskStatus.READY:
+                return None
+            task.status = TaskStatus.LEASED
+            self.leases[task_id] = {
+                "worker_id": worker_id,
+                "last_heartbeat": time.time(),
+            }
+            return task
 
     def send_heartbeat(self, task_id: str, worker_id: str) -> bool:
-        task = self.tasks.get(task_id)
-        if not task or task.status not in (TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.IN_PROGRESS):
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if not task or task.status not in (TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.IN_PROGRESS):
+                return False
+            lease = self.leases.get(task_id)
+            if lease and lease["worker_id"] == worker_id:
+                lease["last_heartbeat"] = time.time()
+                return True
             return False
-        lease = self.leases.get(task_id)
-        if lease and lease["worker_id"] == worker_id:
-            lease["last_heartbeat"] = time.time()
-            return True
-        return False
 
     def reclaim_expired_leases(self) -> None:
-        now = time.time()
-        for task_id, lease in list(self.leases.items()):
-            if now - lease["last_heartbeat"] > self.lease_ttl_sec:
-                task = self.tasks.get(task_id)
-                if task and task.status in (TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.IN_PROGRESS):
-                    task.status = TaskStatus.READY
-                self.leases.pop(task_id, None)
+        with self._lock:
+            now = time.time()
+            for task_id, lease in list(self.leases.items()):
+                if now - lease["last_heartbeat"] > self.lease_ttl_sec:
+                    task = self.tasks.get(task_id)
+                    if task and task.status in (TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.IN_PROGRESS):
+                        task.status = TaskStatus.READY
+                    self.leases.pop(task_id, None)
 
     def complete_task(self, task_id: str) -> None:
-        task = self.tasks.get(task_id)
-        if task:
-            task.status = TaskStatus.COMPLETED
-            self.leases.pop(task_id, None)
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if task:
+                task.status = TaskStatus.COMPLETED
+                self.leases.pop(task_id, None)
 
     def cancel_task(self, task_id: str) -> None:
-        task = self.tasks.get(task_id)
-        if task:
-            task.status = TaskStatus.CANCELLED
-            self.leases.pop(task_id, None)
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if task:
+                task.status = TaskStatus.CANCELLED
+                self.leases.pop(task_id, None)
 
     def get_task_status(self, task_id: str) -> Optional[TaskStatus]:
-        task = self.tasks.get(task_id)
-        return task.status if task else None
+        with self._lock:
+            task = self.tasks.get(task_id)
+            return task.status if task else None

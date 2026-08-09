@@ -1,3 +1,4 @@
+import threading
 import time
 import pytest
 from autoswe.models import TaskNode, TaskStatus
@@ -122,3 +123,35 @@ def test_task_scheduler_cancellation():
     
     # Heartbeat on cancelled task should fail
     assert scheduler.send_heartbeat("t1", worker_id="worker-A") is False
+
+
+def test_task_scheduler_concurrent_leasing():
+    scheduler = TaskScheduler()
+    t1 = TaskNode(id="t1", title="Concurrent Task", assigned_agent="Coder")
+    scheduler.register_task(t1)
+    
+    ready = scheduler.get_ready_tasks()
+    assert len(ready) == 1
+    
+    num_threads = 10
+    barrier = threading.Barrier(num_threads)
+    results = []
+    
+    def worker(worker_idx: int):
+        barrier.wait()
+        res = scheduler.lease_task("t1", worker_id=f"worker-{worker_idx}")
+        results.append(res)
+        
+    threads = []
+    for i in range(num_threads):
+        t = threading.Thread(target=worker, args=(i,))
+        threads.append(t)
+        t.start()
+        
+    for t in threads:
+        t.join()
+        
+    successful_leases = [r for r in results if r is not None]
+    assert len(successful_leases) == 1
+    assert scheduler.get_task_status("t1") == TaskStatus.LEASED
+
