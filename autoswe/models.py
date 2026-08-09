@@ -13,6 +13,9 @@ class RiskLevel(str, Enum):
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
+    READY = "ready"
+    LEASED = "leased"
+    RUNNING = "running"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -54,13 +57,20 @@ class IdempotencyRecord(BaseModel):
 
 class TaskNode(BaseModel):
     id: str
-    title: str
+    title: str = ""
+    name: str = ""
     description: str = ""
     assigned_agent: Optional[str] = None
     status: TaskStatus = TaskStatus.PENDING
     dependencies: List[str] = Field(default_factory=list)
     risk_level: RiskLevel = RiskLevel.LOW
     tool_calls: List[ToolCallRequest] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.title and self.name:
+            self.title = self.name
+        elif not self.name and self.title:
+            self.name = self.title
 
 
 class WorkflowState(BaseModel):
