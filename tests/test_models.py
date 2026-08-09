@@ -9,7 +9,9 @@ from autoswe.models import (
     IdempotencyRecord,
     TaskNode,
     WorkflowState,
+    ModelProviderConfig,
 )
+
 
 
 def test_risk_level_enum():
@@ -117,3 +119,18 @@ def test_workflow_state_model():
     assert state.task_nodes["task-1"].title == "Setup project"
     assert "op-1" in state.idempotency_records
     assert state.metadata == {}
+
+
+def test_model_provider_config():
+    config = ModelProviderConfig(
+        provider="custom",
+        model_name="qwen2.5-coder",
+        base_url="http://localhost:8080/v1",
+        api_key="",
+        temperature=0.2,
+    )
+    assert config.provider == "custom"
+    assert config.model_name == "qwen2.5-coder"
+    assert config.base_url == "http://localhost:8080/v1"
+    assert config.api_key == ""
+

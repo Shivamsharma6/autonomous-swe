@@ -98,7 +98,19 @@ document.addEventListener('DOMContentLoaded', () => {
         clearLogsBtn: document.getElementById('clearLogsBtn'),
         autoScrollToggle: document.getElementById('autoScrollToggle'),
         traceSearchInput: document.getElementById('traceSearchInput'),
-        traceFilterType: document.getElementById('traceFilterType')
+        traceFilterType: document.getElementById('traceFilterType'),
+
+        // Model Provider Config Modal
+        providerConfigBtn: document.getElementById('providerConfigBtn'),
+        providerModal: document.getElementById('providerModal'),
+        closeModalBtn: document.getElementById('closeModalBtn'),
+        providerSelect: document.getElementById('providerSelect'),
+        baseUrlInput: document.getElementById('baseUrlInput'),
+        apiKeyInput: document.getElementById('apiKeyInput'),
+        modelNameInput: document.getElementById('modelNameInput'),
+        tempInput: document.getElementById('tempInput'),
+        tempValue: document.getElementById('tempValue'),
+        saveProviderBtn: document.getElementById('saveProviderBtn')
     };
 
     // --- Core Initialization ---
@@ -109,10 +121,12 @@ document.addEventListener('DOMContentLoaded', () => {
         renderDAG();
         renderDiffTabs();
         renderDiffContent();
+        loadProviderConfig();
         
         // Auto connect or set initial status
         setWSStatus('disconnected', 'Disconnected');
     }
+
 
     function bindEvents() {
         dom.connectBtn.addEventListener('click', () => {
@@ -154,7 +168,48 @@ document.addEventListener('DOMContentLoaded', () => {
             state.filterType = e.target.value;
             filterTraceEntries();
         });
+
+        // Provider Modal Events
+        dom.providerConfigBtn.addEventListener('click', () => {
+            dom.providerModal.classList.remove('hidden');
+        });
+
+        dom.closeModalBtn.addEventListener('click', () => {
+            dom.providerModal.classList.add('hidden');
+        });
+
+        dom.providerSelect.addEventListener('change', (e) => {
+            const provider = e.target.value;
+            if (provider === 'ollama') {
+                dom.baseUrlInput.value = 'http://localhost:11434/v1';
+                dom.modelNameInput.value = 'qwen2.5-coder';
+                dom.apiKeyInput.value = '';
+            } else if (provider === 'unsloth') {
+                dom.baseUrlInput.value = 'http://localhost:8080/v1';
+                dom.modelNameInput.value = 'unsloth-deepseek-r1';
+                dom.apiKeyInput.value = '';
+            } else if (provider === 'custom') {
+                if (!dom.baseUrlInput.value) {
+                    dom.baseUrlInput.value = 'http://localhost:8080/v1';
+                }
+                dom.apiKeyInput.value = '';
+            } else {
+                dom.baseUrlInput.value = '';
+                if (provider === 'gemini') dom.modelNameInput.value = 'gemini-3.6-flash';
+                if (provider === 'openai') dom.modelNameInput.value = 'gpt-4o';
+                if (provider === 'anthropic') dom.modelNameInput.value = 'claude-3-5-sonnet';
+            }
+        });
+
+        dom.tempInput.addEventListener('input', (e) => {
+            dom.tempValue.textContent = e.target.value;
+        });
+
+        dom.saveProviderBtn.addEventListener('click', () => {
+            saveProviderConfig();
+        });
     }
+
 
     // --- WebSocket Stream Client ---
     function connectWebSocket(taskId) {
@@ -588,6 +643,54 @@ document.addEventListener('DOMContentLoaded', () => {
         dom.demoToggleBtn.textContent = 'Demo Stream';
     }
 
+    // --- Model Provider Config Manager ---
+    function loadProviderConfig() {
+        const saved = localStorage.getItem('autoswe_provider_config');
+        if (saved) {
+            try {
+                const config = JSON.parse(saved);
+                dom.providerSelect.value = config.provider || 'gemini';
+                dom.baseUrlInput.value = config.base_url || '';
+                dom.apiKeyInput.value = config.api_key || '';
+                dom.modelNameInput.value = config.model_name || 'gemini-3.6-flash';
+                dom.tempInput.value = config.temperature || 0.2;
+                dom.tempValue.textContent = config.temperature || 0.2;
+            } catch (e) {}
+        }
+    }
+
+    function saveProviderConfig() {
+        const config = {
+            provider: dom.providerSelect.value,
+            base_url: dom.baseUrlInput.value.trim(),
+            api_key: dom.apiKeyInput.value.trim(),
+            model_name: dom.modelNameInput.value.trim() || 'gemini-3.6-flash',
+            temperature: parseFloat(dom.tempInput.value)
+        };
+
+        localStorage.setItem('autoswe_provider_config', JSON.stringify(config));
+
+        // POST to backend API
+        let host = window.location.host;
+        if (!host || window.location.protocol === 'file:') host = '127.0.0.1:8000';
+        const apiUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config`;
+
+        fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        })
+        .then(res => res.json())
+        .then(data => {
+            appendTraceLog('SYSTEM', `Model Provider updated to: ${config.provider.toUpperCase()} (Model: ${config.model_name}, URL: "${config.base_url || 'Cloud Default'}")`);
+            dom.providerModal.classList.add('hidden');
+        })
+        .catch(err => {
+            appendTraceLog('SYSTEM', `Saved local provider config: ${config.provider.toUpperCase()} (${config.model_name})`);
+            dom.providerModal.classList.add('hidden');
+        });
+    }
+
     // --- Helpers ---
     function escapeHtml(str) {
         return String(str || '')
@@ -598,3 +701,4 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/'/g, '&#039;');
     }
 });
+

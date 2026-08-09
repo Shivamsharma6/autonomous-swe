@@ -23,14 +23,24 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ModelProviderConfig(BaseModel):
+    provider: str = "gemini"  # gemini, openai, anthropic, ollama, custom
+    model_name: str = "gemini-3.6-flash"
+    base_url: str = ""        # e.g., "http://localhost:11434/v1" or "http://localhost:8080/v1"
+    api_key: str = ""         # default blank
+    temperature: float = 0.2
+
+
 class AgentSpec(BaseModel):
     name: str
     role: str
     description: str = ""
     system_prompt: str = ""
     tools: List[str] = Field(default_factory=list)
-    model: str = "gpt-4o"
+    model: str = "gemini-3.6-flash"
+    provider_config: Optional[ModelProviderConfig] = None
     risk_level: RiskLevel = RiskLevel.LOW
+
 
 
 class ToolCallRequest(BaseModel):

@@ -49,6 +49,13 @@
                         </svg>
                         Stream
                     </button>
+                    <button id="providerConfigBtn" class="btn btn-secondary" title="Configure LLM & Local Model Endpoint">
+                        <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                        Model Settings
+                    </button>
                     <button id="demoToggleBtn" class="btn btn-secondary" title="Run synthetic event stream demonstration">
                         <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polygon points="5 3 19 12 5 21 5 3"/>
@@ -58,6 +65,7 @@
                 </div>
             </div>
         </header>
+
 
         <!-- Execution Metrics Cards Grid -->
         <section class="metrics-grid" aria-label="Execution Metrics">
@@ -265,7 +273,62 @@
         </main>
     </div>
 
+    <!-- Model Provider Config Modal -->
+    <div class="modal-backdrop hidden" id="providerModal">
+        <div class="modal-card glass-card">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                        <line x1="8" y1="21" x2="16" y2="21"></line>
+                        <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                    <h3>LLM Model & Local Provider Settings</h3>
+                </div>
+                <button class="icon-btn" id="closeModalBtn" title="Close Settings">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="providerSelect">Provider Type</label>
+                    <select id="providerSelect" class="form-control">
+                        <option value="gemini">Google Gemini (Default Cloud)</option>
+                        <option value="openai">OpenAI (GPT-4o / Cloud API)</option>
+                        <option value="anthropic">Anthropic (Claude-3.5 / Cloud API)</option>
+                        <option value="ollama">Ollama (Local Model Server)</option>
+                        <option value="unsloth">Unsloth Studio / Omlx (Local Model Server)</option>
+                        <option value="custom">Custom Local / Remote OpenAI-Compatible Endpoint</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="baseUrlInput">Custom Base URL (Blank by default for Cloud; fill for Local Servers)</label>
+                    <input type="text" id="baseUrlInput" class="form-control font-mono" placeholder="e.g. http://localhost:11434/v1 or http://localhost:8080/v1">
+                    <span class="form-hint">Connect local models running via Ollama, Omlx, Unsloth Studio, LM Studio, vLLM, etc.</span>
+                </div>
+
+                <div class="form-group">
+                    <label for="apiKeyInput">API Key (Blank by default for Local Models)</label>
+                    <input type="password" id="apiKeyInput" class="form-control font-mono" placeholder="Optional API Key">
+                </div>
+
+                <div class="form-group">
+                    <label for="modelNameInput">Model ID / Name</label>
+                    <input type="text" id="modelNameInput" class="form-control font-mono" value="gemini-3.6-flash" placeholder="e.g. qwen2.5-coder, llama3.2, deepseek-r1">
+                </div>
+
+                <div class="form-group">
+                    <label for="tempInput">Temperature: <span id="tempValue">0.2</span></label>
+                    <input type="range" id="tempInput" min="0" max="1" step="0.05" value="0.2" class="form-range">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveProviderBtn" class="btn btn-primary">Save Provider Config</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="app.js"></script>
 </body>
 </html>
+

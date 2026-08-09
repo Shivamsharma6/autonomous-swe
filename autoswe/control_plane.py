@@ -5,13 +5,21 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from autoswe.models import TaskNode, TaskStatus
+from autoswe.models import TaskNode, TaskStatus, ModelProviderConfig
 from autoswe.scheduler import TaskScheduler
 from autoswe.storage import StorageEngine
 
 app = FastAPI(title="Autonomous Software Engineering Control Plane API")
 storage = StorageEngine()
 scheduler = TaskScheduler()
+
+active_provider_config = ModelProviderConfig(
+    provider="gemini",
+    model_name="gemini-3.6-flash",
+    base_url="",
+    api_key="",
+    temperature=0.2,
+)
 
 
 class ConnectionManager:
@@ -49,11 +57,25 @@ class TaskCreateReq(BaseModel):
     user_request: str
     description: str = ""
     task_id: Optional[str] = None
+    model_provider: Optional[ModelProviderConfig] = None
 
 
 @app.get("/api/v1/health")
 def health_check() -> Dict[str, Any]:
     return {"status": "ok", "timestamp": time.time()}
+
+
+@app.get("/api/v1/provider-config")
+def get_provider_config() -> Dict[str, Any]:
+    return active_provider_config.model_dump()
+
+
+@app.post("/api/v1/provider-config")
+def update_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
+    global active_provider_config
+    active_provider_config = config
+    return {"status": "updated", "config": active_provider_config.model_dump()}
+
 
 
 @app.post("/api/v1/projects")

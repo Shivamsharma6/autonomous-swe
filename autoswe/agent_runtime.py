@@ -1,5 +1,5 @@
 from typing import Dict, Optional, Any
-from autoswe.models import AgentSpec, RiskLevel
+from autoswe.models import AgentSpec, RiskLevel, ModelProviderConfig
 
 
 def get_default_agent_specs() -> Dict[str, AgentSpec]:
@@ -67,6 +67,48 @@ class AgentRuntime:
     def __init__(self, spec: AgentSpec):
         self.spec = spec
 
+    def get_effective_provider_config(
+        self, provider_config: Optional[ModelProviderConfig] = None
+    ) -> ModelProviderConfig:
+        if provider_config:
+            return provider_config
+        if self.spec.provider_config:
+            return self.spec.provider_config
+        return ModelProviderConfig(
+            provider="gemini",
+            model_name=self.spec.model or "gemini-3.6-flash",
+            base_url="",
+            api_key="",
+            temperature=0.2,
+        )
+
+    def invoke_model(
+        self,
+        task_goal: str,
+        assembled_context: str = "",
+        provider_config: Optional[ModelProviderConfig] = None,
+    ) -> Dict[str, Any]:
+        config = self.get_effective_provider_config(provider_config)
+        prompt = self.build_agent_prompt(task_goal, assembled_context)
+
+        resolved_base_url = config.base_url
+        if not resolved_base_url:
+            if config.provider == "ollama":
+                resolved_base_url = "http://localhost:11434/v1"
+            elif config.provider in ("custom", "local", "unsloth", "omlx"):
+                resolved_base_url = "http://localhost:8080/v1"
+            else:
+                resolved_base_url = ""
+
+        return {
+            "provider": config.provider,
+            "model_name": config.model_name,
+            "base_url": resolved_base_url,
+            "api_key_configured": bool(config.api_key),
+            "prompt": prompt,
+            "status": "ready",
+        }
+
     def build_agent_prompt(self, task_goal: str, assembled_context: str = "") -> str:
         sections = [
             f"System: You are the {self.spec.role} Agent ({self.spec.name}).",
@@ -76,10 +118,11 @@ class AgentRuntime:
             sections.append(f"System Instructions: {self.spec.system_prompt}")
         if self.spec.tools:
             sections.append(f"Allowed Tools: {', '.join(self.spec.tools)}")
-        
+
         sections.append(f"\nUser Goal: {task_goal}")
-        
+
         if assembled_context:
             sections.append(f"\n{assembled_context}")
-            
+
         return "\n".join(sections)
+

@@ -147,3 +147,24 @@ def test_broadcast_removes_failed_connection():
     asyncio.run(cm.broadcast({"test": "data"}))
     assert mock_ws not in cm.active_connections
 
+
+def test_provider_config_endpoints(client):
+    res_get = client.get("/api/v1/provider-config")
+    assert res_get.status_code == 200
+    assert "provider" in res_get.json()
+
+    new_config = {
+        "provider": "custom",
+        "model_name": "qwen2.5-coder",
+        "base_url": "http://localhost:8080/v1",
+        "api_key": "",
+        "temperature": 0.2
+    }
+    res_post = client.post("/api/v1/provider-config", json=new_config)
+    assert res_post.status_code == 200
+    data = res_post.json()
+    assert data["status"] == "updated"
+    assert data["config"]["provider"] == "custom"
+    assert data["config"]["base_url"] == "http://localhost:8080/v1"
+
+
