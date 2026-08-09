@@ -219,6 +219,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 
+    function getBackendApiHost() {
+        if (window.location.protocol === 'file:' || !window.location.host) {
+            return '127.0.0.1:8000';
+        }
+        const hostname = window.location.hostname || '127.0.0.1';
+        return `${hostname}:8000`;
+    }
+
     // --- WebSocket Stream Client ---
     function connectWebSocket(taskId) {
         stopDemoStream();
@@ -232,13 +240,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Protocol & Host determination
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        let host = window.location.host;
-        // If served statically without port or file://, fallback to default API server port 8000
-        if (!host || window.location.protocol === 'file:') {
-            host = '127.0.0.1:8000';
-        }
+        const host = getBackendApiHost();
         
         const wsUrl = `${protocol}//${host}/api/v1/tasks/${taskId}/stream`;
+
         appendTraceLog('SYSTEM', `Initiating WebSocket stream connection to ${wsUrl}`);
 
         try {
@@ -679,8 +684,7 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.setItem('autoswe_provider_config', JSON.stringify(config));
 
         // POST to backend API
-        let host = window.location.host;
-        if (!host || window.location.protocol === 'file:') host = '127.0.0.1:8000';
+        const host = getBackendApiHost();
         const apiUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config`;
 
         fetch(apiUrl, {
@@ -713,8 +717,7 @@ document.addEventListener('DOMContentLoaded', () => {
             temperature: parseFloat(dom.tempInput.value)
         };
 
-        let host = window.location.host;
-        if (!host || window.location.protocol === 'file:') host = '127.0.0.1:8000';
+        const host = getBackendApiHost();
         const testUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config/test`;
 
         fetch(testUrl, {
@@ -745,6 +748,7 @@ document.addEventListener('DOMContentLoaded', () => {
             statusBox.textContent = `Connection error: ${err.message}`;
         });
     }
+
 
 
     // --- Helpers ---
