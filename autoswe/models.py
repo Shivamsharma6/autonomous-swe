@@ -24,7 +24,7 @@ class AgentSpec(BaseModel):
     name: str
     role: str
     description: str = ""
-    system_prompt: str
+    system_prompt: str = ""
     tools: List[str] = Field(default_factory=list)
     model: str = "gpt-4o"
     risk_level: RiskLevel = RiskLevel.LOW
