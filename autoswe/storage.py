@@ -138,7 +138,25 @@ class StorageEngine:
             "created_at": created_at,
         }
 
+    def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+            row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "metadata": json.loads(row["metadata"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
     def create_task(
+
         self,
         task_id: str,
         project_id: str,
