@@ -72,6 +72,26 @@ except Exception:
         return decorator
 
 
+def _clean_code_block(text: str) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    import re
+    # Extract code inside ```python ... ``` or ``` ... ``` if present anywhere in conversational text
+    code_match = re.search(r"```(?:python|py)?\n(.*?)```", text, re.DOTALL)
+    if code_match:
+        return code_match.group(1).strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return text
+
+
 class AgentRuntime:
     """Runtime engine for executing individual AI agents with model provider flexibility."""
 
@@ -109,9 +129,9 @@ class AgentRuntime:
             resolved_base_url = config.base_url
         else:
             if config.provider == "ollama":
-                resolved_base_url = "http://localhost:11434/v1"
+                resolved_base_url = "http://host.docker.internal:11434/v1"
             elif config.provider in ("custom", "local", "unsloth", "omlx"):
-                resolved_base_url = "http://localhost:8888/v1"
+                resolved_base_url = "http://host.docker.internal:8888/v1"
             else:
                 resolved_base_url = ""
 
@@ -132,37 +152,80 @@ class AgentRuntime:
         provider_config: Optional[ModelProviderConfig] = None,
     ) -> str:
         import json
+        import os
         import urllib.request
         import urllib.error
 
         config = self.get_effective_provider_config(provider_config)
         prompt = self.build_agent_prompt(task_goal, assembled_context)
 
-        raw_base_url = config.base_url.rstrip("/")
-        if not raw_base_url:
-            if config.provider == "ollama":
-                raw_base_url = "http://localhost:11434/v1"
-            elif config.provider in ("custom", "local", "unsloth", "omlx"):
-                raw_base_url = "http://localhost:8888/v1"
+        # 1. Google Gemini Cloud API attempt
+        gemini_key = config.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if config.provider in ("gemini", "google") and gemini_key:
+            model_target = config.model_name if "gemini" in config.model_name else "gemini-1.5-flash"
+            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_target}:generateContent?key={gemini_key}"
+            gemini_payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": f"{self.spec.system_prompt}\n\n{prompt}"}]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": config.temperature
+                }
+            }
+            try:
+                req = urllib.request.Request(gemini_url, data=json.dumps(gemini_payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    res_json = json.loads(response.read().decode("utf-8"))
+                    candidates = res_json.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts and "text" in parts[0]:
+                            return _clean_code_block(parts[0]["text"])
+            except Exception as e:
+                pass
 
+        # 2. Local / Ollama candidates setup
         candidates = []
-        if raw_base_url:
-            candidates.append(raw_base_url)
-            if "localhost" in raw_base_url:
-                candidates.append(raw_base_url.replace("localhost", "host.docker.internal"))
-            elif "127.0.0.1" in raw_base_url:
-                candidates.append(raw_base_url.replace("127.0.0.1", "host.docker.internal"))
-            elif "host.docker.internal" in raw_base_url:
-                candidates.append(raw_base_url.replace("host.docker.internal", "localhost"))
+        if config.base_url:
+            raw_url = config.base_url.rstrip("/")
+            candidates.append(raw_url)
+            if "localhost" in raw_url:
+                candidates.append(raw_url.replace("localhost", "host.docker.internal"))
+            elif "127.0.0.1" in raw_url:
+                candidates.append(raw_url.replace("127.0.0.1", "host.docker.internal"))
+        else:
+            candidates = [
+                "http://host.docker.internal:11434/v1",
+                "http://localhost:11434/v1",
+                "http://127.0.0.1:11434/v1",
+            ]
 
+        # Resolve installed model name if local server is active
+        target_model = config.model_name
         for base_url in candidates:
-            # 1. OpenAI-compatible /chat/completions endpoint
-            endpoint = f"{base_url}/chat/completions"
-            if not endpoint.endswith("/v1/chat/completions") and "/v1" not in base_url and config.provider == "ollama":
-                endpoint = f"{base_url}/v1/chat/completions"
+            models_url = f"{base_url}/models"
+            try:
+                m_req = urllib.request.Request(models_url)
+                with urllib.request.urlopen(m_req, timeout=3) as m_res:
+                    m_json = json.loads(m_res.read().decode("utf-8"))
+                    installed = [m.get("id") or m.get("name") for m in m_json.get("data", []) if m.get("id") or m.get("name")]
+                    if installed:
+                        if target_model not in installed:
+                            # Prefer coding or large local model
+                            preferred = [m for m in installed if "coding" in m or "qwen" in m or "gemma" in m or "glm" in m]
+                            target_model = preferred[0] if preferred else installed[0]
+                        break
+            except Exception:
+                pass
 
+        # Attempt completions across candidate endpoints
+        for base_url in candidates:
+            endpoint = f"{base_url}/chat/completions"
             payload = {
-                "model": config.model_name,
+                "model": target_model,
                 "messages": [
                     {"role": "system", "content": self.spec.system_prompt},
                     {"role": "user", "content": prompt},
@@ -180,32 +243,31 @@ class AgentRuntime:
                     choices = res_json.get("choices", [])
                     if choices:
                         content = choices[0].get("message", {}).get("content", "")
-                        if content:
-                            return content
+                        if content and content.strip():
+                            return _clean_code_block(content)
             except Exception:
                 pass
 
-            # 2. Native Ollama /api/chat endpoint
-            if config.provider == "ollama" or "11434" in base_url:
-                native_endpoint = f"{base_url.replace('/v1', '').rstrip('/')}/api/chat"
-                native_payload = {
-                    "model": config.model_name,
-                    "messages": [
-                        {"role": "system", "content": self.spec.system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                }
+            # Native Ollama /api/chat endpoint attempt
+            native_endpoint = f"{base_url.replace('/v1', '').rstrip('/')}/api/chat"
+            native_payload = {
+                "model": target_model,
+                "messages": [
+                    {"role": "system", "content": self.spec.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+            }
+            try:
                 data_bytes = json.dumps(native_payload).encode("utf-8")
                 req = urllib.request.Request(native_endpoint, data=data_bytes, headers={"Content-Type": "application/json"})
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as response:
-                        res_json = json.loads(response.read().decode("utf-8"))
-                        msg = res_json.get("message", {})
-                        if isinstance(msg, dict) and msg.get("content"):
-                            return msg["content"]
-                except Exception:
-                    pass
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    res_json = json.loads(response.read().decode("utf-8"))
+                    msg = res_json.get("message", {})
+                    if isinstance(msg, dict) and msg.get("content"):
+                        return _clean_code_block(msg["content"])
+            except Exception:
+                pass
 
         return f"# Code generated by {self.spec.role} for task: {task_goal}\n"
 
