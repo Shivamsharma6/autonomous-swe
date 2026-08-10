@@ -1,79 +1,44 @@
 /**
- * Autonomous SWE Platform - Realtime Dashboard Client
- * WebSocket Client for /api/v1/tasks/{id}/stream
+ * Autonomous SWE Platform - OpenCode & Codex Inspired Control Plane Client
  */
 
-document.addEventListener('DOMContentLoaded', () => {
-    // --- Application State ---
-    const state = {
-        taskId: 'task-1001',
-        ws: null,
-        isConnected: false,
-        isDemoMode: false,
-        demoInterval: null,
-        startTime: null,
-        timerInterval: null,
-        metrics: {
-            status: 'PENDING',
-            runtimeSeconds: 0,
-            tokensPrompt: 0,
-            tokensCompletion: 0,
-            additions: 0,
-            deletions: 0,
-            filesChanged: 0,
-            completedSteps: 0,
-            totalSteps: 5
-        },
-        dagNodes: [
-            { id: 'node-1', title: 'Context & Requirements Analysis', status: 'PENDING' },
-            { id: 'node-2', title: 'Task DAG & Plan Generation', status: 'PENDING' },
-            { id: 'node-3', title: 'Code Search & Symbol Resolution', status: 'PENDING' },
-            { id: 'node-4', title: 'Code Refactoring & Implementation', status: 'PENDING' },
-            { id: 'node-5', title: 'Verification & Test Suite', status: 'PENDING' }
-        ],
-        codeDiffs: {
-            'autoswe/control_plane.py': [
-                { type: 'info', text: '@@ -112,6 +112,18 @@ async def websocket_stream' },
-                { type: 'same', text: ' @app.websocket("/api/v1/tasks/{task_id}/stream")' },
-                { type: 'same', text: ' async def websocket_stream(websocket: WebSocket, task_id: str) -> None:' },
-                { type: 'del', text: '-    await websocket.send_json({"task_id": task_id, "status": "connected"})' },
-                { type: 'add', text: '+    await manager.connect(websocket)' },
-                { type: 'add', text: '+    try:' },
-                { type: 'add', text: '+        task = await asyncio.to_thread(storage.get_task, task_id)' },
-                { type: 'add', text: '+        await websocket.send_json({"task_id": task_id, "task": task, "timestamp": time.time()})' },
-                { type: 'add', text: '+        while True:' },
-                { type: 'add', text: '+            data = await websocket.receive_text()' },
-                { type: 'add', text: '+            await websocket.send_json({"task_id": task_id, "data": data})' },
-                { type: 'add', text: '+    except WebSocketDisconnect:' },
-                { type: 'add', text: '+        manager.disconnect(websocket)' }
-            ],
-            'frontend/app.js': [
-                { type: 'info', text: '@@ -1,5 +1,12 @@' },
-                { type: 'add', text: '+// Initialize WebSocket connection to Autonomous SWE backend' },
-                { type: 'add', text: '+const wsUrl = `ws://${window.location.host}/api/v1/tasks/${taskId}/stream`;' },
-                { type: 'same', text: ' function connectWebSocket(taskId) {' },
-                { type: 'del', text: '-    console.log("Connecting...");' },
-                { type: 'add', text: '+    state.ws = new WebSocket(wsUrl);' }
-            ]
-        },
-        activeDiffFile: 'autoswe/control_plane.py',
-        traceEvents: [],
-        autoScroll: true,
-        filterType: 'ALL',
-        searchQuery: ''
-    };
+(function () {
+    'use strict';
 
-    // --- DOM Elements ---
+    // State Variables
+    let currentTaskId = null;
+    let wsSocket = null;
+    let timerInterval = null;
+    let startTime = null;
+    let totalTokens = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let activeDiffFiles = {}; // filename -> content
+    let currentActiveDiffFile = null;
+    let activeTraceFilter = 'ALL';
+    let traceSearchQuery = '';
+    let autoScrollLogs = true;
+
+    const STAGES = ['architect', 'researcher', 'coder', 'tester', 'sandbox', 'reviewer'];
+
+    // DOM References
     const dom = {
+        // Inputs & Buttons
         taskPromptInput: document.getElementById('taskPromptInput'),
         submitTaskBtn: document.getElementById('submitTaskBtn'),
         demoTaskBtn: document.getElementById('demoTaskBtn'),
+        providerConfigBtn: document.getElementById('providerConfigBtn'),
+        activeModelBadge: document.getElementById('activeModelBadge'),
+        activeModelText: document.getElementById('activeModelText'),
+
+        // Status Badges
         wsStatusBadge: document.getElementById('wsStatusBadge'),
+        wsStatusDot: document.getElementById('wsStatusDot'),
         wsStatusText: document.getElementById('wsStatusText'),
 
-        
         // Metrics
         metricStatusPill: document.getElementById('metricStatusPill'),
+        metricTaskId: document.getElementById('metricTaskId'),
         metricTaskTitle: document.getElementById('metricTaskTitle'),
         metricRuntime: document.getElementById('metricRuntime'),
         metricTokens: document.getElementById('metricTokens'),
@@ -82,506 +47,403 @@ document.addEventListener('DOMContentLoaded', () => {
         metricDeletions: document.getElementById('metricDeletions'),
         metricFilesChanged: document.getElementById('metricFilesChanged'),
         metricProgressText: document.getElementById('metricProgressText'),
+        metricProgressPercent: document.getElementById('metricProgressPercent'),
         metricProgressBar: document.getElementById('metricProgressBar'),
 
-        // Panels
-        dagGraphView: document.getElementById('dagGraphView'),
-        resetDagBtn: document.getElementById('resetDagBtn'),
-        diffFilePath: document.getElementById('diffFilePath'),
+        // DAG Pipeline Nodes
+        activeAgentStageTag: document.getElementById('activeAgentStageTag'),
+
+        // Code Diff Viewer
         diffTabsHeader: document.getElementById('diffTabsHeader'),
+        diffFilePath: document.getElementById('diffFilePath'),
         diffPlaceholder: document.getElementById('diffPlaceholder'),
+        diffCodeWrapper: document.getElementById('diffCodeWrapper'),
         diffContentPre: document.getElementById('diffContentPre'),
         copyDiffBtn: document.getElementById('copyDiffBtn'),
 
         // Trace Stream
         traceStreamContainer: document.getElementById('traceStreamContainer'),
         traceEntriesList: document.getElementById('traceEntriesList'),
-        clearLogsBtn: document.getElementById('clearLogsBtn'),
-        autoScrollToggle: document.getElementById('autoScrollToggle'),
         traceSearchInput: document.getElementById('traceSearchInput'),
         traceFilterType: document.getElementById('traceFilterType'),
+        clearLogsBtn: document.getElementById('clearLogsBtn'),
+        autoScrollToggle: document.getElementById('autoScrollToggle'),
 
-        // Model Provider Config Modal
-        providerConfigBtn: document.getElementById('providerConfigBtn'),
+        // Modal Elements
         providerModal: document.getElementById('providerModal'),
         closeModalBtn: document.getElementById('closeModalBtn'),
         providerSelect: document.getElementById('providerSelect'),
         baseUrlInput: document.getElementById('baseUrlInput'),
+        baseUrlHint: document.getElementById('baseUrlHint'),
         apiKeyInput: document.getElementById('apiKeyInput'),
         modelNameInput: document.getElementById('modelNameInput'),
         modelDropdownSelect: document.getElementById('modelDropdownSelect'),
+        fetchModelsBtn: document.getElementById('fetchModelsBtn'),
         tempInput: document.getElementById('tempInput'),
         tempValue: document.getElementById('tempValue'),
-        fetchModelsBtn: document.getElementById('fetchModelsBtn'),
         testProviderBtn: document.getElementById('testProviderBtn'),
         saveProviderBtn: document.getElementById('saveProviderBtn'),
-        connectionStatusBox: document.getElementById('connectionStatusBox')
+        connectionStatusBox: document.getElementById('connectionStatusBox'),
     };
 
-
-    // --- Core Initialization ---
-    init();
-
+    // Initialize Client
     function init() {
         bindEvents();
-        renderDAG();
-        renderDiffTabs();
-        renderDiffContent();
-        loadProviderConfig();
-        
-        // Auto connect or set initial status
-        setWSStatus('disconnected', 'Disconnected');
-
-        // Auto test connection and populate models if ollama/local
-        if (dom.providerSelect.value === 'ollama' || dom.baseUrlInput.value) {
-            setTimeout(() => {
-                testProviderConnection();
-            }, 500);
-        }
+        loadActiveProviderConfig();
+        resetDashboardState();
     }
 
-
+    // Event Bounding
     function bindEvents() {
-        dom.submitTaskBtn.addEventListener('click', () => {
-            const prompt = dom.taskPromptInput.value.trim();
-            if (prompt) {
-                submitLiveAgentTask(prompt);
-            }
-        });
-
-        dom.demoTaskBtn.addEventListener('click', () => {
-            const demoPrompt = 'Design a Video Game Database CRUD backend using Postgres/SQLite and FastAPI with an HTML/CSS/JS frontend';
-            dom.taskPromptInput.value = demoPrompt;
-            submitLiveAgentTask(demoPrompt);
-        });
-
-        dom.taskPromptInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                const prompt = dom.taskPromptInput.value.trim();
-                if (prompt) submitLiveAgentTask(prompt);
-            }
-        });
-
-
-        dom.resetDagBtn.addEventListener('click', () => {
-            renderDAG();
-        });
-
-        dom.copyDiffBtn.addEventListener('click', () => {
-            copyCurrentDiff();
-        });
-
-        dom.clearLogsBtn.addEventListener('click', () => {
-            state.traceEvents = [];
-            dom.traceEntriesList.innerHTML = '';
-        });
-
-        dom.autoScrollToggle.addEventListener('change', (e) => {
-            state.autoScroll = e.target.checked;
-        });
-
-        dom.traceSearchInput.addEventListener('input', (e) => {
-            state.searchQuery = e.target.value.toLowerCase();
-            filterTraceEntries();
-        });
-
-        dom.traceFilterType.addEventListener('change', (e) => {
-            state.filterType = e.target.value;
-            filterTraceEntries();
-        });
-
-        // Provider Modal Events
-        dom.providerConfigBtn.addEventListener('click', () => {
-            dom.providerModal.classList.remove('hidden');
-            testProviderConnection();
-        });
-
-        dom.closeModalBtn.addEventListener('click', () => {
-            dom.providerModal.classList.add('hidden');
-        });
-
-        if (dom.fetchModelsBtn) {
-            dom.fetchModelsBtn.addEventListener('click', () => {
-                testProviderConnection();
+        if (dom.submitTaskBtn) dom.submitTaskBtn.addEventListener('click', handleTaskSubmit);
+        if (dom.taskPromptInput) {
+            dom.taskPromptInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') handleTaskSubmit();
             });
         }
+        if (dom.demoTaskBtn) dom.demoTaskBtn.addEventListener('click', handleDemoTaskSubmit);
 
+        // Modal Controls
+        if (dom.providerConfigBtn) dom.providerConfigBtn.addEventListener('click', () => showModal(true));
+        if (dom.closeModalBtn) dom.closeModalBtn.addEventListener('click', () => showModal(false));
+        if (dom.providerSelect) dom.providerSelect.addEventListener('change', handleProviderSelectChange);
+        if (dom.tempInput) dom.tempInput.addEventListener('input', (e) => dom.tempValue.textContent = e.target.value);
+        if (dom.fetchModelsBtn) dom.fetchModelsBtn.addEventListener('click', fetchInstalledModels);
         if (dom.modelDropdownSelect) {
             dom.modelDropdownSelect.addEventListener('change', (e) => {
-                if (e.target.value) {
-                    dom.modelNameInput.value = e.target.value;
-                }
+                if (e.target.value) dom.modelNameInput.value = e.target.value;
             });
         }
+        if (dom.testProviderBtn) dom.testProviderBtn.addEventListener('click', testProviderConnection);
+        if (dom.saveProviderBtn) dom.saveProviderBtn.addEventListener('click', saveProviderConfig);
 
-        dom.providerSelect.addEventListener('change', (e) => {
-            const provider = e.target.value;
-            if (provider === 'ollama') {
-                dom.baseUrlInput.value = 'http://localhost:11434/v1';
-                dom.apiKeyInput.value = '';
-                testProviderConnection();
-            } else if (provider === 'unsloth') {
-                dom.baseUrlInput.value = 'http://localhost:8080/v1';
-                dom.modelNameInput.value = 'unsloth-deepseek-r1';
-                dom.apiKeyInput.value = '';
-                testProviderConnection();
-            } else if (provider === 'custom') {
-                if (!dom.baseUrlInput.value) {
-                    dom.baseUrlInput.value = 'http://localhost:8080/v1';
-                }
-                dom.apiKeyInput.value = '';
-                testProviderConnection();
-            } else {
-                dom.baseUrlInput.value = '';
-                if (provider === 'gemini') dom.modelNameInput.value = 'gemini-3.6-flash';
-                if (provider === 'openai') dom.modelNameInput.value = 'gpt-4o';
-                if (provider === 'anthropic') dom.modelNameInput.value = 'claude-3-5-sonnet';
-            }
-        });
-
-        dom.tempInput.addEventListener('input', (e) => {
-            dom.tempValue.textContent = e.target.value;
-        });
-
-        dom.testProviderBtn.addEventListener('click', () => {
-            testProviderConnection();
-        });
-
-        dom.saveProviderBtn.addEventListener('click', () => {
-            saveProviderConfig();
-        });
+        // Trace Filters & Stream Controls
+        if (dom.traceSearchInput) {
+            dom.traceSearchInput.addEventListener('input', (e) => {
+                traceSearchQuery = e.target.value.toLowerCase().trim();
+                filterTraceStream();
+            });
+        }
+        if (dom.traceFilterType) {
+            dom.traceFilterType.addEventListener('change', (e) => {
+                activeTraceFilter = e.target.value;
+                filterTraceStream();
+            });
+        }
+        if (dom.clearLogsBtn) dom.clearLogsBtn.addEventListener('click', clearTraceStream);
+        if (dom.autoScrollToggle) dom.autoScrollToggle.addEventListener('change', (e) => autoScrollLogs = e.target.checked);
+        if (dom.copyDiffBtn) dom.copyDiffBtn.addEventListener('click', copyActiveDiff);
     }
 
+    // Submit Task
+    async function handleTaskSubmit() {
+        const prompt = dom.taskPromptInput ? dom.taskPromptInput.value.trim() : '';
+        if (!prompt) {
+            alert('Please enter a task description before running.');
+            return;
+        }
+        await submitLiveAgentTask(prompt);
+    }
 
+    async function handleDemoTaskSubmit() {
+        const demoPrompt = "Design & Build a Video Game CRUD API logic module";
+        if (dom.taskPromptInput) dom.taskPromptInput.value = demoPrompt;
+        await submitLiveAgentTask(demoPrompt);
+    }
 
-    function submitLiveAgentTask(promptText) {
-        state.traceEvents = [];
-        dom.traceEntriesList.innerHTML = '';
+    async function submitLiveAgentTask(userRequest) {
+        resetDashboardState();
+        updateTaskStatusPill('RUNNING', 'Initializing Swarm');
+        startTimer();
 
-        appendTraceLog('SYSTEM', `Submitting live task request to agent swarm: "${promptText}"`);
-        startDemoStream();
-
-        const host = getBackendApiHost();
-        const apiProtocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-
-        // Submit Task to backend for LangSmith tracing & storage
-        const projUrl = `${apiProtocol}//${host}/api/v1/projects`;
-        fetch(projUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                name: 'Video Game DB Project',
-                project_id: 'proj-live-001',
-                repo_path: '/Users/shivamsharma/projects/autonomous-swe/games_demo'
-            })
-        })
-        .then(() => {
-            const taskUrl = `${apiProtocol}//${host}/api/v1/tasks`;
-            return fetch(taskUrl, {
+        try {
+            const res = await fetch('/api/v1/tasks', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: 'proj-live-001',
-                    user_request: promptText
+                    user_request: userRequest
                 })
             });
-        })
-        .then(res => res.json())
-        .then(data => {
-            appendTraceLog('SYSTEM', `Backend Task initialized (ID: ${data.task_id}). LangSmith Tracing active.`);
-            if (data.task_id) {
-                connectWebSocket(data.task_id);
-            }
-        })
-        .catch(err => {
-            appendTraceLog('SYSTEM', `Backend notification: ${err.message}`);
-        });
-    }
 
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            currentTaskId = data.task_id;
 
-    function getBackendApiHost() {
+            if (dom.metricTaskId) dom.metricTaskId.textContent = `#${data.task_id.slice(-8)}`;
+            if (dom.metricTaskTitle) dom.metricTaskTitle.textContent = userRequest;
 
-        if (window.location.protocol === 'file:' || !window.location.host) {
-            return '127.0.0.1:8000';
-        }
-        const hostname = window.location.hostname || '127.0.0.1';
-        return `${hostname}:8000`;
-    }
-
-    // --- WebSocket Stream Client ---
-    function connectWebSocket(taskId) {
-        stopDemoStream();
-        if (state.ws) {
-            state.ws.close();
-        }
-
-        state.taskId = taskId;
-        dom.metricTaskTitle.textContent = `Task #${taskId}`;
-        setWSStatus('connecting', 'Connecting...');
-
-        // Protocol & Host determination
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = getBackendApiHost();
-        
-        const wsUrl = `${protocol}//${host}/api/v1/tasks/${taskId}/stream`;
-
-        appendTraceLog('SYSTEM', `Initiating WebSocket stream connection to ${wsUrl}`);
-
-        try {
-            state.ws = new WebSocket(wsUrl);
-
-            state.ws.onopen = () => {
-                state.isConnected = true;
-                setWSStatus('connected', 'Connected');
-                appendTraceLog('SYSTEM', `Stream connected successfully for task ${taskId}`);
-                startRuntimeTimer();
-            };
-
-            state.ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    handleStreamPayload(data);
-                } catch (e) {
-                    appendTraceLog('SYSTEM', `Raw message received: ${event.data}`);
-                }
-            };
-
-            state.ws.onerror = (err) => {
-                appendTraceLog('ERROR', `WebSocket error encountered.`);
-            };
-
-            state.ws.onclose = () => {
-                state.isConnected = false;
-                setWSStatus('disconnected', 'Disconnected');
-                appendTraceLog('SYSTEM', 'WebSocket connection closed.');
-                stopRuntimeTimer();
-            };
-        } catch (e) {
-            setWSStatus('disconnected', 'Failed to connect');
-            appendTraceLog('ERROR', `Connection failed: ${e.message}`);
-        }
-    }
-
-    function setWSStatus(statusClass, text) {
-        dom.wsStatusBadge.querySelector('.status-dot').className = `status-dot ${statusClass}`;
-        dom.wsStatusText.textContent = text;
-    }
-
-    // --- Incoming Stream Payload Handler ---
-    function handleStreamPayload(data) {
-        // If task detail object present
-        if (data.task) {
-            state.metrics.status = data.task.status || state.metrics.status;
-            updateMetricsUI();
-        }
-
-        // If generic text payload or custom event
-        if (data.data) {
-            appendTraceLog('TOOL', `Stream payload: ${typeof data.data === 'object' ? JSON.stringify(data.data) : data.data}`);
-        }
-
-        // If structured event payload
-        if (data.event_type) {
-            appendTraceLog(data.event_type, data.message || '', data.payload);
-        }
-
-        // If code diff update
-        if (data.code_diff) {
-            updateCodeDiff(data.code_diff.filename, data.code_diff.lines);
-        }
-
-        // If DAG update
-        if (data.dag_nodes) {
-            state.dagNodes = data.dag_nodes;
-            renderDAG();
-        }
-    }
-
-    // --- Metrics & Timer ---
-    function startRuntimeTimer() {
-        if (state.timerInterval) clearInterval(state.timerInterval);
-        state.startTime = Date.now() - (state.metrics.runtimeSeconds * 1000);
-        state.timerInterval = setInterval(() => {
-            state.metrics.runtimeSeconds = Math.floor((Date.now() - state.startTime) / 1000);
-            updateTimerUI();
-        }, 1000);
-    }
-
-    function stopRuntimeTimer() {
-        if (state.timerInterval) {
-            clearInterval(state.timerInterval);
-            state.timerInterval = null;
-        }
-    }
-
-    function updateTimerUI() {
-        const hrs = String(Math.floor(state.metrics.runtimeSeconds / 3600)).padStart(2, '0');
-        const mins = String(Math.floor((state.metrics.runtimeSeconds % 3600) / 60)).padStart(2, '0');
-        const secs = String(state.metrics.runtimeSeconds % 60).padStart(2, '0');
-        dom.metricRuntime.textContent = `${hrs}:${mins}:${secs}`;
-    }
-
-    function updateMetricsUI() {
-        // Status Pill
-        const status = state.metrics.status.toUpperCase();
-        dom.metricStatusPill.textContent = status;
-        dom.metricStatusPill.className = `status-pill status-${status.toLowerCase()}`;
-
-        // Tokens
-        const totalTokens = state.metrics.tokensPrompt + state.metrics.tokensCompletion;
-        dom.metricTokens.textContent = totalTokens.toLocaleString();
-        dom.metricTokensSub.textContent = `Prompt: ${state.metrics.tokensPrompt.toLocaleString()} | Completion: ${state.metrics.tokensCompletion.toLocaleString()}`;
-
-        // Diffs
-        dom.metricAdditions.textContent = `+${state.metrics.additions}`;
-        dom.metricDeletions.textContent = `-${state.metrics.deletions}`;
-        dom.metricFilesChanged.textContent = `${state.metrics.filesChanged} File${state.metrics.filesChanged === 1 ? '' : 's'} Changed`;
-
-        // Progress
-        dom.metricProgressText.textContent = `${state.metrics.completedSteps} / ${state.metrics.totalSteps}`;
-        const pct = Math.min(100, Math.round((state.metrics.completedSteps / state.metrics.totalSteps) * 100));
-        dom.metricProgressBar.style.width = `${pct}%`;
-    }
-
-    // --- DAG Graph Renderer ---
-    function renderDAG() {
-        dom.dagGraphView.innerHTML = '';
-        state.dagNodes.forEach((node, index) => {
-            const nodeEl = document.createElement('div');
-            nodeEl.className = `dag-node ${node.status.toLowerCase()}`;
-            
-            let statusColor = '#94a3b8';
-            if (node.status === 'RUNNING') statusColor = 'var(--primary-cyan)';
-            if (node.status === 'COMPLETED') statusColor = 'var(--success-emerald)';
-            if (node.status === 'FAILED') statusColor = 'var(--danger-rose)';
-
-            nodeEl.innerHTML = `
-                <div class="dag-node-header">
-                    <span class="dag-node-id">${node.id}</span>
-                    <span class="dag-node-status" style="background-color: ${statusColor}; shadow: 0 0 8px ${statusColor}"></span>
-                </div>
-                <div class="dag-node-title">${node.title}</div>
-            `;
-            dom.dagGraphView.appendChild(nodeEl);
-
-            // Add connector line if not last node
-            if (index < state.dagNodes.length - 1) {
-                const connector = document.createElement('div');
-                connector.className = `dag-connector ${node.status === 'COMPLETED' ? 'active' : ''}`;
-                dom.dagGraphView.appendChild(connector);
-            }
-        });
-    }
-
-    // --- Code Diff Viewer Renderer ---
-    function renderDiffTabs() {
-        dom.diffTabsHeader.innerHTML = '';
-        const filenames = Object.keys(state.codeDiffs);
-
-        if (filenames.length === 0) {
-            dom.diffFilePath.textContent = 'No file selected';
-            return;
-        }
-
-        filenames.forEach(filename => {
-            const tab = document.createElement('div');
-            tab.className = `diff-tab ${filename === state.activeDiffFile ? 'active' : ''}`;
-            tab.textContent = filename.split('/').pop();
-            tab.title = filename;
-            tab.addEventListener('click', () => {
-                state.activeDiffFile = filename;
-                renderDiffTabs();
-                renderDiffContent();
+            appendTraceEntry({
+                event_type: 'SYSTEM',
+                message: `Task ${data.task_id} initialized in autonomous_agent_directory/${data.task_id}`,
+                timestamp: formatTimestamp()
             });
+
+            connectWebSocket(data.task_id);
+        } catch (err) {
+            updateTaskStatusPill('FAILED', 'Initialization Error');
+            stopTimer();
+            appendTraceEntry({
+                event_type: 'ERROR',
+                message: `Failed to launch task: ${err.message}`,
+                timestamp: formatTimestamp()
+            });
+        }
+    }
+
+    // WebSocket Stream Connection
+    function connectWebSocket(taskId) {
+        if (wsSocket) wsSocket.close();
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/api/v1/tasks/${taskId}/stream`;
+
+        updateWsStatus('connecting', 'Connecting...');
+        wsSocket = new WebSocket(wsUrl);
+
+        wsSocket.onopen = () => updateWsStatus('connected', 'Live Telemetry Active');
+
+        wsSocket.onmessage = (evt) => {
+            try {
+                const data = JSON.parse(evt.data);
+                handleStreamEvent(data);
+            } catch (e) {
+                console.error("Failed to parse WebSocket message:", e);
+            }
+        };
+
+        wsSocket.onerror = () => updateWsStatus('disconnected', 'Connection Error');
+
+        wsSocket.onclose = () => updateWsStatus('disconnected', 'Disconnected');
+    }
+
+    function updateWsStatus(state, text) {
+        if (dom.wsStatusDot) {
+            dom.wsStatusDot.className = `status-dot ${state}`;
+        }
+        if (dom.wsStatusText) dom.wsStatusText.textContent = text;
+    }
+
+    // Process WebSocket Event Stream
+    function handleStreamEvent(data) {
+        const eventType = data.event_type || (data.task ? 'SYSTEM' : 'INFO');
+        const message = data.message || (data.task ? `Task status: ${data.task.status}` : 'Event received');
+        const payload = data.payload || data.code_diff || null;
+
+        appendTraceEntry({
+            event_type: eventType,
+            message: message,
+            payload: payload,
+            timestamp: formatTimestamp()
+        });
+
+        // Update Pipeline Stages & Node States
+        if (data.message && data.message.includes('Architect Agent')) updateStageState('architect');
+        else if (data.message && data.message.includes('Researcher Agent')) updateStageState('researcher');
+        else if (data.message && data.message.includes('Coder Agent')) updateStageState('coder');
+        else if (data.message && data.message.includes('Tester Agent')) updateStageState('tester');
+        else if (data.message && data.message.includes('Sandbox Runner')) updateStageState('sandbox');
+        else if (data.message && data.message.includes('Final Reviewer Agent')) updateStageState('reviewer');
+
+        // Handle Code Diffs
+        if (payload && payload.code_diff) {
+            renderCodeDiff(payload.code_diff);
+        } else if (data.code_diff) {
+            renderCodeDiff(data.code_diff);
+        }
+
+        // Handle Final Completion or Failure
+        if (eventType === 'SYSTEM' && message.includes('completed with status:')) {
+            if (message.includes('COMPLETED')) {
+                updateTaskStatusPill('COMPLETED', 'All Stages Passed');
+                completeAllStages();
+            } else {
+                updateTaskStatusPill('FAILED', 'Check Debug Trace');
+            }
+            stopTimer();
+        }
+    }
+
+    // Pipeline Stage Node Visualizer State Manager
+    function updateStageState(activeStage) {
+        const stageIndex = STAGES.indexOf(activeStage);
+        if (stageIndex === -1) return;
+
+        STAGES.forEach((stage, idx) => {
+            const nodeEl = document.getElementById(`node-${stage}`);
+            const arrowEl = document.getElementById(`arrow-${idx}-${idx + 1}`);
+
+            if (!nodeEl) return;
+
+            const badgeEl = nodeEl.querySelector('.node-status-badge');
+
+            if (idx < stageIndex) {
+                // Completed Stage
+                nodeEl.className = 'dag-stage-node completed';
+                if (badgeEl) { badgeEl.textContent = '✓ Done'; badgeEl.style.display = 'inline-block'; }
+            } else if (idx === stageIndex) {
+                // Active Stage
+                nodeEl.className = 'dag-stage-node active';
+                if (badgeEl) { badgeEl.textContent = 'Active'; badgeEl.style.display = 'inline-block'; }
+                if (dom.activeAgentStageTag) dom.activeAgentStageTag.textContent = `${stage.toUpperCase()} Stage`;
+            } else {
+                // Pending Stage
+                nodeEl.className = 'dag-stage-node pending';
+                if (badgeEl) badgeEl.style.display = 'none';
+            }
+
+            if (arrowEl) {
+                if (idx < stageIndex) arrowEl.className = 'pipeline-arrow active';
+                else arrowEl.className = 'pipeline-arrow';
+            }
+        });
+
+        // Update Progress Bar
+        const completedCount = stageIndex + 1;
+        const percent = Math.min(Math.round((completedCount / STAGES.length) * 100), 100);
+        if (dom.metricProgressText) dom.metricProgressText.textContent = `${completedCount} / 6 Stage`;
+        if (dom.metricProgressPercent) dom.metricProgressPercent.textContent = `${percent}%`;
+        if (dom.metricProgressBar) dom.metricProgressBar.style.width = `${percent}%`;
+    }
+
+    function completeAllStages() {
+        STAGES.forEach((stage, idx) => {
+            const nodeEl = document.getElementById(`node-${stage}`);
+            const arrowEl = document.getElementById(`arrow-${idx}-${idx + 1}`);
+            if (nodeEl) {
+                nodeEl.className = 'dag-stage-node completed';
+                const badgeEl = nodeEl.querySelector('.node-status-badge');
+                if (badgeEl) { badgeEl.textContent = '✓ Done'; badgeEl.style.display = 'inline-block'; }
+            }
+            if (arrowEl) arrowEl.className = 'pipeline-arrow active';
+        });
+
+        if (dom.metricProgressText) dom.metricProgressText.textContent = `6 / 6 Stage`;
+        if (dom.metricProgressPercent) dom.metricProgressPercent.textContent = `100%`;
+        if (dom.metricProgressBar) dom.metricProgressBar.style.width = `100%`;
+        if (dom.activeAgentStageTag) dom.activeAgentStageTag.textContent = `Workflow Completed`;
+    }
+
+    // Code Diff Inspector
+    function renderCodeDiff(codeDiff) {
+        if (!codeDiff || !codeDiff.filename || !codeDiff.lines) return;
+
+        const filename = codeDiff.filename;
+        let fileContent = '';
+        let addCount = 0;
+        let delCount = 0;
+
+        codeDiff.lines.forEach(line => {
+            const text = typeof line === 'string' ? line : line.text;
+            const type = line.type || 'add';
+            if (type === 'add') {
+                fileContent += `+ ${text}\n`;
+                addCount++;
+            } else if (type === 'del') {
+                fileContent += `- ${text}\n`;
+                delCount++;
+            } else {
+                fileContent += `  ${text}\n`;
+            }
+        });
+
+        activeDiffFiles[filename] = { content: fileContent, addCount, delCount, lines: codeDiff.lines };
+        renderDiffTabs();
+        switchDiffTab(filename);
+
+        // Update Code Mod Metrics
+        let totalAdds = 0;
+        let totalDels = 0;
+        Object.values(activeDiffFiles).forEach(item => {
+            totalAdds += item.addCount;
+            totalDels += item.delCount;
+        });
+
+        if (dom.metricAdditions) dom.metricAdditions.textContent = `+${totalAdds}`;
+        if (dom.metricDeletions) dom.metricDeletions.textContent = `-${totalDels}`;
+        if (dom.metricFilesChanged) dom.metricFilesChanged.textContent = `${Object.keys(activeDiffFiles).length} Files Modified`;
+    }
+
+    function renderDiffTabs() {
+        if (!dom.diffTabsHeader) return;
+        dom.diffTabsHeader.innerHTML = '';
+
+        Object.keys(activeDiffFiles).forEach(filename => {
+            const tab = document.createElement('div');
+            tab.className = `diff-tab ${filename === currentActiveDiffFile ? 'active' : ''}`;
+            tab.setAttribute('data-filename', filename);
+            tab.innerHTML = `
+                <span class="tab-dot"></span>
+                <span class="tab-name">${filename}</span>
+            `;
+            tab.addEventListener('click', () => switchDiffTab(filename));
             dom.diffTabsHeader.appendChild(tab);
         });
-
-        if (!filenames.includes(state.activeDiffFile)) {
-            state.activeDiffFile = filenames[0];
-        }
-        dom.diffFilePath.textContent = state.activeDiffFile;
     }
 
-    function renderDiffContent() {
-        const lines = state.codeDiffs[state.activeDiffFile];
-        if (!lines || lines.length === 0) {
-            dom.diffPlaceholder.classList.remove('hidden');
-            dom.diffContentPre.classList.add('hidden');
+    function switchDiffTab(filename) {
+        currentActiveDiffFile = filename;
+        renderDiffTabs();
+
+        if (dom.diffFilePath) dom.diffFilePath.textContent = `autonomous_agent_directory/${filename}`;
+
+        const fileData = activeDiffFiles[filename];
+        if (!fileData) return;
+
+        if (dom.diffPlaceholder) dom.diffPlaceholder.classList.add('hidden');
+        if (dom.diffCodeWrapper) dom.diffCodeWrapper.classList.remove('hidden');
+
+        if (dom.diffContentPre) {
+            dom.diffContentPre.innerHTML = '';
+            fileData.lines.forEach(line => {
+                const text = typeof line === 'string' ? line : line.text;
+                const type = line.type || 'add';
+                const lineSpan = document.createElement('span');
+
+                if (type === 'add') lineSpan.className = 'diff-line-add';
+                else if (type === 'del') lineSpan.className = 'diff-line-del';
+                else lineSpan.className = 'diff-line-info';
+
+                lineSpan.textContent = (type === 'add' ? '+ ' : type === 'del' ? '- ' : '  ') + text;
+                dom.diffContentPre.appendChild(lineSpan);
+            });
+        }
+    }
+
+    function copyActiveDiff() {
+        if (!currentActiveDiffFile || !activeDiffFiles[currentActiveDiffFile]) {
+            alert('No active code diff to copy.');
             return;
         }
-
-        dom.diffPlaceholder.classList.add('hidden');
-        dom.diffContentPre.classList.remove('hidden');
-
-        dom.diffContentPre.innerHTML = lines.map(line => {
-            let className = '';
-            if (line.type === 'add') className = 'diff-line-add';
-            else if (line.type === 'del') className = 'diff-line-del';
-            else if (line.type === 'info') className = 'diff-line-info';
-            
-            const textEscaped = escapeHtml(line.text);
-            return `<span class="${className}">${textEscaped}</span>`;
-        }).join('\n');
-    }
-
-    function updateCodeDiff(filename, lines) {
-        state.codeDiffs[filename] = lines;
-        state.metrics.filesChanged = Object.keys(state.codeDiffs).length;
-        
-        let additions = 0;
-        let deletions = 0;
-        Object.values(state.codeDiffs).forEach(fileLines => {
-            fileLines.forEach(l => {
-                if (l.type === 'add') additions++;
-                if (l.type === 'del') deletions++;
-            });
-        });
-        state.metrics.additions = additions;
-        state.metrics.deletions = deletions;
-
-        updateMetricsUI();
-        renderDiffTabs();
-        renderDiffContent();
-    }
-
-    function copyCurrentDiff() {
-        const lines = state.codeDiffs[state.activeDiffFile];
-        if (lines) {
-            const rawText = lines.map(l => l.text).join('\n');
-            navigator.clipboard.writeText(rawText).then(() => {
-                appendTraceLog('SYSTEM', `Copied diff for ${state.activeDiffFile} to clipboard.`);
-            });
+        navigator.clipboard.writeText(activeDiffFiles[currentActiveDiffFile].content);
+        if (dom.copyDiffBtn) {
+            const orig = dom.copyDiffBtn.innerHTML;
+            dom.copyDiffBtn.innerHTML = '✓ Copied!';
+            setTimeout(() => dom.copyDiffBtn.innerHTML = orig, 1500);
         }
     }
 
-    // --- Trace Stream Log Handler ---
-    function appendTraceLog(eventType, message, payload = null) {
-        const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const entry = { id: Date.now() + Math.random(), timestamp, eventType, message, payload };
-        state.traceEvents.push(entry);
-
-        renderTraceEntry(entry);
-    }
-
-    function renderTraceEntry(entry) {
-        if (!shouldDisplayTrace(entry)) return;
+    // Event Trace Stream Logging
+    function appendTraceEntry(entry) {
+        if (!dom.traceEntriesList) return;
 
         const item = document.createElement('div');
         item.className = 'trace-item';
+        item.setAttribute('data-type', entry.event_type);
 
-        const tagClass = `tag-${(entry.eventType || 'system').toLowerCase()}`;
-        
+        const typeTagClass = `tag-${(entry.event_type || 'system').toLowerCase()}`;
+
         let payloadHtml = '';
-        if (entry.payload) {
-            const payloadStr = typeof entry.payload === 'object' ? JSON.stringify(entry.payload, null, 2) : String(entry.payload);
-            payloadHtml = `<pre class="trace-payload">${escapeHtml(payloadStr)}</pre>`;
+        if (entry.payload && Object.keys(entry.payload).length > 0) {
+            const formatted = JSON.stringify(entry.payload, null, 2);
+            payloadHtml = `<pre class="trace-payload">${escapeHtml(formatted)}</pre>`;
         }
 
         item.innerHTML = `
             <div class="trace-item-header">
                 <div class="trace-meta">
+                    <span class="event-tag ${typeTagClass}">${entry.event_type}</span>
                     <span class="trace-time">${entry.timestamp}</span>
-                    <span class="event-tag ${tagClass}">${entry.eventType}</span>
                 </div>
             </div>
             <div class="trace-message">${escapeHtml(entry.message)}</div>
@@ -589,285 +451,245 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
 
         dom.traceEntriesList.appendChild(item);
+        filterTraceStream();
 
-        if (state.autoScroll) {
+        // Increment Token Usage Estimate
+        promptTokens += Math.round(entry.message.length / 4);
+        completionTokens += entry.payload ? Math.round(JSON.stringify(entry.payload).length / 4) : 0;
+        totalTokens = promptTokens + completionTokens;
+
+        if (dom.metricTokens) dom.metricTokens.innerHTML = `${totalTokens.toLocaleString()} <span class="unit">tk</span>`;
+        if (dom.metricTokensSub) dom.metricTokensSub.textContent = `Prompt: ${promptTokens.toLocaleString()} | Completion: ${completionTokens.toLocaleString()}`;
+
+        if (autoScrollLogs && dom.traceStreamContainer) {
             dom.traceStreamContainer.scrollTop = dom.traceStreamContainer.scrollHeight;
         }
     }
 
-    function filterTraceEntries() {
-        dom.traceEntriesList.innerHTML = '';
-        state.traceEvents.forEach(entry => {
-            if (shouldDisplayTrace(entry)) {
-                renderTraceEntry(entry);
-            }
-        });
-    }
+    function filterTraceStream() {
+        if (!dom.traceEntriesList) return;
+        const items = dom.traceEntriesList.querySelectorAll('.trace-item');
 
-    function shouldDisplayTrace(entry) {
-        if (state.filterType !== 'ALL' && entry.eventType.toUpperCase() !== state.filterType) {
-            return false;
-        }
-        if (state.searchQuery) {
-            const matchMsg = entry.message.toLowerCase().includes(state.searchQuery);
-            const matchPayload = entry.payload && JSON.stringify(entry.payload).toLowerCase().includes(state.searchQuery);
-            if (!matchMsg && !matchPayload) return false;
-        }
-        return true;
-    }
+        items.forEach(item => {
+            const itemType = item.getAttribute('data-type') || 'ALL';
+            const text = item.textContent.toLowerCase();
 
-    // --- Synthetic Demo Event Streamer ---
-    function startDemoStream() {
-        stopDemoStream();
-        state.isDemoMode = true;
-        if (dom.demoTaskBtn) {
-            dom.demoTaskBtn.classList.add('btn-primary');
-            dom.demoTaskBtn.classList.remove('btn-secondary');
-            dom.demoTaskBtn.textContent = '⚡ Running Demo Task...';
-        }
-        
-        setWSStatus('connected', 'Agent Execution Stream');
+            const matchesType = (activeTraceFilter === 'ALL' || itemType === activeTraceFilter);
+            const matchesQuery = (!traceSearchQuery || text.includes(traceSearchQuery));
 
-        state.metrics.status = 'RUNNING';
-        state.metrics.completedSteps = 0;
-        state.metrics.tokensPrompt = 1250;
-        state.metrics.tokensCompletion = 340;
-        state.metrics.runtimeSeconds = 0;
-        updateMetricsUI();
-        startRuntimeTimer();
-
-        appendTraceLog('SYSTEM', 'Started synthetic event stream demo mode');
-
-        const demoSequence = [
-            () => {
-                state.dagNodes[0].status = 'RUNNING';
-                renderDAG();
-                appendTraceLog('THOUGHT', 'Architect Agent: Analyzing user request: "Design a Video Game Database CRUD Backend & Frontend App using Postgres/SQLite and FastAPI".');
-            },
-            () => {
-                state.metrics.tokensPrompt += 1150;
-                state.metrics.tokensCompletion += 520;
-                state.dagNodes[0].status = 'COMPLETED';
-                state.dagNodes[1].status = 'RUNNING';
-                state.metrics.completedSteps = 1;
-                updateMetricsUI();
-                renderDAG();
-                appendTraceLog('TOOL', 'Researcher Agent: Indexing schema requirements for video games table: (id, title, genre, platform, rating, release_year, status, cover_url).', { database: 'games.db' });
-            },
-            () => {
-                state.metrics.tokensPrompt += 1800;
-                state.metrics.tokensCompletion += 840;
-                state.dagNodes[1].status = 'COMPLETED';
-                state.dagNodes[2].status = 'RUNNING';
-                state.metrics.completedSteps = 2;
-                updateMetricsUI();
-                renderDAG();
-                
-                updateCodeDiff('games_demo/app.py', [
-                    { type: 'info', text: '@@ -0,0 +1,45 @@' },
-                    { type: 'add', text: '+from fastapi import FastAPI, HTTPException' },
-                    { type: 'add', text: '+import sqlite3, time' },
-                    { type: 'add', text: '+app = FastAPI(title="Video Game Database CRUD API")' },
-                    { type: 'add', text: '+@app.get("/api/games")' },
-                    { type: 'add', text: '+def list_games(): return get_db_games()' },
-                    { type: 'add', text: '+@app.post("/api/games", status_code=201)' },
-                    { type: 'add', text: '+def create_game(game: GameCreateReq): insert_game(game)' },
-                    { type: 'add', text: '+@app.put("/api/games/{id}")' },
-                    { type: 'add', text: '+def update_game(id: int, game: GameUpdateReq): update_game_by_id(id, game)' },
-                    { type: 'add', text: '+@app.delete("/api/games/{id}")' },
-                    { type: 'add', text: '+def delete_game(id: int): delete_game_by_id(id)' }
-                ]);
-                appendTraceLog('CODE', 'Coder Agent: Implemented FastAPI Video Game Database CRUD backend in games_demo/app.py.');
-            },
-            () => {
-                state.metrics.tokensPrompt += 2400;
-                state.metrics.tokensCompletion += 1100;
-                state.dagNodes[2].status = 'COMPLETED';
-                state.dagNodes[3].status = 'RUNNING';
-                state.metrics.completedSteps = 3;
-                updateMetricsUI();
-                renderDAG();
-                
-                updateCodeDiff('games_demo/static/index.html', [
-                    { type: 'info', text: '@@ -1,15 +1,30 @@' },
-                    { type: 'add', text: '+<div class="app-layout">' },
-                    { type: 'add', text: '+  <header class="navbar glass-card"><h1>NEXUS VAULT</h1></header>' },
-                    { type: 'add', text: '+  <section class="stats-grid"><div class="stat-card">Total Games</div></section>' },
-                    { type: 'add', text: '+  <main class="games-grid" id="gamesGrid"></main>' },
-                    { type: 'add', text: '+  <div class="modal-backdrop" id="gameModal"><form id="gameForm">...</form></div>' },
-                    { type: 'add', text: '+</div>' }
-                ]);
-                appendTraceLog('CODE', 'Coder Agent: Built Video Game Vault UI frontend in games_demo/static/index.html & app.js.');
-            },
-            () => {
-                state.dagNodes[3].status = 'COMPLETED';
-                state.dagNodes[4].status = 'RUNNING';
-                state.metrics.completedSteps = 4;
-                updateMetricsUI();
-                renderDAG();
-                appendTraceLog('TEST', 'Tester Agent: Running automated verification: pytest tests/test_games_demo.py', { result: '4/4 tests passed (100% pass rate)' });
-            },
-            () => {
-                state.metrics.tokensPrompt += 1500;
-                state.metrics.tokensCompletion += 920;
-                state.dagNodes[4].status = 'COMPLETED';
-                state.metrics.completedSteps = 5;
-                state.metrics.status = 'COMPLETED';
-                updateMetricsUI();
-                renderDAG();
-                appendTraceLog('SYSTEM', 'Final Reviewer Agent: Video Game Database CRUD application built, tested, and live at http://127.0.0.1:5000!');
-                stopDemoStream();
-            }
-        ];
-
-
-        let stepIndex = 0;
-        state.demoInterval = setInterval(() => {
-            if (stepIndex < demoSequence.length) {
-                demoSequence[stepIndex]();
-                stepIndex++;
+            if (matchesType && matchesQuery) {
+                item.classList.remove('hidden');
             } else {
-                stopDemoStream();
+                item.classList.add('hidden');
             }
-        }, 2200);
-    }
-
-    function stopDemoStream() {
-        state.isDemoMode = false;
-        if (state.demoInterval) {
-            clearInterval(state.demoInterval);
-            state.demoInterval = null;
-        }
-        if (dom.demoTaskBtn) {
-            dom.demoTaskBtn.classList.remove('btn-primary');
-            dom.demoTaskBtn.classList.add('btn-neon');
-            dom.demoTaskBtn.textContent = '⚡ Demo Task';
-        }
-    }
-
-
-    // --- Model Provider Config Manager ---
-    function loadProviderConfig() {
-        const saved = localStorage.getItem('autoswe_provider_config');
-        if (saved) {
-            try {
-                const config = JSON.parse(saved);
-                dom.providerSelect.value = config.provider || 'gemini';
-                dom.baseUrlInput.value = config.base_url || '';
-                dom.apiKeyInput.value = config.api_key || '';
-                dom.modelNameInput.value = config.model_name || 'gemini-3.6-flash';
-                dom.tempInput.value = config.temperature || 0.2;
-                dom.tempValue.textContent = config.temperature || 0.2;
-            } catch (e) {}
-        }
-    }
-
-    function saveProviderConfig() {
-        const config = {
-            provider: dom.providerSelect.value,
-            base_url: dom.baseUrlInput.value.trim(),
-            api_key: dom.apiKeyInput.value.trim(),
-            model_name: dom.modelNameInput.value.trim() || 'gemini-3.6-flash',
-            temperature: parseFloat(dom.tempInput.value)
-        };
-
-        localStorage.setItem('autoswe_provider_config', JSON.stringify(config));
-
-        // POST to backend API
-        const host = getBackendApiHost();
-        const apiUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config`;
-
-        fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        })
-        .then(res => res.json())
-        .then(data => {
-            appendTraceLog('SYSTEM', `Model Provider updated to: ${config.provider.toUpperCase()} (Model: ${config.model_name}, URL: "${config.base_url || 'Cloud Default'}")`);
-            dom.providerModal.classList.add('hidden');
-        })
-        .catch(err => {
-            appendTraceLog('SYSTEM', `Saved local provider config: ${config.provider.toUpperCase()} (${config.model_name})`);
-            dom.providerModal.classList.add('hidden');
         });
     }
 
-    function testProviderConnection() {
-        const statusBox = dom.connectionStatusBox;
-        statusBox.classList.remove('hidden', 'success', 'error', 'info');
-        statusBox.classList.add('info');
-        statusBox.textContent = 'Scanning and connecting to model provider server...';
+    function clearTraceStream() {
+        if (dom.traceEntriesList) dom.traceEntriesList.innerHTML = '';
+    }
+
+    // Model Provider Modal Controls
+    function showModal(show) {
+        if (!dom.providerModal) return;
+        if (show) dom.providerModal.classList.remove('hidden');
+        else dom.providerModal.classList.add('hidden');
+    }
+
+    function handleProviderSelectChange(e) {
+        const val = e.target.value;
+        if (val === 'ollama') {
+            dom.baseUrlInput.value = 'http://localhost:11434/v1';
+            dom.baseUrlHint.textContent = 'Ollama local server endpoint (http://localhost:11434/v1). API Key is not required.';
+        } else if (val === 'gemini') {
+            dom.baseUrlInput.value = '';
+            dom.baseUrlHint.textContent = 'Google Gemini Cloud Provider. Uses environment API key by default.';
+        } else if (val === 'openai') {
+            dom.baseUrlInput.value = 'https://api.openai.com/v1';
+            dom.baseUrlHint.textContent = 'OpenAI Cloud Provider (GPT-4o).';
+        }
+    }
+
+    async function loadActiveProviderConfig() {
+        try {
+            const res = await fetch('/api/v1/provider-config');
+            if (res.ok) {
+                const config = await res.json();
+                if (dom.providerSelect) dom.providerSelect.value = config.provider || 'ollama';
+                if (dom.baseUrlInput) dom.baseUrlInput.value = config.base_url || '';
+                if (dom.modelNameInput) dom.modelNameInput.value = config.model_name || 'qwen2.5-coder';
+                if (dom.tempInput) {
+                    dom.tempInput.value = config.temperature || 0.2;
+                    dom.tempValue.textContent = config.temperature || 0.2;
+                }
+                if (dom.activeModelText) dom.activeModelText.textContent = `${config.provider.toUpperCase()}: ${config.model_name}`;
+            }
+        } catch (e) {
+            console.error("Failed to load provider config:", e);
+        }
+    }
+
+    async function testProviderConnection() {
+        if (!dom.connectionStatusBox) return;
+        dom.connectionStatusBox.className = 'connection-status-box info';
+        dom.connectionStatusBox.textContent = 'Testing connectivity to LLM provider server...';
+        dom.connectionStatusBox.classList.remove('hidden');
 
         const config = {
             provider: dom.providerSelect.value,
+            model_name: dom.modelNameInput.value.trim() || 'qwen2.5-coder',
             base_url: dom.baseUrlInput.value.trim(),
             api_key: dom.apiKeyInput.value.trim(),
-            model_name: dom.modelNameInput.value.trim() || 'gemini-3.6-flash',
             temperature: parseFloat(dom.tempInput.value)
         };
 
-        const host = getBackendApiHost();
-        const testUrl = `${window.location.protocol === 'https:' ? 'https:' : 'http:'}//${host}/api/v1/provider-config/test`;
+        try {
+            const res = await fetch('/api/v1/provider-config/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            const data = await res.json();
 
-        fetch(testUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        })
-        .then(res => res.json())
-        .then(data => {
-            statusBox.classList.remove('info', 'hidden');
             if (data.success) {
-                statusBox.classList.add('success');
-                statusBox.textContent = data.message;
-                if (data.api_key && !dom.apiKeyInput.value) {
-                    dom.apiKeyInput.value = data.api_key;
-                }
+                dom.connectionStatusBox.className = 'connection-status-box success';
+                dom.connectionStatusBox.textContent = `✓ ${data.message}`;
+
                 if (data.available_models && data.available_models.length > 0) {
-                    if (dom.modelDropdownSelect) {
-                        dom.modelDropdownSelect.innerHTML = `<option value="">Installed models (${data.available_models.length})...</option>` +
-                            data.available_models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-                        
-                        const currentInput = dom.modelNameInput.value.trim();
-                        if (currentInput && data.available_models.includes(currentInput)) {
-                            dom.modelDropdownSelect.value = currentInput;
-                        } else {
-                            dom.modelNameInput.value = data.available_models[0];
-                            dom.modelDropdownSelect.value = data.available_models[0];
-                        }
-                    }
-                } else if (dom.modelDropdownSelect) {
-                    dom.modelDropdownSelect.innerHTML = '<option value="">No models detected</option>';
+                    populateModelDropdown(data.available_models);
                 }
             } else {
-                statusBox.classList.add('error');
-                statusBox.textContent = `${data.message} ${data.error_detail || ''}`;
-                if (dom.modelDropdownSelect) {
-                    dom.modelDropdownSelect.innerHTML = '<option value="">Connection failed</option>';
-                }
+                dom.connectionStatusBox.className = 'connection-status-box error';
+                dom.connectionStatusBox.textContent = `✕ ${data.message}`;
             }
-        })
-        .catch(err => {
-            statusBox.classList.remove('info', 'hidden');
-            statusBox.classList.add('error');
-            statusBox.textContent = `Connection error: ${err.message}`;
-            if (dom.modelDropdownSelect) {
-                dom.modelDropdownSelect.innerHTML = '<option value="">Connection error</option>';
-            }
+        } catch (err) {
+            dom.connectionStatusBox.className = 'connection-status-box error';
+            dom.connectionStatusBox.textContent = `✕ Server error: ${err.message}`;
+        }
+    }
+
+    async function fetchInstalledModels() {
+        await testProviderConnection();
+    }
+
+    function populateModelDropdown(models) {
+        if (!dom.modelDropdownSelect) return;
+        dom.modelDropdownSelect.innerHTML = '<option value="">-- Select Installed Model --</option>';
+        models.forEach(model => {
+            const opt = document.createElement('option');
+            opt.value = model;
+            opt.textContent = model;
+            dom.modelDropdownSelect.appendChild(opt);
         });
     }
 
+    async function saveProviderConfig() {
+        const config = {
+            provider: dom.providerSelect.value,
+            model_name: dom.modelNameInput.value.trim() || 'qwen2.5-coder',
+            base_url: dom.baseUrlInput.value.trim(),
+            api_key: dom.apiKeyInput.value.trim(),
+            temperature: parseFloat(dom.tempInput.value)
+        };
 
+        try {
+            const res = await fetch('/api/v1/provider-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            if (res.ok) {
+                if (dom.activeModelText) dom.activeModelText.textContent = `${config.provider.toUpperCase()}: ${config.model_name}`;
+                showModal(false);
+                alert(`Provider configuration updated to ${config.provider} (${config.model_name})!`);
+            }
+        } catch (e) {
+            alert(`Failed to save provider config: ${e.message}`);
+        }
+    }
 
-    // --- Helpers ---
+    // Live Execution Timer
+    function startTimer() {
+        stopTimer();
+        startTime = Date.now();
+        timerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const hrs = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+            const mins = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+            const secs = String(elapsed % 60).padStart(2, '0');
+            if (dom.metricRuntime) dom.metricRuntime.textContent = `${hrs}:${mins}:${secs}`;
+        }, 1000);
+    }
+
+    function stopTimer() {
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = null;
+    }
+
+    // Helper Utilities
+    function resetDashboardState() {
+        stopTimer();
+        currentTaskId = null;
+        activeDiffFiles = {};
+        currentActiveDiffFile = null;
+        totalTokens = 0;
+        promptTokens = 0;
+        completionTokens = 0;
+
+        if (dom.metricStatusPill) dom.metricStatusPill.className = 'status-pill status-pending';
+        if (dom.metricStatusPill) dom.metricStatusPill.textContent = 'IDLE';
+        if (dom.metricTaskId) dom.metricTaskId.textContent = '#ready';
+        if (dom.metricRuntime) dom.metricRuntime.textContent = '00:00:00';
+        if (dom.metricTokens) dom.metricTokens.innerHTML = '0 <span class="unit">tk</span>';
+        if (dom.metricAdditions) dom.metricAdditions.textContent = '+0';
+        if (dom.metricDeletions) dom.metricDeletions.textContent = '-0';
+        if (dom.metricFilesChanged) dom.metricFilesChanged.textContent = '0 Workspace Files Modified';
+        if (dom.metricProgressText) dom.metricProgressText.textContent = '0 / 6 Stage';
+        if (dom.metricProgressPercent) dom.metricProgressPercent.textContent = '0%';
+        if (dom.metricProgressBar) dom.metricProgressBar.style.width = '0%';
+
+        // Reset Pipeline Stage Nodes
+        STAGES.forEach((stage, idx) => {
+            const nodeEl = document.getElementById(`node-${stage}`);
+            const arrowEl = document.getElementById(`arrow-${idx}-${idx + 1}`);
+            if (nodeEl) {
+                nodeEl.className = 'dag-stage-node pending';
+                const badgeEl = nodeEl.querySelector('.node-status-badge');
+                if (badgeEl) badgeEl.style.display = 'none';
+            }
+            if (arrowEl) arrowEl.className = 'pipeline-arrow';
+        });
+
+        if (dom.diffPlaceholder) dom.diffPlaceholder.classList.remove('hidden');
+        if (dom.diffCodeWrapper) dom.diffCodeWrapper.classList.add('hidden');
+        if (dom.diffTabsHeader) dom.diffTabsHeader.innerHTML = '';
+        if (dom.diffFilePath) dom.diffFilePath.textContent = 'autonomous_agent_directory/';
+
+        clearTraceStream();
+    }
+
+    function updateTaskStatusPill(status, text) {
+        if (!dom.metricStatusPill) return;
+        const cls = status.toLowerCase();
+        dom.metricStatusPill.className = `status-pill status-${cls}`;
+        dom.metricStatusPill.textContent = text || status;
+    }
+
+    function formatTimestamp() {
+        const d = new Date();
+        return d.toTimeString().split(' ')[0];
+    }
+
     function escapeHtml(str) {
-        return String(str || '')
+        return String(str)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     }
-});
 
+    // Run Initialization
+    document.addEventListener('DOMContentLoaded', init);
+
+})();

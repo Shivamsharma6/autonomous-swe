@@ -3,69 +3,96 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Autonomous Software Engineering Platform - Real-time Execution Dashboard & Event Trace Monitor">
-    <title>Autonomous SWE Platform - Execution Dashboard</title>
+    <meta name="description" content="Autonomous Software Engineering Control Plane - Real-time Multi-Agent Operations & Telemetry Dashboard">
+    <title>Autonomous SWE Platform - Control Plane Dashboard</title>
     
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="styles.css?v=2">
+    <link rel="stylesheet" href="styles.css?v=5">
 </head>
 
 <body>
-    <div class="background-glow"></div>
+    <!-- Ambient Backdrop Spotlights -->
+    <div class="background-glow">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+        <div class="glow-orb orb-3"></div>
+    </div>
 
     <div class="app-container">
-        <!-- Header -->
+        <!-- Top Control Plane Header -->
         <header class="app-header glass-card">
             <div class="header-brand">
-                <div class="logo-icon">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                        <polyline points="2 17 12 22 22 17"></polyline>
-                        <polyline points="2 12 12 17 22 12"></polyline>
+                <div class="logo-icon glow-pulse">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
                     </svg>
                 </div>
                 <div class="brand-text">
-                    <h1>Autonomous SWE Platform</h1>
-                    <span class="sub-title">Realtime Agentic Execution Control Plane</span>
+                    <div class="title-row">
+                        <h1>AUTONOMOUS<span class="gradient-text">.SWE</span></h1>
+                        <span class="badge-tag">v2.5 TELEMETRY</span>
+                    </div>
+                    <span class="sub-title">Multi-Agent SDLC Operations & Observability Platform</span>
                 </div>
             </div>
 
             <div class="header-controls">
+                <!-- Provider/Model Pill -->
+                <div class="model-badge-pill" id="activeModelBadge" title="Active Model & Provider">
+                    <span class="provider-icon">🦙</span>
+                    <span class="model-name font-mono" id="activeModelText">Ollama: qwen2.5-coder</span>
+                </div>
+
+                <!-- WebSocket Connection Status Pill -->
                 <div class="status-indicator-badge" id="wsStatusBadge">
-                    <span class="status-dot disconnected"></span>
+                    <span class="status-dot disconnected" id="wsStatusDot"></span>
                     <span class="status-text" id="wsStatusText">Disconnected</span>
                 </div>
 
+                <!-- Task Submission Command Bar -->
                 <div class="task-input-group">
-                    <input type="text" id="taskPromptInput" placeholder="Enter task for agent swarm (e.g. Design Video Game DB CRUD...)" class="task-prompt-input font-mono">
-                    <button id="submitTaskBtn" class="btn btn-primary">
-                        <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <div class="input-wrapper">
+                        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="taskPromptInput" placeholder="Submit task to agent swarm (e.g. Build pacman game logic engine...)" class="task-prompt-input font-mono">
+                        <span class="kbd-shortcut font-mono">↵ Enter</span>
+                    </div>
+                    
+                    <button id="submitTaskBtn" class="btn btn-primary btn-glow">
+                        <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                             <polygon points="5 3 19 12 5 21 5 3"/>
                         </svg>
-                        Run Task
+                        <span>Run Task</span>
                     </button>
-                    <button id="demoTaskBtn" class="btn btn-neon" title="Pre-fill & Run Video Game Database CRUD Task">
-                        ⚡ Demo Task
+                    
+                    <button id="demoTaskBtn" class="btn btn-neon" title="Quick Demo Task">
+                        ⚡ Quick Demo
                     </button>
-                    <button id="providerConfigBtn" class="btn btn-secondary" title="Configure LLM & Local Model Endpoint">
-                        ⚙️ Model Settings
+                    
+                    <button id="providerConfigBtn" class="btn btn-secondary icon-only-mobile" title="Configure LLM Endpoint">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                        <span class="hide-mobile">Models</span>
                     </button>
                 </div>
             </div>
         </header>
 
-
-
-        <!-- Execution Metrics Cards Grid -->
-        <section class="metrics-grid" aria-label="Execution Metrics">
+        <!-- Execution Observability Metrics Grid -->
+        <section class="metrics-grid" aria-label="Execution Telemetry Metrics">
+            <!-- Metric 1: Task Status -->
             <div class="metric-card glass-card">
                 <div class="metric-header">
-                    <span class="metric-title">Task Status</span>
+                    <span class="metric-title">Agent Swarm Status</span>
                     <div class="metric-icon status-icon">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"></circle>
@@ -74,14 +101,18 @@
                     </div>
                 </div>
                 <div class="metric-body">
-                    <span class="status-pill status-pending" id="metricStatusPill">PENDING</span>
-                    <span class="metric-subtext" id="metricTaskTitle">Task #1001</span>
+                    <div class="status-row">
+                        <span class="status-pill status-pending" id="metricStatusPill">IDLE</span>
+                        <span class="task-id-badge font-mono" id="metricTaskId">#ready</span>
+                    </div>
+                    <span class="metric-subtext" id="metricTaskTitle">Awaiting task submission...</span>
                 </div>
             </div>
 
+            <!-- Metric 2: Execution Timer -->
             <div class="metric-card glass-card">
                 <div class="metric-header">
-                    <span class="metric-title">Execution Runtime</span>
+                    <span class="metric-title">Elapsed Runtime</span>
                     <div class="metric-icon timer-icon">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"></circle>
@@ -90,11 +121,12 @@
                     </div>
                 </div>
                 <div class="metric-body">
-                    <span class="metric-value font-mono" id="metricRuntime">00:00:00</span>
-                    <span class="metric-subtext" id="metricRuntimeSub">Elapsed Time</span>
+                    <span class="metric-value font-mono highlight-cyan" id="metricRuntime">00:00:00</span>
+                    <span class="metric-subtext" id="metricRuntimeSub">Live Execution Timer</span>
                 </div>
             </div>
 
+            <!-- Metric 3: Token Usage -->
             <div class="metric-card glass-card">
                 <div class="metric-header">
                     <span class="metric-title">Token Usage</span>
@@ -105,11 +137,12 @@
                     </div>
                 </div>
                 <div class="metric-body">
-                    <span class="metric-value font-mono" id="metricTokens">0</span>
+                    <span class="metric-value font-mono highlight-purple" id="metricTokens">0 <span class="unit">tk</span></span>
                     <span class="metric-subtext" id="metricTokensSub">Prompt: 0 | Completion: 0</span>
                 </div>
             </div>
 
+            <!-- Metric 4: Code Modifications -->
             <div class="metric-card glass-card">
                 <div class="metric-header">
                     <span class="metric-title">Code Modifications</span>
@@ -125,13 +158,14 @@
                         <span class="diff-pill diff-add" id="metricAdditions">+0</span>
                         <span class="diff-pill diff-del" id="metricDeletions">-0</span>
                     </div>
-                    <span class="metric-subtext" id="metricFilesChanged">0 Files Changed</span>
+                    <span class="metric-subtext" id="metricFilesChanged">0 Workspace Files Modified</span>
                 </div>
             </div>
 
+            <!-- Metric 5: DAG Pipeline Progress -->
             <div class="metric-card glass-card">
                 <div class="metric-header">
-                    <span class="metric-title">Agent Workflow Progress</span>
+                    <span class="metric-title">DAG Pipeline Progress</span>
                     <div class="metric-icon progress-icon">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
@@ -140,7 +174,10 @@
                     </div>
                 </div>
                 <div class="metric-body">
-                    <span class="metric-value font-mono" id="metricProgressText">0 / 0</span>
+                    <div class="progress-info-row">
+                        <span class="metric-value font-mono highlight-emerald" id="metricProgressText">0 / 6 Stage</span>
+                        <span class="progress-percent font-mono" id="metricProgressPercent">0%</span>
+                    </div>
                     <div class="progress-bar-container">
                         <div class="progress-bar-fill" id="metricProgressBar" style="width: 0%;"></div>
                     </div>
@@ -148,23 +185,27 @@
             </div>
         </section>
 
-        <!-- Dashboard Main Layout -->
+        <!-- Control Plane Main Telemetry Dashboard Layout -->
         <main class="dashboard-main">
-            <!-- Left Column: Task DAG & Live Code Diff -->
+            <!-- Left Telemetry Column: Interactive DAG Pipeline + Code Diff Inspector -->
             <div class="main-column column-left">
-                <!-- Task DAG Container -->
+                
+                <!-- Task DAG Pipeline Flowchart Panel -->
                 <div class="panel-card glass-card" id="dagPanel">
                     <div class="panel-header">
                         <div class="panel-title">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <circle cx="18" cy="18" r="3"></circle>
-                                <circle cx="6" cy="6" r="3"></circle>
-                                <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
-                                <line x1="6" y1="9" x2="6" y2="21"></line>
-                            </svg>
-                            <h2>Task Dependency Graph (DAG)</h2>
+                            <div class="header-icon">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="18" cy="18" r="3"></circle>
+                                    <circle cx="6" cy="6" r="3"></circle>
+                                    <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+                                    <line x1="6" y1="9" x2="6" y2="21"></line>
+                                </svg>
+                            </div>
+                            <h2>Multi-Agent DAG Execution Pipeline</h2>
                         </div>
                         <div class="panel-actions">
+                            <span class="stage-tag font-mono" id="activeAgentStageTag">Architect Stage</span>
                             <button class="icon-btn" id="resetDagBtn" title="Reset Graph View">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
@@ -172,66 +213,200 @@
                             </button>
                         </div>
                     </div>
+
                     <div class="panel-body dag-body" id="dagContainer">
-                        <div class="dag-graph-view" id="dagGraphView">
-                            <!-- Graph nodes dynamically rendered here -->
+                        <!-- Pipeline Stages Flow -->
+                        <div class="dag-pipeline-flow" id="dagPipelineFlow">
+                            <!-- Node 1: Architect -->
+                            <div class="dag-stage-node pending" id="node-architect">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">1</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">ARCHITECT</span>
+                                    <span class="node-title">DAG Decomposition</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
+
+                            <div class="pipeline-arrow" id="arrow-1-2">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    <polyline points="12 5 19 12 12 19"></polyline>
+                                </svg>
+                            </div>
+
+                            <!-- Node 2: Researcher -->
+                            <div class="dag-stage-node pending" id="node-researcher">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">2</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">RESEARCHER</span>
+                                    <span class="node-title">Context Indexer</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
+
+                            <div class="pipeline-arrow" id="arrow-2-3">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    <polyline points="12 5 19 12 12 19"></polyline>
+                                </svg>
+                            </div>
+
+                            <!-- Node 3: Coder -->
+                            <div class="dag-stage-node pending" id="node-coder">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">3</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">CODER</span>
+                                    <span class="node-title">Code Generator</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
+
+                            <div class="pipeline-arrow" id="arrow-3-4">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    <polyline points="12 5 19 12 12 19"></polyline>
+                                </svg>
+                            </div>
+
+                            <!-- Node 4: Tester -->
+                            <div class="dag-stage-node pending" id="node-tester">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">4</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">TESTER</span>
+                                    <span class="node-title">Test Authoring</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
+
+                            <div class="pipeline-arrow" id="arrow-4-5">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    <polyline points="12 5 19 12 12 19"></polyline>
+                                </svg>
+                            </div>
+
+                            <!-- Node 5: Sandbox Runner -->
+                            <div class="dag-stage-node pending" id="node-sandbox">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">5</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">SANDBOX</span>
+                                    <span class="node-title">Pytest Runner & Debug</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
+
+                            <div class="pipeline-arrow" id="arrow-5-6">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    <polyline points="12 5 19 12 12 19"></polyline>
+                                </svg>
+                            </div>
+
+                            <!-- Node 6: Final Reviewer -->
+                            <div class="dag-stage-node pending" id="node-reviewer">
+                                <div class="node-icon-wrapper">
+                                    <span class="node-step-num font-mono">6</span>
+                                    <div class="node-spinner hidden"></div>
+                                </div>
+                                <div class="node-info">
+                                    <span class="node-role font-mono">REVIEWER</span>
+                                    <span class="node-title">Final Audit & Commit</span>
+                                </div>
+                                <span class="node-status-badge">Pending</span>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Live Code Diff Viewer -->
+                <!-- Live Code Diff Telemetry Inspector -->
                 <div class="panel-card glass-card" id="diffPanel">
                     <div class="panel-header">
                         <div class="panel-title">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                                <polyline points="14 2 14 8 20 8"></polyline>
-                                <line x1="12" y1="18" x2="12" y2="12"></line>
-                                <line x1="9" y1="15" x2="15" y2="15"></line>
-                            </svg>
-                            <h2>Live Code Diff Viewer</h2>
+                            <div class="header-icon">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14 2 14 8 20 8"></polyline>
+                                    <line x1="12" y1="18" x2="12" y2="12"></line>
+                                    <line x1="9" y1="15" x2="15" y2="15"></line>
+                                </svg>
+                            </div>
+                            <h2>Live Code Modifications Inspector</h2>
                         </div>
                         <div class="panel-actions">
-                            <span class="file-path-badge font-mono" id="diffFilePath">No file selected</span>
-                            <button class="icon-btn" id="copyDiffBtn" title="Copy Diff">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <span class="file-path-badge font-mono" id="diffFilePath">autonomous_agent_directory/</span>
+                            <button class="btn btn-xs btn-secondary" id="copyDiffBtn" title="Copy Current Code Diff">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                                 </svg>
+                                <span>Copy</span>
                             </button>
                         </div>
                     </div>
+
+                    <!-- File Tabs Header -->
                     <div class="diff-tabs" id="diffTabsHeader">
-                        <!-- File tabs inserted dynamically -->
+                        <div class="diff-tab active" data-filename="utils.py">
+                            <span class="tab-dot"></span>
+                            <span class="tab-name">utils.py</span>
+                        </div>
+                        <div class="diff-tab" data-filename="test_utils.py">
+                            <span class="tab-dot"></span>
+                            <span class="tab-name">test_utils.py</span>
+                        </div>
                     </div>
+
                     <div class="panel-body diff-body" id="diffViewerContainer">
                         <div class="diff-placeholder" id="diffPlaceholder">
-                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                                <polyline points="14 2 14 8 20 8"></polyline>
-                            </svg>
+                            <div class="placeholder-icon">
+                                <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14 2 14 8 20 8"></polyline>
+                                </svg>
+                            </div>
                             <p>No active code diffs received yet.</p>
-                            <span>Code modifications will stream in real-time.</span>
+                            <span>Submitting a task streams real-time file diffs & test suites here.</span>
                         </div>
-                        <pre class="diff-content font-mono hidden" id="diffContentPre"></pre>
+                        
+                        <div class="diff-code-wrapper hidden" id="diffCodeWrapper">
+                            <pre class="diff-content font-mono" id="diffContentPre"></pre>
+                        </div>
                     </div>
                 </div>
+
             </div>
 
-            <!-- Right Column: Agent Event Trace Stream -->
+            <!-- Right Telemetry Column: Agent Event Trace Stream Timeline -->
             <div class="main-column column-right">
                 <div class="panel-card glass-card" id="tracePanel">
                     <div class="panel-header">
                         <div class="panel-title">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="4 17 10 11 4 5"></polyline>
-                                <line x1="12" y1="19" x2="20" y2="19"></line>
-                            </svg>
-                            <h2>Agent Event Trace Stream</h2>
+                            <div class="header-icon">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="4 17 10 11 4 5"></polyline>
+                                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                                </svg>
+                            </div>
+                            <h2>Real-Time Agent Event Telemetry Stream</h2>
                         </div>
                         <div class="panel-actions">
-                            <button class="btn btn-xs btn-secondary" id="clearLogsBtn">Clear</button>
-                            <label class="toggle-switch" title="Auto-scroll log to bottom">
+                            <button class="btn btn-xs btn-secondary" id="clearLogsBtn">Clear Stream</button>
+                            <label class="toggle-switch" title="Auto-scroll log stream">
                                 <input type="checkbox" id="autoScrollToggle" checked>
                                 <span class="toggle-slider"></span>
                                 <span class="toggle-label">Auto-scroll</span>
@@ -239,27 +414,30 @@
                         </div>
                     </div>
 
+                    <!-- Stream Filter Toolbar -->
                     <div class="trace-filter-bar">
                         <div class="search-input-wrapper">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="11" cy="11" r="8"></circle>
                                 <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                             </svg>
-                            <input type="text" id="traceSearchInput" placeholder="Filter events or logs...">
+                            <input type="text" id="traceSearchInput" placeholder="Filter telemetry stream or logs...">
                         </div>
-                        <select id="traceFilterType" class="filter-select">
-                            <option value="ALL">All Event Types</option>
-                            <option value="THOUGHT">Agent Thoughts</option>
-                            <option value="TOOL">Tool Invocations</option>
-                            <option value="CODE">Code Changes</option>
-                            <option value="TEST">Test Results</option>
-                            <option value="ERROR">Errors</option>
+                        
+                        <select id="traceFilterType" class="filter-select font-mono">
+                            <option value="ALL">ALL EVENTS</option>
+                            <option value="THOUGHT">🧠 THOUGHTS</option>
+                            <option value="TOOL">🛠️ TOOLS</option>
+                            <option value="CODE">💻 CODE DIFFS</option>
+                            <option value="TEST">🧪 TESTS</option>
+                            <option value="SYSTEM">⚙️ SYSTEM</option>
                         </select>
                     </div>
 
+                    <!-- Event Telemetry Entries Container -->
                     <div class="panel-body trace-body" id="traceStreamContainer">
                         <div class="trace-entries" id="traceEntriesList">
-                            <!-- Streamed logs append here dynamically -->
+                            <!-- Streamed log items append here dynamically -->
                         </div>
                     </div>
                 </div>
@@ -267,7 +445,7 @@
         </main>
     </div>
 
-    <!-- Model Provider Config Modal -->
+    <!-- LLM Provider & Local Model Settings Modal -->
     <div class="modal-backdrop hidden" id="providerModal">
         <div class="modal-card glass-card">
             <div class="modal-header">
@@ -277,70 +455,69 @@
                         <line x1="8" y1="21" x2="16" y2="21"></line>
                         <line x1="12" y1="17" x2="12" y2="21"></line>
                     </svg>
-                    <h3>LLM Model & Local Provider Settings</h3>
+                    <h3>LLM Model & Endpoint Settings</h3>
                 </div>
                 <button class="icon-btn" id="closeModalBtn" title="Close Settings">&times;</button>
             </div>
+            
             <div class="modal-body">
                 <div class="form-group">
-                    <label for="providerSelect">Provider Type</label>
+                    <label for="providerSelect">Model Provider</label>
                     <select id="providerSelect" class="form-control">
-                        <option value="ollama">🦙 Ollama (Local Model Server - http://localhost:11434)</option>
-                        <option value="gemini">Google Gemini (Default Cloud)</option>
+                        <option value="ollama">🦙 Ollama (Local Server - http://localhost:11434)</option>
+                        <option value="gemini">Google Gemini (Default Cloud - gemini-3.6-flash)</option>
                         <option value="openai">OpenAI (GPT-4o / Cloud API)</option>
-                        <option value="anthropic">Anthropic (Claude-3.5 / Cloud API)</option>
-                        <option value="unsloth">Unsloth Studio / Omlx (Local Model Server)</option>
-                        <option value="custom">Custom Local / Remote OpenAI-Compatible Endpoint</option>
+                        <option value="anthropic">Anthropic (Claude-3.5 Sonnet)</option>
+                        <option value="unsloth">Unsloth Studio / Omlx (Local Server)</option>
+                        <option value="custom">Custom Local / Remote OpenAI-Compatible Server</option>
                     </select>
                 </div>
 
                 <div class="form-group">
-                    <label for="baseUrlInput">Custom Base URL (Blank by default for Cloud; fill for Local Servers)</label>
-                    <input type="text" id="baseUrlInput" class="form-control font-mono" placeholder="e.g. http://localhost:11434/v1 or http://localhost:8080/v1">
-                    <span class="form-hint" id="baseUrlHint">Connect local models running via Ollama (http://localhost:11434/v1), Omlx, Unsloth, LM Studio, etc.</span>
+                    <label for="baseUrlInput">Base Server URL (Optional for Cloud / Auto for Ollama)</label>
+                    <input type="text" id="baseUrlInput" class="form-control font-mono" placeholder="http://localhost:11434/v1">
+                    <span class="form-hint" id="baseUrlHint">Local candidate URLs (localhost ↔ host.docker.internal) are automatically resolved.</span>
                 </div>
 
                 <div class="form-group">
-                    <label for="apiKeyInput">API Key (Optional / Blank by default for Ollama & Local Models)</label>
+                    <label for="apiKeyInput">API Key (Blank for Local Models)</label>
                     <input type="password" id="apiKeyInput" class="form-control font-mono" placeholder="Optional API Key">
                 </div>
 
                 <div class="form-group">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
-                        <label for="modelNameInput" style="margin-bottom: 0;">Model ID / Name</label>
-                        <button type="button" id="fetchModelsBtn" class="btn btn-xs btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;" title="Scan & Fetch Installed Ollama Models">🔄 Fetch Local Models</button>
+                    <div class="label-row">
+                        <label for="modelNameInput">Model ID / Name</label>
+                        <button type="button" id="fetchModelsBtn" class="btn btn-xs btn-secondary" title="Auto-detect Installed Models">🔄 Fetch Installed Models</button>
                     </div>
-                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                        <input type="text" id="modelNameInput" class="form-control font-mono" style="flex: 1; min-width: 180px;" value="qwen2.5-coder" placeholder="e.g. qwen2.5-coder, llama3.2, deepseek-r1">
-                        <select id="modelDropdownSelect" class="form-control font-mono" style="flex: 1; min-width: 180px;" title="Select from detected installed models">
-                            <option value="">-- Click Fetch Local Models --</option>
+                    <div class="input-dropdown-pair">
+                        <input type="text" id="modelNameInput" class="form-control font-mono" value="qwen2.5-coder" placeholder="e.g. qwen2.5-coder, gemma4:12b">
+                        <select id="modelDropdownSelect" class="form-control font-mono">
+                            <option value="">-- Click Fetch Installed Models --</option>
                         </select>
                     </div>
                 </div>
 
                 <div class="form-group">
-                    <label for="tempInput">Temperature: <span id="tempValue">0.2</span></label>
+                    <label for="tempInput">Temperature: <span id="tempValue" class="font-mono">0.2</span></label>
                     <input type="range" id="tempInput" min="0" max="1" step="0.05" value="0.2" class="form-range">
                 </div>
 
-                <div id="connectionStatusBox" class="connection-status-box hidden"></div>
+                <div id="connectionStatusBox" class="connection-status-box hidden font-mono"></div>
             </div>
-            <div class="modal-footer" style="gap: 0.5rem;">
+
+            <div class="modal-footer">
                 <button id="testProviderBtn" class="btn btn-secondary">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polygon points="5 3 19 12 5 21 5 3"/>
                     </svg>
                     Test Connection
                 </button>
-                <button id="saveProviderBtn" class="btn btn-primary">Save Provider Config</button>
+                <button id="saveProviderBtn" class="btn btn-primary btn-glow">Save & Apply</button>
             </div>
         </div>
     </div>
 
-
     <!-- Scripts -->
-    <script src="app.js?v=4"></script>
+    <script src="app.js?v=5"></script>
 </body>
 </html>
-
-
