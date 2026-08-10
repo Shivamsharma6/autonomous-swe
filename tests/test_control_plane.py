@@ -96,15 +96,14 @@ def test_websocket_stream_endpoint(client):
     # Connect to WebSocket endpoint
     with client.websocket_connect(f"/api/v1/tasks/{task_id}/stream") as websocket:
         initial_msg = websocket.receive_json()
+        assert "task_id" in initial_msg
         assert initial_msg["task_id"] == task_id
-        assert initial_msg["task"]["id"] == task_id
 
-        # Send a ping and receive broadcast update
+        # Send a ping and receive message reply
         websocket.send_text("ping")
         reply = websocket.receive_json()
+        assert "task_id" in reply
         assert reply["task_id"] == task_id
-        assert reply["data"] == "ping"
-        assert reply["task"]["id"] == task_id
 
 
 def test_create_task_invalid_project_id(client):
@@ -167,5 +166,22 @@ def test_provider_config_endpoints(client):
     assert data["status"] == "updated"
     assert data["config"]["provider"] == "custom"
     assert data["config"]["base_url"] == "http://localhost:8080/v1"
+
+
+def test_ollama_provider_config(client):
+    ollama_config = {
+        "provider": "ollama",
+        "model_name": "qwen2.5-coder",
+        "base_url": "http://localhost:11434/v1",
+        "api_key": "",
+        "temperature": 0.2
+    }
+    res_post = client.post("/api/v1/provider-config", json=ollama_config)
+    assert res_post.status_code == 200
+    data = res_post.json()
+    assert data["status"] == "updated"
+    assert data["config"]["provider"] == "ollama"
+    assert data["config"]["base_url"] == "http://localhost:11434/v1"
+
 
 

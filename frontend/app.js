@@ -109,8 +109,10 @@ document.addEventListener('DOMContentLoaded', () => {
         baseUrlInput: document.getElementById('baseUrlInput'),
         apiKeyInput: document.getElementById('apiKeyInput'),
         modelNameInput: document.getElementById('modelNameInput'),
+        modelDropdownSelect: document.getElementById('modelDropdownSelect'),
         tempInput: document.getElementById('tempInput'),
         tempValue: document.getElementById('tempValue'),
+        fetchModelsBtn: document.getElementById('fetchModelsBtn'),
         testProviderBtn: document.getElementById('testProviderBtn'),
         saveProviderBtn: document.getElementById('saveProviderBtn'),
         connectionStatusBox: document.getElementById('connectionStatusBox')
@@ -129,6 +131,13 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Auto connect or set initial status
         setWSStatus('disconnected', 'Disconnected');
+
+        // Auto test connection and populate models if ollama/local
+        if (dom.providerSelect.value === 'ollama' || dom.baseUrlInput.value) {
+            setTimeout(() => {
+                testProviderConnection();
+            }, 500);
+        }
     }
 
 
@@ -184,27 +193,44 @@ document.addEventListener('DOMContentLoaded', () => {
         // Provider Modal Events
         dom.providerConfigBtn.addEventListener('click', () => {
             dom.providerModal.classList.remove('hidden');
+            testProviderConnection();
         });
 
         dom.closeModalBtn.addEventListener('click', () => {
             dom.providerModal.classList.add('hidden');
         });
 
+        if (dom.fetchModelsBtn) {
+            dom.fetchModelsBtn.addEventListener('click', () => {
+                testProviderConnection();
+            });
+        }
+
+        if (dom.modelDropdownSelect) {
+            dom.modelDropdownSelect.addEventListener('change', (e) => {
+                if (e.target.value) {
+                    dom.modelNameInput.value = e.target.value;
+                }
+            });
+        }
+
         dom.providerSelect.addEventListener('change', (e) => {
             const provider = e.target.value;
             if (provider === 'ollama') {
                 dom.baseUrlInput.value = 'http://localhost:11434/v1';
-                dom.modelNameInput.value = 'qwen2.5-coder';
                 dom.apiKeyInput.value = '';
+                testProviderConnection();
             } else if (provider === 'unsloth') {
                 dom.baseUrlInput.value = 'http://localhost:8080/v1';
                 dom.modelNameInput.value = 'unsloth-deepseek-r1';
                 dom.apiKeyInput.value = '';
+                testProviderConnection();
             } else if (provider === 'custom') {
                 if (!dom.baseUrlInput.value) {
                     dom.baseUrlInput.value = 'http://localhost:8080/v1';
                 }
                 dom.apiKeyInput.value = '';
+                testProviderConnection();
             } else {
                 dom.baseUrlInput.value = '';
                 if (provider === 'gemini') dom.modelNameInput.value = 'gemini-3.6-flash';
@@ -263,6 +289,9 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(res => res.json())
         .then(data => {
             appendTraceLog('SYSTEM', `Backend Task initialized (ID: ${data.task_id}). LangSmith Tracing active.`);
+            if (data.task_id) {
+                connectWebSocket(data.task_id);
+            }
         })
         .catch(err => {
             appendTraceLog('SYSTEM', `Backend notification: ${err.message}`);
@@ -768,7 +797,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const statusBox = dom.connectionStatusBox;
         statusBox.classList.remove('hidden', 'success', 'error', 'info');
         statusBox.classList.add('info');
-        statusBox.textContent = 'Testing connection to model provider server...';
+        statusBox.textContent = 'Scanning and connecting to model provider server...';
 
         const config = {
             provider: dom.providerSelect.value,
@@ -788,7 +817,7 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .then(res => res.json())
         .then(data => {
-            statusBox.classList.remove('info');
+            statusBox.classList.remove('info', 'hidden');
             if (data.success) {
                 statusBox.classList.add('success');
                 statusBox.textContent = data.message;
@@ -796,17 +825,36 @@ document.addEventListener('DOMContentLoaded', () => {
                     dom.apiKeyInput.value = data.api_key;
                 }
                 if (data.available_models && data.available_models.length > 0) {
-                    dom.modelNameInput.value = data.available_models[0];
+                    if (dom.modelDropdownSelect) {
+                        dom.modelDropdownSelect.innerHTML = `<option value="">Installed models (${data.available_models.length})...</option>` +
+                            data.available_models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+                        
+                        const currentInput = dom.modelNameInput.value.trim();
+                        if (currentInput && data.available_models.includes(currentInput)) {
+                            dom.modelDropdownSelect.value = currentInput;
+                        } else {
+                            dom.modelNameInput.value = data.available_models[0];
+                            dom.modelDropdownSelect.value = data.available_models[0];
+                        }
+                    }
+                } else if (dom.modelDropdownSelect) {
+                    dom.modelDropdownSelect.innerHTML = '<option value="">No models detected</option>';
                 }
             } else {
                 statusBox.classList.add('error');
                 statusBox.textContent = `${data.message} ${data.error_detail || ''}`;
+                if (dom.modelDropdownSelect) {
+                    dom.modelDropdownSelect.innerHTML = '<option value="">Connection failed</option>';
+                }
             }
         })
         .catch(err => {
-            statusBox.classList.remove('info');
+            statusBox.classList.remove('info', 'hidden');
             statusBox.classList.add('error');
             statusBox.textContent = `Connection error: ${err.message}`;
+            if (dom.modelDropdownSelect) {
+                dom.modelDropdownSelect.innerHTML = '<option value="">Connection error</option>';
+            }
         });
     }
 

@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoswe_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - LANGCHAIN_TRACING_V2=true
+      - LANGCHAIN_API_KEY=
+      - LANGCHAIN_PROJECT=autonomous-swe-platform
+      - LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+      - ./autonomous_agent_directory:/app/autonomous_agent_directory
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: autoswe_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  games_demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.games_demo
+    container_name: autoswe_games_demo
+    ports:
+      - "5001:5000"
+    restart: unless-stopped

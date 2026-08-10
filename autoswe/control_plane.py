@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from autoswe.models import TaskNode, TaskStatus, ModelProviderConfig
 from autoswe.scheduler import TaskScheduler
 from autoswe.storage import StorageEngine
+from autoswe.logger import logger, log_event
 
 app = FastAPI(title="Autonomous Software Engineering Control Plane API")
 
@@ -112,66 +113,125 @@ def update_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
     return {"status": "updated", "config": active_provider_config.model_dump()}
 
 
+def _resolve_url_candidates(base_url: str) -> List[str]:
+    candidates = []
+    if base_url:
+        candidates.append(base_url)
+        if "localhost" in base_url:
+            candidates.append(base_url.replace("localhost", "host.docker.internal"))
+        elif "127.0.0.1" in base_url:
+            candidates.append(base_url.replace("127.0.0.1", "host.docker.internal"))
+        elif "host.docker.internal" in base_url:
+            candidates.append(base_url.replace("host.docker.internal", "localhost"))
+    else:
+        candidates = ["http://localhost:11434/v1", "http://host.docker.internal:11434/v1"]
+    
+    # Remove duplicates preserving order
+    seen = set()
+    result = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
 @app.post("/api/v1/provider-config/test")
 def test_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
-    base_url = config.base_url.rstrip("/")
-    if not base_url:
+    raw_base_url = config.base_url.rstrip("/")
+    if not raw_base_url:
         if config.provider == "ollama":
-            base_url = "http://localhost:11434/v1"
+            raw_base_url = "http://localhost:11434/v1"
         elif config.provider in ("custom", "unsloth", "local"):
-            base_url = "http://localhost:8888/v1"
+            raw_base_url = "http://localhost:8888/v1"
 
-    api_key = config.api_key
-    if not api_key:
-        api_key = _auto_detect_unsloth_key()
+    candidates = _resolve_url_candidates(raw_base_url)
+    api_key = config.api_key or _auto_detect_unsloth_key()
 
-    models_url = f"{base_url}/models"
-    req = urllib.request.Request(models_url)
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
+    last_error = ""
 
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            body = response.read().decode("utf-8")
-            data = json.loads(body)
-            models = []
-            if isinstance(data, dict) and "data" in data:
-                models = [m.get("id") for m in data["data"] if isinstance(m, dict)]
-            return {
-                "success": True,
-                "status_code": response.status,
-                "base_url": base_url,
-                "api_key_detected": bool(api_key),
-                "api_key": api_key,
-                "available_models": models,
-                "message": f"Successfully connected to {config.provider.upper()} server at {base_url}! Available models: {', '.join(models[:3]) or 'Loaded'}",
-            }
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="ignore")
-        return {
-            "success": False,
-            "status_code": e.code,
-            "base_url": base_url,
-            "api_key_detected": bool(api_key),
-            "message": f"HTTP {e.code} Error connecting to {base_url}: {e.reason}",
-            "error_detail": err_body,
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "status_code": 500,
-            "base_url": base_url,
-            "api_key_detected": bool(api_key),
-            "message": f"Connection failed to {base_url}: {str(e)}",
-        }
+    # Attempt 1: Standard OpenAI /v1/models endpoint across all candidates
+    for base_url in candidates:
+        models_url = f"{base_url}/models"
+        req = urllib.request.Request(models_url)
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                body = response.read().decode("utf-8")
+                data = json.loads(body)
+                models = []
+                if isinstance(data, dict) and "data" in data:
+                    models = [m.get("id") for m in data["data"] if isinstance(m, dict) and m.get("id")]
+                return {
+                    "success": True,
+                    "status_code": response.status,
+                    "base_url": base_url,
+                    "api_key_detected": bool(api_key),
+                    "api_key": api_key,
+                    "available_models": models,
+                    "message": f"Connected to {config.provider.upper()} server! Auto-detected models: {', '.join(models[:4]) or 'Loaded'}",
+                }
+        except Exception as e:
+            last_error = str(e)
+
+    # Attempt 2: Fallback to Ollama native /api/tags endpoint across candidates
+    if config.provider == "ollama" or any("11434" in c for c in candidates):
+        for base_url in candidates:
+            tags_url = f"{base_url.replace('/v1', '').rstrip('/')}/api/tags"
+            try:
+                tags_req = urllib.request.Request(tags_url)
+                with urllib.request.urlopen(tags_req, timeout=5) as response:
+                    body = response.read().decode("utf-8")
+                    data = json.loads(body)
+                    models = []
+                    if isinstance(data, dict) and "models" in data:
+                        models = [m.get("name") for m in data["models"] if isinstance(m, dict) and m.get("name")]
+                    return {
+                        "success": True,
+                        "status_code": response.status,
+                        "base_url": base_url,
+                        "api_key_detected": False,
+                        "available_models": models,
+                        "message": f"Connected to Ollama server at {tags_url}! Installed models ({len(models)}): {', '.join(models[:5])}",
+                    }
+            except Exception as e:
+                last_error = str(e)
+
+    return {
+        "success": False,
+        "status_code": 500,
+        "base_url": raw_base_url,
+        "api_key_detected": bool(api_key),
+        "message": f"Connection failed to Ollama/LLM server: {last_error}",
+    }
 
 
 
 
 async def _run_workflow_background(task_id: str, project_id: str, user_request: str):
     from autoswe.orchestrator import WorkflowOrchestrator
-    orchestrator = WorkflowOrchestrator(storage_engine=storage)
-    
+    base_dir = os.path.abspath("autonomous_agent_directory")
+    task_workspace = os.path.join(base_dir, task_id)
+    os.makedirs(task_workspace, exist_ok=True)
+    orchestrator = WorkflowOrchestrator(storage_engine=storage, workspace_path=task_workspace)
+    loop = asyncio.get_running_loop()
+
+    def progress_cb(event_type: str, message: str, payload: Any = None):
+        msg = {
+            "task_id": task_id,
+            "event_type": event_type,
+            "message": message,
+            "payload": payload,
+        }
+        if isinstance(payload, dict):
+            if "code_diff" in payload:
+                msg["code_diff"] = payload["code_diff"]
+            if "dag_nodes" in payload:
+                msg["dag_nodes"] = payload["dag_nodes"]
+        asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
+
     await manager.broadcast({
         "task_id": task_id,
         "event_type": "SYSTEM",
@@ -179,7 +239,14 @@ async def _run_workflow_background(task_id: str, project_id: str, user_request: 
         "payload": {"project_id": project_id, "provider": active_provider_config.provider, "model": active_provider_config.model_name}
     })
 
-    res = await asyncio.to_thread(orchestrator.run_workflow, user_request=user_request, project_id=project_id)
+    res = await asyncio.to_thread(
+        orchestrator.run_workflow,
+        user_request=user_request,
+        project_id=project_id,
+        task_id=task_id,
+        provider_config=active_provider_config,
+        progress_callback=progress_cb,
+    )
     
     await manager.broadcast({
         "task_id": task_id,
@@ -204,28 +271,23 @@ def create_project(req: ProjectCreateReq) -> Dict[str, Any]:
 @app.post("/api/v1/tasks")
 async def create_task(req: TaskCreateReq) -> Dict[str, Any]:
     task_id = req.task_id or f"task-{int(time.time() * 1000)}"
-    try:
-        task_dict = storage.create_task(
-            task_id=task_id,
-            project_id=req.project_id,
-            title=req.user_request,
-            description=req.description,
-            status=TaskStatus.PENDING,
-        )
-    except sqlite3.IntegrityError:
-        # Auto-create project if missing
+
+    # Ensure project exists
+    proj = storage.get_project(req.project_id)
+    if not proj:
         storage.create_project(
             project_id=req.project_id,
             name="Default Project",
             description="Auto-created project",
         )
-        task_dict = storage.create_task(
-            task_id=task_id,
-            project_id=req.project_id,
-            title=req.user_request,
-            description=req.description,
-            status=TaskStatus.PENDING,
-        )
+
+    task_dict = storage.create_task(
+        task_id=task_id,
+        project_id=req.project_id,
+        title=req.user_request,
+        description=req.description,
+        status=TaskStatus.PENDING,
+    )
 
     node = TaskNode(
         id=task_id,
@@ -240,6 +302,7 @@ async def create_task(req: TaskCreateReq) -> Dict[str, Any]:
     asyncio.create_task(_run_workflow_background(task_id, req.project_id, req.user_request))
 
     return {"task_id": task_dict["id"], "project_id": req.project_id, "status": "PENDING"}
+
 
 
 

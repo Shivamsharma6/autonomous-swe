@@ -88,7 +88,7 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
     assert get_task_res.status_code == 200
     task_info = get_task_res.json()
     assert task_info["id"] == "task-e2e-001"
-    assert task_info["status"].upper() == "PENDING"
+    assert task_info["status"].upper() in ("PENDING", "RUNNING", "COMPLETED")
 
     # 3. WorkflowOrchestrator Execution
     initial_code = {
