@@ -85,7 +85,7 @@ Expected: a new commit on `codex/production-agentic-platform`.
 **Files:**
 - Verify: complete repository
 
-- [ ] **Step 1: Merge the feature branch from the clean main worktree**
+- [x] **Step 1: Merge the feature branch from the clean main worktree**
 
 ```bash
 git merge codex/production-agentic-platform
@@ -93,7 +93,7 @@ git merge codex/production-agentic-platform
 
 Expected: a successful fast-forward or merge with no conflicts.
 
-- [ ] **Step 2: Run the complete test suite on merged main**
+- [x] **Step 2: Run the complete test suite on merged main**
 
 ```bash
 .venv/bin/pytest -q
@@ -101,7 +101,7 @@ Expected: a successful fast-forward or merge with no conflicts.
 
 Expected: all tests pass.
 
-- [ ] **Step 3: Verify final state and clean up the owned worktree**
+- [x] **Step 3: Verify final state and clean up the owned worktree**
 
 ```bash
 git status --short

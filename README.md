@@ -670,7 +670,7 @@ containers use `host.docker.internal`, not `localhost`.
 
 - Docker Engine with Compose v2
 - Git, OpenSSL, and curl
-- Python 3.11+ for local development commands
+- Python 3.12+ for local development commands; recreate older virtual environments after upgrading
 - an already-running UAMS service reachable from containers
 - an OpenAI-compatible model endpoint reachable from containers
 
