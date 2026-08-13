@@ -196,7 +196,7 @@
 - [x] Implement an HTTPX OpenAI-compatible gateway plus a deterministic scripted gateway. Implement one generic agent runtime that validates its `AgentSpec`, gathers bounded context, invokes the gateway, validates typed output, dispatches typed tool calls, and records usage.
 - [x] Convert architect, researcher, coder, tester, reviewer, debugger, documentation, validation, and final-review modules into declarative specs over the shared runtime; instantiate only roles required by the DAG.
 - [x] Run `pytest tests/contract/test_model_gateway.py tests/unit/agents -q`.
-- [ ] Commit: `feat: add structured model and agent runtime`
+- [x] Commit: `feat: add structured model and agent runtime`
 
 ---
 
@@ -231,11 +231,11 @@
 - Create: `tests/unit/workflows/test_repair.py`
 - Create: `tests/integration/workflows/test_repair_resume.py`
 
-- [ ] Write tests where repository verification fails, the debugger emits a typed mutation, incremental validation adds one repair task, and the next verification succeeds. Cover mutation count, depth, budget, time, repeated-signature, and no-progress termination.
-- [ ] Prove a crash after accepting the mutation but before dispatch resumes the exact plan revision without adding the repair twice.
-- [ ] Prove final review uses only verified non-corrupt artifact IDs and maps every original acceptance criterion to explicit evidence or a failure reason.
-- [ ] Run tests, implement the repair controller and release reviewer, then rerun.
-- [ ] Commit: `feat: add bounded evidence-driven repair workflow`
+- [x] Write tests where repository verification fails, the debugger emits a typed mutation, incremental validation adds one repair task, and the next verification succeeds. Cover mutation count, depth, budget, time, repeated-signature, and no-progress termination.
+- [x] Prove a crash after accepting the mutation but before dispatch resumes the exact plan revision without adding the repair twice.
+- [x] Prove final review uses only verified non-corrupt artifact IDs and maps every original acceptance criterion to explicit evidence or a failure reason.
+- [x] Run tests, implement the repair controller and release reviewer, then rerun.
+- [x] Commit: `feat: add bounded evidence-driven repair workflow`
 
 ---
 

@@ -241,7 +241,7 @@ class ArtifactService:
         )
         try:
             return self.store.read_verified(stored)
-        except ArtifactIntegrityError:
+        except (ArtifactIntegrityError, ArtifactPathError, FileNotFoundError):
             await self.repository.mark_artifact_corrupt(
                 session,
                 project_id=project_id,
@@ -249,6 +249,6 @@ class ArtifactService:
             )
             try:
                 self.store.quarantine(stored)
-            except FileNotFoundError:
+            except (ArtifactError, FileNotFoundError):
                 pass
             raise

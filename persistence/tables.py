@@ -146,6 +146,48 @@ class PlanRevisionRow(Base):
     )
 
 
+class RepairMutationRow(Base):
+    __tablename__ = "repair_mutations"
+
+    mutation_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    base_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    accepted_revision: Mapped[int | None] = mapped_column(Integer)
+    failure_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    progress_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    mutation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    verification_artifact_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    mutation: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    __table_args__ = (
+        CheckConstraint("base_revision >= 1", name="ck_repair_base_revision_positive"),
+        CheckConstraint(
+            "accepted_revision IS NULL OR accepted_revision > base_revision",
+            name="ck_repair_accepted_revision_order",
+        ),
+        CheckConstraint(
+            "length(failure_signature) = 64",
+            name="ck_repair_failure_signature",
+        ),
+        CheckConstraint(
+            "length(progress_fingerprint) = 64",
+            name="ck_repair_progress_fingerprint",
+        ),
+        CheckConstraint("length(mutation_hash) = 64", name="ck_repair_mutation_hash"),
+        Index("ix_repair_mutations_run_status", "run_id", "status", "created_at"),
+    )
+
+
 class TaskRow(TimestampMixin, Base):
     __tablename__ = "tasks"
 
