@@ -893,6 +893,18 @@ scripts/                   Bootstrap, migrate, backup, restore, reconcile, smoke
 
 ## Verification
 
+### Local development environment
+
+The lock files were generated with Python 3.14 and the package supports Python 3.12 through 3.14.
+Archive or remove any older virtual environment, then create a locked development environment:
+
+```bash
+uv venv --python 3.14 .venv
+uv pip sync --python .venv/bin/python requirements-dev.lock
+```
+
+Use `requirements.lock` instead when only runtime dependencies are required.
+
 ### Fast development gates
 
 ```bash
