@@ -25,14 +25,14 @@
 - Create: `tests/unit/test_settings.py`
 - Create: `infrastructure/config.py`
 
-- [ ] Write `tests/unit/test_settings.py` proving startup rejects a missing admin token, SQLite URLs, wildcard CORS, an unconfigured model base URL, and an unconfigured UAMS URL in production mode. Prove the same settings accept explicit test adapters only when `AUTOSWE_ENV=test`.
-- [ ] Run `pytest tests/unit/test_settings.py -q`; expect import failure for `infrastructure.config.Settings`.
-- [ ] Add pinned-compatible runtime dependencies for SQLAlchemy async, AsyncPG, Alembic, Redis asyncio, HTTPX, psycopg, LangGraph Postgres checkpoints, Docker, Prometheus, OpenTelemetry, structured logging, and multipart handling. Add development groups for pytest-asyncio, Hypothesis, testcontainers, Ruff, and MyPy.
-- [ ] Implement a Pydantic settings model with `SecretStr` credentials and explicit validated fields for PostgreSQL, Redis, UAMS, model gateway, artifact root, managed-worktree root, CORS origins, service limits, and sandbox image digests. Do not expose secret values in `repr`, JSON, logs, or API schemas.
-- [ ] Put names and safe local examples—not secret values—in `.env.example`. Remove any committed model or tracing credential from Compose during Task 15.
-- [ ] Generate `requirements.lock` from the chosen resolved environment and install from it in CI and images.
-- [ ] Run `pytest tests/unit/test_settings.py -q`, then `ruff check infrastructure tests/unit/test_settings.py`.
-- [ ] Commit: `build: establish production dependencies and settings`
+- [x] Write `tests/unit/test_settings.py` proving startup rejects a missing admin token, SQLite URLs, wildcard CORS, an unconfigured model base URL, and an unconfigured UAMS URL in production mode. Prove the same settings accept explicit test adapters only when `AUTOSWE_ENV=test`.
+- [x] Run `pytest tests/unit/test_settings.py -q`; expect import failure for `infrastructure.config.Settings`.
+- [x] Add pinned-compatible runtime dependencies for SQLAlchemy async, AsyncPG, Alembic, Redis asyncio, HTTPX, psycopg, LangGraph Postgres checkpoints, Docker, Prometheus, OpenTelemetry, structured logging, and multipart handling. Add development groups for pytest-asyncio, Hypothesis, testcontainers, Ruff, and MyPy.
+- [x] Implement a Pydantic settings model with `SecretStr` credentials and explicit validated fields for PostgreSQL, Redis, UAMS, model gateway, artifact root, managed-worktree root, CORS origins, service limits, and sandbox image digests. Do not expose secret values in `repr`, JSON, logs, or API schemas.
+- [x] Put names and safe local examples—not secret values—in `.env.example`. Remove any committed model or tracing credential from Compose during Task 15.
+- [x] Generate `requirements.lock` from the chosen resolved environment and install from it in CI and images.
+- [x] Run `pytest tests/unit/test_settings.py -q`, then `ruff check infrastructure tests/unit/test_settings.py`.
+- [x] Commit: `build: establish production dependencies and settings`
 
 ### Task 2: Define versioned domain, graph, model, and message contracts
 
