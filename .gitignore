@@ -9,6 +9,7 @@ dist/
 build/
 *.db
 .superpowers/
+.worktrees/
 .env
 
 # Generated runtime directories
@@ -16,4 +17,3 @@ autonomous_agent_directory/
 logs/
 artifacts/
 data/
-
