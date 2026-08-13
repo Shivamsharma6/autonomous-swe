@@ -271,10 +271,10 @@
 - Create: `tests/fixtures/node_project/package-lock.json`
 - Create: `tests/unit/repositories/test_adapters.py`
 
-- [ ] Write fixture tests for detection, source/test discovery, lockfile selection, dependency command, lint, typecheck, targeted test, full test, build, and artifact collection.
-- [ ] Prove every command is an argument array selected from manifest/adapter policy; reject model-provided shell strings, ambiguous lockfiles, repository escapes, and unsupported lifecycle scripts.
-- [ ] Run tests, implement the adapter protocol and two adapters, then rerun.
-- [ ] Commit: `feat: add governed python and node repository adapters`
+- [x] Write fixture tests for detection, source/test discovery, lockfile selection, dependency command, lint, typecheck, targeted test, full test, build, and artifact collection.
+- [x] Prove every command is an argument array selected from manifest/adapter policy; reject model-provided shell strings, ambiguous lockfiles, repository escapes, and unsupported lifecycle scripts.
+- [x] Run tests, implement the adapter protocol and two adapters, then rerun.
+- [x] Commit: `feat: add governed python and node repository adapters`
 
 ### Task 14: Replace host shell execution with isolated worktree containers
 

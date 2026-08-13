@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "example-app"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = [
+    "build>=1.2,<2",
+    "mypy>=1.15,<2",
+    "pytest>=8,<10",
+    "ruff>=0.11,<1",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
