@@ -146,13 +146,13 @@
 - Create: `tests/integration/messaging/test_delivery.py`
 - Create: `tests/integration/messaging/test_dead_letters.py`
 
-- [ ] Write tests proving the publisher claims outbox rows with `SKIP LOCKED`, persists publish attempts, and can publish the same stable event twice after a crash.
-- [ ] Prove consumers atomically claim unique `(consumer, event_id)` receipts before applying an effect, duplicate delivery creates no duplicate effect, pending entries are reclaimed, exponential retry is bounded, and the eighth failed delivery becomes a PostgreSQL dead letter with its causation chain.
-- [ ] Prove retention leaves active workflows, unresolved approvals, current UAMS promotions, and referenced audit evidence untouched while enforcing the approved 24-hour/90-day/30-day/365-day policies.
-- [ ] Run tests; expect missing package failures.
-- [ ] Implement Redis Streams as transport only. PostgreSQL message/outbox/receipt rows remain canonical, and Redis loss is recoverable by republishing unpublished or unacknowledged canonical events.
-- [ ] Run `pytest tests/unit/messaging tests/integration/messaging -q`.
-- [ ] Commit: `feat: add duplicate-safe agent event delivery`
+- [x] Write tests proving the publisher claims outbox rows with `SKIP LOCKED`, persists publish attempts, and can publish the same stable event twice after a crash.
+- [x] Prove consumers atomically claim unique `(consumer, event_id)` receipts before applying an effect, duplicate delivery creates no duplicate effect, pending entries are reclaimed, exponential retry is bounded, and the eighth failed delivery becomes a PostgreSQL dead letter with its causation chain.
+- [x] Prove retention leaves active workflows, unresolved approvals, current UAMS promotions, and referenced audit evidence untouched while enforcing the approved 24-hour/90-day/30-day/365-day policies.
+- [x] Run tests; expect missing package failures.
+- [x] Implement Redis Streams as transport only. PostgreSQL message/outbox/receipt rows remain canonical, and Redis loss is recoverable by republishing unpublished or unacknowledged canonical events.
+- [x] Run `pytest tests/unit/messaging tests/integration/messaging -q`.
+- [x] Commit: `feat: add duplicate-safe agent event delivery`
 
 ---
 

@@ -342,6 +342,7 @@ class AgentMessageRow(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     retained_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         CheckConstraint("length(content_hash) = 64", name="ck_message_content_hash"),
         Index("ix_messages_task_created", "task_id", "created_at"),
@@ -360,12 +361,16 @@ class OutboxRow(Base):
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    publisher: Mapped[str | None] = mapped_column(String(255))
+    claim_token: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="ck_outbox_attempts"),
         Index("ix_outbox_publishable", "published_at", "next_attempt_at"),
+        Index("ix_outbox_claim_expiry", "claimed_until"),
     )
 
 
@@ -381,11 +386,35 @@ class ConsumerReceiptRow(Base):
     __table_args__ = (UniqueConstraint("consumer", "event_id", name="uq_consumer_event_receipt"),)
 
 
+class ConsumerDeliveryRow(Base):
+    __tablename__ = "consumer_deliveries"
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    consumer: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    topic: Mapped[str] = mapped_column(String(200), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="RETRY", nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint("consumer", "event_id", name="uq_consumer_event_delivery"),
+        CheckConstraint("attempts >= 0", name="ck_consumer_delivery_attempts"),
+        Index("ix_consumer_delivery_retry", "status", "next_attempt_at"),
+    )
+
+
 class DeadLetterRow(Base):
     __tablename__ = "dead_letters"
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
     event_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    consumer: Mapped[str] = mapped_column(String(255), nullable=False)
     topic: Mapped[str] = mapped_column(String(200), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -398,6 +427,7 @@ class DeadLetterRow(Base):
     __table_args__ = (
         CheckConstraint("attempts > 0", name="ck_dead_letter_attempts"),
         Index("ix_dead_letters_unresolved", "resolved_at", "created_at"),
+        UniqueConstraint("consumer", "event_id", name="uq_dead_letter_consumer_event"),
     )
 
 

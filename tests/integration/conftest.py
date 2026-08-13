@@ -4,8 +4,10 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
+from redis.asyncio import Redis
 from sqlalchemy import text
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.community.redis import RedisContainer
 
 from persistence.database import Database
 
@@ -34,3 +36,19 @@ async def database(postgres_urls: tuple[str, str]) -> AsyncIterator[Database]:
         await connection.run_sync(database.metadata.create_all)
     yield database
     await database.dispose()
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> Iterator[str]:
+    with RedisContainer(image="redis:7.4-bookworm") as redis_container:
+        host = redis_container.get_container_host_ip()
+        port = redis_container.get_exposed_port(redis_container.port)
+        yield f"redis://{host}:{port}/0"
+
+
+@pytest_asyncio.fixture
+async def redis_client(redis_url: str) -> AsyncIterator[Redis]:
+    client = Redis.from_url(redis_url, decode_responses=True)
+    await client.flushdb()
+    yield client
+    await client.aclose()

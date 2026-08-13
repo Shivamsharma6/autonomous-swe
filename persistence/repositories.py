@@ -26,6 +26,7 @@ from persistence.tables import (
     ApprovalRow,
     ArtifactRow,
     AuditEventRow,
+    ConsumerDeliveryRow,
     ConsumerReceiptRow,
     DeadLetterRow,
     GraphExecutionRow,
@@ -333,9 +334,11 @@ class DomainRepository:
         attempts: int,
         last_error: str,
         causation_chain: tuple[UUID, ...],
+        consumer: str = "legacy",
     ) -> DeadLetterRow:
         row = DeadLetterRow(
             event_id=event_id,
+            consumer=consumer,
             topic=topic,
             payload=payload,
             attempts=attempts,
@@ -603,6 +606,7 @@ class DomainRepository:
             AgentMessageRow,
             OutboxRow,
             ConsumerReceiptRow,
+            ConsumerDeliveryRow,
             DeadLetterRow,
             ToolExecutionRow,
             ApprovalRow,

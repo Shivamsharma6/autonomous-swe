@@ -53,6 +53,35 @@ def test_migrations_upgrade_and_downgrade_without_losing_compatible_rows(
                 text("UPDATE audit_events SET event_type = 'tampered' WHERE id = :id"),
                 {"id": audit_id},
             )
+    with pytest.raises(DBAPIError, match="audit_events are immutable"):
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM audit_events WHERE id = :id"),
+                {"id": audit_id},
+            )
+
+    expired_audit_id = uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO audit_events "
+                "(id, event_type, aggregate_type, aggregate_id, payload, correlation_id, "
+                "causation_id, content_hash, created_at) VALUES "
+                "(:id, 'expired', 'task', :aggregate_id, '{}'::jsonb, :correlation_id, "
+                ":causation_id, :content_hash, now() - interval '366 days')"
+            ),
+            {
+                "id": expired_audit_id,
+                "aggregate_id": uuid4(),
+                "correlation_id": uuid4(),
+                "causation_id": uuid4(),
+                "content_hash": "e" * 64,
+            },
+        )
+        connection.execute(
+            text("DELETE FROM audit_events WHERE id = :id"),
+            {"id": expired_audit_id},
+        )
 
     project_id = uuid4()
     with engine.begin() as connection:
