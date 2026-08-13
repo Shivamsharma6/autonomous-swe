@@ -16,6 +16,7 @@ def production_values() -> dict[str, object]:
         "uams_token": "uams-service-token",
         "model_base_url": "http://host.docker.internal:11434/v1",
         "model_api_key": "model-service-token",
+        "model_primary": "qwen-coder",
         "cors_origins": ["http://localhost:3000"],
         "artifact_root": "/var/lib/autoswe/artifacts",
         "managed_worktree_root": "/var/lib/autoswe/worktrees",
@@ -72,6 +73,7 @@ def test_memory_and_scripted_adapters_are_test_only() -> None:
         "redis_url": "memory://events",
         "uams_url": "memory://uams",
         "model_base_url": "scripted://model",
+        "model_primary": "scripted-model",
         "cors_origins": ["http://testserver"],
         "python_runner_image": "test://python-runner",
         "node_runner_image": "test://node-runner",
@@ -91,3 +93,13 @@ def test_secrets_are_redacted_from_repr_and_json() -> None:
     assert "uams-service-token" not in rendered
     assert "model-service-token" not in rendered
     assert "**********" in rendered
+
+
+def test_declared_model_capabilities_must_cover_runtime_contract() -> None:
+    values = production_values() | {
+        "model_capability_mode": "declared",
+        "model_declared_capabilities": ["structured_outputs"],
+    }
+
+    with pytest.raises(ValidationError, match="native_tool_calls"):
+        Settings(_env_file=None, **values)

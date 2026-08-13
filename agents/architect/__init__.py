@@ -1,3 +1,3 @@
-from agents.architect.agent import ArchitectAgent
+from agents.architect.agent import ROLE
 
-__all__ = ["ArchitectAgent"]
+__all__ = ["ROLE"]

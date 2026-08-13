@@ -35,6 +35,21 @@ class Settings(BaseSettings):
     uams_timeout_seconds: float = Field(default=15.0, gt=0, le=300)
     model_base_url: str
     model_api_key: SecretStr = SecretStr("")
+    model_primary: str
+    model_fallbacks: list[str] = Field(default_factory=list, max_length=10)
+    model_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
+    model_input_cost_per_million: float = Field(default=0.0, ge=0)
+    model_cached_input_cost_per_million: float = Field(default=0.0, ge=0)
+    model_output_cost_per_million: float = Field(default=0.0, ge=0)
+    model_capability_mode: Literal["detect", "declared"] = "detect"
+    model_declared_capabilities: set[
+        Literal[
+            "structured_outputs",
+            "native_tool_calls",
+            "streaming",
+            "usage_accounting",
+        ]
+    ] = Field(default_factory=set)
 
     cors_origins: list[str]
     artifact_root: Path = Path("/var/lib/autoswe/artifacts")
@@ -74,6 +89,7 @@ class Settings(BaseSettings):
             "redis_url": self.redis_url,
             "uams_url": self.uams_url,
             "model_base_url": self.model_base_url,
+            "model_primary": self.model_primary,
         }
         for field_name, value in service_values.items():
             if not value.strip():
@@ -105,4 +121,18 @@ class Settings(BaseSettings):
             raise ValueError("max_model_concurrency cannot exceed max_parallel_tasks")
         if self.max_sandbox_concurrency > self.max_parallel_tasks:
             raise ValueError("max_sandbox_concurrency cannot exceed max_parallel_tasks")
+        required_model_capabilities = {
+            "structured_outputs",
+            "native_tool_calls",
+            "streaming",
+            "usage_accounting",
+        }
+        if self.model_capability_mode == "declared" and not required_model_capabilities.issubset(
+            self.model_declared_capabilities
+        ):
+            missing = required_model_capabilities.difference(self.model_declared_capabilities)
+            raise ValueError(
+                "model_declared_capabilities is missing production requirements: "
+                + ", ".join(sorted(missing))
+            )
         return self

@@ -1,5 +1,5 @@
 from agents.specs import AgentRole
 
-ROLE = AgentRole.TESTER
+ROLE = AgentRole.FINAL_REVIEWER
 
 __all__ = ["ROLE"]

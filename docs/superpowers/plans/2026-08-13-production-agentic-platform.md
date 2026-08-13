@@ -189,13 +189,13 @@
 - Create: `tests/contract/test_model_gateway.py`
 - Create: `tests/unit/agents/test_runtime.py`
 
-- [ ] Write contract tests for JSON-schema structured output, native tool calls, streaming cancellation, provider capability detection, retry classification, token/cost accounting, trace IDs, timeouts, and concurrency admission.
-- [ ] Write bounded schema-repair tests: one invalid response followed by a valid response succeeds and records both attempts; exhaustion fails visibly without regex extraction or hard-coded substitute output.
-- [ ] Write tests proving immutable `AgentSpec` hashes cover role, input/output schema versions, model policy, grants/risk, memory policy, all budgets, sandbox/network profile, and termination rules.
-- [ ] Run tests and observe current agents cannot satisfy the contract.
-- [ ] Implement an HTTPX OpenAI-compatible gateway plus a deterministic scripted gateway. Implement one generic agent runtime that validates its `AgentSpec`, gathers bounded context, invokes the gateway, validates typed output, dispatches typed tool calls, and records usage.
-- [ ] Convert architect, researcher, coder, tester, reviewer, debugger, documentation, validation, and final-review modules into declarative specs over the shared runtime; instantiate only roles required by the DAG.
-- [ ] Run `pytest tests/contract/test_model_gateway.py tests/unit/agents -q`.
+- [x] Write contract tests for JSON-schema structured output, native tool calls, streaming cancellation, provider capability detection, retry classification, token/cost accounting, trace IDs, timeouts, and concurrency admission.
+- [x] Write bounded schema-repair tests: one invalid response followed by a valid response succeeds and records both attempts; exhaustion fails visibly without regex extraction or hard-coded substitute output.
+- [x] Write tests proving immutable `AgentSpec` hashes cover role, input/output schema versions, model policy, grants/risk, memory policy, all budgets, sandbox/network profile, and termination rules.
+- [x] Run tests and observe current agents cannot satisfy the contract.
+- [x] Implement an HTTPX OpenAI-compatible gateway plus a deterministic scripted gateway. Implement one generic agent runtime that validates its `AgentSpec`, gathers bounded context, invokes the gateway, validates typed output, dispatches typed tool calls, and records usage.
+- [x] Convert architect, researcher, coder, tester, reviewer, debugger, documentation, validation, and final-review modules into declarative specs over the shared runtime; instantiate only roles required by the DAG.
+- [x] Run `pytest tests/contract/test_model_gateway.py tests/unit/agents -q`.
 - [ ] Commit: `feat: add structured model and agent runtime`
 
 ---

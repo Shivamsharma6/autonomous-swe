@@ -1,3 +1,3 @@
-from agents.debugger.agent import DebuggerAgent
+from agents.debugger.agent import ROLE
 
-__all__ = ["DebuggerAgent"]
+__all__ = ["ROLE"]

@@ -1,20 +1,16 @@
-from agents.base import AgentSpec, AgentRuntime, ModelProviderConfig, get_default_agent_specs
-from agents.architect.agent import ArchitectAgent
-from agents.coder.agent import CoderAgent
-from agents.reviewer.agent import ReviewerAgent
-from agents.tester.agent import TesterAgent
-from agents.researcher.agent import ResearcherAgent
-from agents.debugger.agent import DebuggerAgent
+from agents.base import AgentInvocation, AgentRunResult, AgentRuntime
+from agents.gateway import ModelGateway, OpenAICompatibleGateway
+from agents.scripted import ScriptedGateway
+from agents.specs import AgentRole, build_agent_specs, instantiate_required_agents
 
 __all__ = [
-    "AgentSpec",
+    "AgentInvocation",
+    "AgentRole",
+    "AgentRunResult",
     "AgentRuntime",
-    "ModelProviderConfig",
-    "get_default_agent_specs",
-    "ArchitectAgent",
-    "CoderAgent",
-    "ReviewerAgent",
-    "TesterAgent",
-    "ResearcherAgent",
-    "DebuggerAgent",
+    "ModelGateway",
+    "OpenAICompatibleGateway",
+    "ScriptedGateway",
+    "build_agent_specs",
+    "instantiate_required_agents",
 ]

@@ -209,6 +209,50 @@ class TaskAttemptRow(Base):
     )
 
 
+class ModelCallRow(Base):
+    __tablename__ = "model_calls"
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trace_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    provider_request_id: Mapped[str | None] = mapped_column(String(500))
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    turn: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    failure_class: Mapped[str | None] = mapped_column(String(50))
+    validation_errors: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    tool_call_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "turn", name="uq_model_call_attempt_turn"),
+        CheckConstraint("turn >= 1", name="ck_model_call_turn_positive"),
+        CheckConstraint("length(agent_spec_hash) = 64", name="ck_model_call_agent_spec_hash"),
+        CheckConstraint(
+            "input_tokens >= 0 AND output_tokens >= 0 "
+            "AND cached_input_tokens >= 0 AND cost_usd >= 0",
+            name="ck_model_call_usage_nonnegative",
+        ),
+        Index("ix_model_calls_trace", "trace_id"),
+        Index("ix_model_calls_task_created", "task_id", "created_at"),
+    )
+
+
 class LeaseRow(Base):
     __tablename__ = "leases"
 

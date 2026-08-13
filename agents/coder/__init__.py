@@ -1,3 +1,3 @@
-from agents.coder.agent import CoderAgent
+from agents.coder.agent import ROLE
 
-__all__ = ["CoderAgent"]
+__all__ = ["ROLE"]

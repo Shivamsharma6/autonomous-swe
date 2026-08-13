@@ -1,303 +1,390 @@
+from __future__ import annotations
+
+import asyncio
 import json
-import os
-import re
-import ast
-import urllib.request
-import urllib.error
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
-from policies.risk.policy_engine import RiskLevel
+from dataclasses import dataclass
+from typing import Any, Protocol
+from uuid import UUID
 
-try:
-    from langsmith import traceable
-except Exception:
-    def traceable(name=None, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
+from pydantic import BaseModel, Field, ValidationError
 
-
-class ModelProviderConfig(BaseModel):
-    """Configuration for an LLM provider."""
-
-    provider: str = "custom"  # gemini, google, openai, anthropic, ollama, custom, local
-    model_name: str = "nemotron-3.5-lightning:30b-mlx"
-    base_url: str = ""
-    api_key: str = ""
-    temperature: float = 0.2
-
-    def resolved_base_url(self) -> str:
-        url = self.base_url or ""
-        if "localhost" in url:
-            url = url.replace("localhost", "host.docker.internal")
-        elif "127.0.0.1" in url:
-            url = url.replace("127.0.0.1", "host.docker.internal")
-        elif "host.docker.internal" in url:
-            url = url.replace("host.docker.internal", "localhost")
-        return url
-
-    def model_dump(self) -> Dict[str, Any]:
-        return {
-            "provider": self.provider,
-            "model_name": self.model_name,
-            "base_url": self.base_url,
-            "api_key": self.api_key,
-            "temperature": self.temperature,
-        }
+from agents.gateway import (
+    FailureClass,
+    GatewayError,
+    ModelGateway,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ToolCall,
+    ToolDefinition,
+)
+from domain.models import AgentSpec, CommitSha, ContractModel
+from knowledge.memory.port import ContextRequest, MemoryPort
 
 
-class AgentSpec(BaseModel):
-    """Specification for an agent in the workflow."""
-
-    name: str
-    role: str
-    description: str = ""
-    system_prompt: str = ""
-    tools: List[str] = Field(default_factory=list)
-    model: str = "nemotron-3.5-lightning:30b-mlx"
-    provider_config: Optional[ModelProviderConfig] = None
-    risk_level: RiskLevel = RiskLevel.LOW
-
-    def build_system_prompt(self) -> str:
-        tools_str = ", ".join(self.tools) if self.tools else "None"
-        return f"{self.system_prompt}\nAvailable tools: {tools_str}"
+class AgentInvocation(ContractModel):
+    schema_version: str = "1.0"
+    trace_id: str = Field(min_length=1, max_length=500)
+    run_id: UUID
+    task_id: UUID
+    attempt_id: UUID
+    project_id: UUID
+    repository_id: UUID
+    baseline_commit: CommitSha
+    goal: str = Field(min_length=1, max_length=20_000)
+    input_payload: dict[str, Any]
+    memory_budget_tokens: int = Field(default=2_000, ge=0, le=100_000)
+    entities: tuple[str, ...] = ()
 
 
-def get_default_agent_specs() -> Dict[str, AgentSpec]:
-    return {
-        "Architect": AgentSpec(
-            name="Architect",
-            role="Architect",
-            description="Decomposes requirements into structured task DAGs",
-            system_prompt="You are the Architect Agent responsible for analyzing requirements and decomposing them into structured task DAGs.",
-            tools=["list_dir", "read_file"],
-            risk_level=RiskLevel.LOW,
-        ),
-        "Researcher": AgentSpec(
-            name="Researcher",
-            role="Researcher",
-            description="Indexes codebase AST and retrieves relevant context",
-            system_prompt="You are the Researcher Agent responsible for indexing the codebase and retrieving relevant context.",
-            tools=["search_code", "read_file"],
-            risk_level=RiskLevel.LOW,
-        ),
-        "Coder": AgentSpec(
-            name="Coder",
-            role="Coder",
-            description="Writes code feature implementations and updates files",
-            system_prompt="You are the Coder Agent responsible for implementing features. CRITICAL: Output ONLY valid executable Python code enclosed in a ```python ... ``` block. Do NOT include plan descriptions, conversational commentary, or text outside the code block.",
-            tools=["write_file", "read_file"],
-            risk_level=RiskLevel.MEDIUM,
-        ),
-        "Tester": AgentSpec(
-            name="Tester",
-            role="Test Generator",
-            description="Generates comprehensive pytest unit tests and mocks",
-            system_prompt="You are the Tester Agent responsible for writing unit tests. CRITICAL: Output ONLY valid executable Python code enclosed in a ```python ... ``` block. All imports MUST import directly from `utils`.",
-            tools=["write_file", "read_file", "pytest"],
-            risk_level=RiskLevel.LOW,
-        ),
-        "Reviewer": AgentSpec(
-            name="Reviewer",
-            role="Reviewer",
-            description="Evaluates code quality, lint status, and security compliance",
-            system_prompt="You are the Reviewer Agent responsible for auditing code quality, lint status, and security compliance.",
-            tools=["read_file", "pytest"],
-            risk_level=RiskLevel.LOW,
-        ),
-        "Debugger": AgentSpec(
-            name="Debugger",
-            role="Debugger",
-            description="Parses stack traces and implements self-healing code fixes",
-            system_prompt="You are the Debugger Agent. CRITICAL: Output ONLY valid executable Python code enclosed in a ```python ... ``` block fixing the error.",
-            tools=["write_file", "read_file", "pytest"],
-            risk_level=RiskLevel.MEDIUM,
-        ),
-        "Final Reviewer": AgentSpec(
-            name="Final Reviewer",
-            role="Final Reviewer",
-            description="Evaluates completed feature and prepares Git Pull Request",
-            system_prompt="You are the Final Reviewer Agent responsible for verifying completed tasks and finalizing the output.",
-            tools=["git_diff", "git_commit"],
-            risk_level=RiskLevel.MEDIUM,
-        ),
-    }
+class AgentAttemptRecord(ContractModel):
+    run_id: UUID
+    task_id: UUID
+    attempt_id: UUID
+    agent_spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    turn: int = Field(ge=1)
+    model: str
+    trace_id: str
+    provider_request_id: str | None = None
+    usage: ModelUsage
+    validation_errors: tuple[str, ...] = ()
+    failure_class: FailureClass | None = None
+    tool_call_ids: tuple[str, ...] = ()
 
 
-def _clean_code_block(text: str) -> str:
-    if not text:
-        return "# Code generated by Agent\n"
-    text = text.strip()
-
-    # 1. Try finding markdown python code block
-    code_match = re.search(r"```(?:python|py)?\n(.*?)```", text, re.DOTALL)
-    candidate = code_match.group(1).strip() if code_match else text
-
-    # Strip residual markdown ```
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        candidate = "\n".join(lines).strip()
-
-    # Validate AST syntax
-    try:
-        ast.parse(candidate)
-        return candidate
-    except SyntaxError:
-        pass
-
-    # 2. Search for any valid code blocks in conversational text
-    blocks = re.findall(r"```(?:python|py)?\n(.*?)```", text, re.DOTALL)
-    for b in blocks:
-        b_clean = b.strip()
-        try:
-            ast.parse(b_clean)
-            return b_clean
-        except SyntaxError:
-            continue
-
-    return "# Code generated by Agent\n"
+class UsageRecorder(Protocol):
+    async def record(self, attempt: AgentAttemptRecord) -> None: ...
 
 
-class AgentRuntime:
-    """Runtime engine for executing individual AI agents with provider flexibility."""
+class InMemoryUsageRecorder:
+    def __init__(self) -> None:
+        self.records: list[AgentAttemptRecord] = []
 
+    async def record(self, attempt: AgentAttemptRecord) -> None:
+        self.records.append(attempt)
+
+
+class ToolDispatcher(Protocol):
+    async def dispatch(self, call: ToolCall, *, invocation: AgentInvocation) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunResult[OutputT: BaseModel]:
+    output: OutputT
+    trace_id: str
+    attempts: tuple[AgentAttemptRecord, ...]
+    usage: ModelUsage
+    tool_calls: tuple[ToolCall, ...]
+    context_memory_ids: tuple[UUID, ...]
+    agent_spec_hash: str
+
+
+class AgentRuntimeError(RuntimeError):
+    pass
+
+
+class StructuredOutputExhausted(AgentRuntimeError):
+    def __init__(self, attempts: tuple[AgentAttemptRecord, ...]) -> None:
+        super().__init__("structured output validation exhausted its repair budget")
+        self.attempts = attempts
+
+
+class AgentBudgetExceeded(AgentRuntimeError):
+    pass
+
+
+class AgentConfigurationError(AgentRuntimeError):
+    pass
+
+
+class AgentRuntime[OutputT: BaseModel]:
     def __init__(
         self,
         spec: AgentSpec,
-        default_provider_config: Optional[ModelProviderConfig] = None,
-    ):
+        gateway: ModelGateway,
+        *,
+        input_type: type[BaseModel],
+        output_type: type[OutputT],
+        memory: MemoryPort | None = None,
+        tool_definitions: tuple[ToolDefinition, ...] = (),
+        tool_dispatcher: ToolDispatcher | None = None,
+        usage_recorder: UsageRecorder | None = None,
+        max_schema_repairs: int = 1,
+    ) -> None:
+        if max_schema_repairs < 0:
+            raise ValueError("max_schema_repairs cannot be negative")
         self.spec = spec
-        self.default_provider_config = default_provider_config or ModelProviderConfig(
-            provider="gemini",
-            model_name="gemini-3.6-flash",
-            temperature=0.2,
+        self._gateway = gateway
+        self._input_type = input_type
+        self._output_type = output_type
+        self._memory = memory
+        self._tool_definitions = tool_definitions
+        self._tool_dispatcher = tool_dispatcher
+        self._usage_recorder = usage_recorder or InMemoryUsageRecorder()
+        self._max_schema_repairs = max_schema_repairs
+        self._validate_configuration()
+
+    async def run(
+        self,
+        invocation: AgentInvocation,
+        *,
+        cancel: asyncio.Event | None = None,
+    ) -> AgentRunResult[OutputT]:
+        validated = self._input_type.model_validate(invocation.model_dump())
+        if not isinstance(validated, AgentInvocation):
+            raise AgentConfigurationError("input_type must produce AgentInvocation")
+        try:
+            async with asyncio.timeout(self.spec.wall_time_seconds):
+                return await self._run(validated, cancel=cancel)
+        except TimeoutError as error:
+            raise GatewayError(
+                "agent wall-time budget exhausted", failure_class=FailureClass.TIMEOUT
+            ) from error
+
+    async def _run(
+        self, invocation: AgentInvocation, *, cancel: asyncio.Event | None
+    ) -> AgentRunResult[OutputT]:
+        context = ""
+        memory_ids: tuple[UUID, ...] = ()
+        if self.spec.memory_policy.casefold() != "none":
+            if self._memory is None:
+                raise AgentConfigurationError(
+                    "memory policy requires an external MemoryPort; no fallback is allowed"
+                )
+            recalled = await self._memory.get_context(
+                ContextRequest(
+                    task=invocation.goal,
+                    project_id=invocation.project_id,
+                    budget_tokens=max(1, invocation.memory_budget_tokens),
+                    entities=invocation.entities,
+                    repository_id=invocation.repository_id,
+                    baseline_commit=invocation.baseline_commit,
+                )
+            )
+            context = recalled.rendered
+            memory_ids = tuple(item.memory_id for item in recalled.memories)
+
+        messages = [
+            ModelMessage(role="system", content=self._system_prompt()),
+            ModelMessage(role="user", content=self._user_prompt(invocation, context)),
+        ]
+        attempts: list[AgentAttemptRecord] = []
+        all_calls: list[ToolCall] = []
+        total_input = total_output = total_cached = 0
+        total_cost = 0.0
+        schema_failures = 0
+        models = (self.spec.primary_model, *self.spec.fallback_models)
+        model_index = 0
+
+        for turn in range(1, self.spec.turn_budget + 1):
+            model = models[min(model_index, len(models) - 1)]
+            request = ModelRequest(
+                trace_id=invocation.trace_id,
+                model=model,
+                messages=tuple(messages),
+                output_schema_name=self._output_type.__name__,
+                output_schema=self._output_type.model_json_schema(),
+                tools=self._tool_definitions,
+                timeout_seconds=min(120.0, float(self.spec.wall_time_seconds)),
+            )
+            try:
+                response = await self._gateway.complete(request, cancel=cancel)
+            except GatewayError as error:
+                attempt = AgentAttemptRecord(
+                    run_id=invocation.run_id,
+                    task_id=invocation.task_id,
+                    attempt_id=invocation.attempt_id,
+                    agent_spec_hash=self.spec.spec_hash,
+                    turn=turn,
+                    model=model,
+                    trace_id=invocation.trace_id,
+                    usage=ModelUsage(),
+                    failure_class=error.failure_class,
+                )
+                attempts.append(attempt)
+                await self._usage_recorder.record(attempt)
+                if error.failure_class in {
+                    FailureClass.TRANSIENT,
+                    FailureClass.TIMEOUT,
+                } and model_index + 1 < len(models):
+                    model_index += 1
+                    continue
+                raise
+
+            total_input += response.usage.input_tokens
+            total_output += response.usage.output_tokens
+            total_cached += response.usage.cached_input_tokens
+            total_cost += response.usage.cost_usd
+
+            if response.tool_calls:
+                attempt = self._attempt(invocation, turn, response)
+                attempts.append(attempt)
+                await self._usage_recorder.record(attempt)
+                self._check_budget(total_input + total_output, total_cost)
+                await self._dispatch_tools(
+                    invocation, response, messages=messages, all_calls=all_calls
+                )
+                continue
+
+            try:
+                output = self._validate_response(response)
+            except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as error:
+                errors = _validation_messages(error)
+                attempt = self._attempt(invocation, turn, response, validation_errors=errors)
+                attempts.append(attempt)
+                await self._usage_recorder.record(attempt)
+                self._check_budget(total_input + total_output, total_cost)
+                if schema_failures >= self._max_schema_repairs:
+                    raise StructuredOutputExhausted(tuple(attempts)) from error
+                schema_failures += 1
+                invalid_content = response.raw_text or json.dumps(
+                    response.structured_output,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                messages.append(ModelMessage(role="assistant", content=invalid_content))
+                messages.append(
+                    ModelMessage(
+                        role="user",
+                        content=(
+                            "Schema repair required. Return only an object that conforms to "
+                            f"{self.spec.output_schema}. Validation errors: " + json.dumps(errors)
+                        ),
+                    )
+                )
+                continue
+
+            attempt = self._attempt(invocation, turn, response)
+            attempts.append(attempt)
+            await self._usage_recorder.record(attempt)
+            self._check_budget(total_input + total_output, total_cost)
+            return AgentRunResult(
+                output=output,
+                trace_id=invocation.trace_id,
+                attempts=tuple(attempts),
+                usage=ModelUsage(
+                    input_tokens=total_input,
+                    output_tokens=total_output,
+                    cached_input_tokens=total_cached,
+                    cost_usd=total_cost,
+                ),
+                tool_calls=tuple(all_calls),
+                context_memory_ids=memory_ids,
+                agent_spec_hash=self.spec.spec_hash,
+            )
+        raise AgentBudgetExceeded("agent exhausted its turn budget")
+
+    async def _dispatch_tools(
+        self,
+        invocation: AgentInvocation,
+        response: ModelResponse,
+        *,
+        messages: list[ModelMessage],
+        all_calls: list[ToolCall],
+    ) -> None:
+        if self._tool_dispatcher is None:
+            raise AgentConfigurationError("model selected a tool but no dispatcher is configured")
+        messages.append(
+            ModelMessage(
+                role="assistant",
+                content=response.raw_text or "",
+                tool_calls=response.tool_calls,
+            )
+        )
+        for call in response.tool_calls:
+            if call.name not in self.spec.tool_grants:
+                raise AgentConfigurationError(
+                    f"tool {call.name} is not granted to {self.spec.role}"
+                )
+            result = await self._tool_dispatcher.dispatch(call, invocation=invocation)
+            all_calls.append(call)
+            messages.append(
+                ModelMessage(
+                    role="tool",
+                    content=json.dumps(result, sort_keys=True, separators=(",", ":")),
+                    tool_call_id=call.call_id,
+                )
+            )
+
+    def _validate_response(self, response: ModelResponse) -> OutputT:
+        if response.structured_output is not None:
+            raw: Any = response.structured_output
+        elif response.raw_text is not None:
+            raw = json.loads(response.raw_text)
+        else:
+            raise ValueError("model returned neither structured output nor tool calls")
+        return self._output_type.model_validate(raw)
+
+    def _attempt(
+        self,
+        invocation: AgentInvocation,
+        turn: int,
+        response: ModelResponse,
+        *,
+        validation_errors: tuple[str, ...] = (),
+    ) -> AgentAttemptRecord:
+        return AgentAttemptRecord(
+            run_id=invocation.run_id,
+            task_id=invocation.task_id,
+            attempt_id=invocation.attempt_id,
+            agent_spec_hash=self.spec.spec_hash,
+            turn=turn,
+            model=response.model,
+            trace_id=response.trace_id,
+            provider_request_id=response.provider_request_id,
+            usage=response.usage,
+            validation_errors=validation_errors,
+            tool_call_ids=tuple(call.call_id for call in response.tool_calls),
         )
 
-    def get_effective_provider_config(
-        self, override_config: Optional[ModelProviderConfig] = None
-    ) -> ModelProviderConfig:
-        return override_config or self.default_provider_config
+    def _check_budget(self, tokens: int, cost: float) -> None:
+        if tokens > self.spec.token_budget:
+            raise AgentBudgetExceeded("agent token budget exceeded")
+        if cost > self.spec.cost_budget_usd:
+            raise AgentBudgetExceeded("agent cost budget exceeded")
 
-    def build_system_prompt(self) -> str:
-        tools_str = ", ".join(self.spec.tools) if self.spec.tools else "None"
-        return f"{self.spec.system_prompt}\nAvailable tools: {tools_str}"
+    def _validate_configuration(self) -> None:
+        if self.spec.input_schema != _schema_ref(self._input_type):
+            raise AgentConfigurationError("AgentSpec input schema does not match runtime input")
+        if self.spec.output_schema != _schema_ref(self._output_type):
+            raise AgentConfigurationError("AgentSpec output schema does not match runtime output")
+        defined = {tool.name for tool in self._tool_definitions}
+        ungranted = defined.difference(self.spec.tool_grants)
+        if ungranted:
+            raise AgentConfigurationError(
+                f"tool definitions are not granted by AgentSpec: {sorted(ungranted)}"
+            )
+        if self._tool_definitions and self._tool_dispatcher is None:
+            raise AgentConfigurationError("tool definitions require a dispatcher")
 
-    def build_agent_prompt(self, task_goal: str, assembled_context: str = "") -> str:
+    def _system_prompt(self) -> str:
+        return (
+            f"Role: {self.spec.role}\nPurpose: {self.spec.purpose}\n"
+            f"Required output: {self.spec.output_schema}\n"
+            f"Termination: {self.spec.termination_policy}"
+        )
+
+    def _user_prompt(self, invocation: AgentInvocation, context: str) -> str:
         sections = [
-            f"System: You are the {self.spec.role} Agent ({self.spec.name}).",
-            f"Role Description: {self.spec.description}",
+            f"Goal: {invocation.goal}",
+            "Input:\n" + json.dumps(invocation.input_payload, sort_keys=True),
         ]
-        if self.spec.system_prompt:
-            sections.append(f"System Instructions: {self.spec.system_prompt}")
-        if self.spec.tools:
-            sections.append(f"Allowed Tools: {', '.join(self.spec.tools)}")
+        if context:
+            sections.append("Verified UAMS context:\n" + context)
+        return "\n\n".join(sections)
 
-        sections.append(f"\nUser Goal: {task_goal}")
-        if assembled_context:
-            sections.append(f"\n{assembled_context}")
 
-        return "\n".join(sections)
+def _schema_ref(model: type[BaseModel]) -> str:
+    field = model.model_fields.get("schema_version")
+    version = str(field.default) if field is not None and field.default else "1.0"
+    return f"{model.__name__}@{version}"
 
-    @traceable(name="Agent-LLM-Completion", run_type="llm")
-    def generate_completion(
-        self,
-        task_goal: str,
-        assembled_context: str = "",
-        provider_config: Optional[ModelProviderConfig] = None,
-    ) -> str:
-        config = self.get_effective_provider_config(provider_config)
-        prompt = self.build_agent_prompt(task_goal, assembled_context)
 
-        # 1. Google Gemini Cloud API attempt
-        gemini_key = config.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if config.provider in ("gemini", "google") and gemini_key:
-            model_target = config.model_name if "gemini" in config.model_name else "gemini-1.5-flash"
-            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_target}:generateContent?key={gemini_key}"
-            gemini_payload = {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [{"text": f"{self.spec.system_prompt}\n\n{prompt}"}],
-                    }
-                ],
-                "generationConfig": {"temperature": config.temperature},
-            }
-            try:
-                req = urllib.request.Request(
-                    gemini_url,
-                    data=json.dumps(gemini_payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-                with urllib.request.urlopen(req, timeout=45) as response:
-                    res_json = json.loads(response.read().decode("utf-8"))
-                    candidates = res_json.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts and "text" in parts[0]:
-                            return _clean_code_block(parts[0]["text"])
-            except Exception:
-                pass
-
-        # 2. Local / Ollama candidate setup
-        candidates = []
-        if config.base_url:
-            raw_url = config.base_url.rstrip("/")
-            candidates.append(raw_url)
-            if "localhost" in raw_url:
-                candidates.append(raw_url.replace("localhost", "host.docker.internal"))
-            elif "127.0.0.1" in raw_url:
-                candidates.append(raw_url.replace("127.0.0.1", "host.docker.internal"))
-        else:
-            candidates = [
-                "http://host.docker.internal:11434/v1",
-                "http://localhost:11434/v1",
-                "http://127.0.0.1:11434/v1",
-            ]
-
-        target_model = config.model_name
-        for base_url in candidates:
-            models_url = f"{base_url}/models"
-            try:
-                m_req = urllib.request.Request(models_url)
-                with urllib.request.urlopen(m_req, timeout=3) as m_res:
-                    m_json = json.loads(m_res.read().decode("utf-8"))
-                    installed = [m.get("id") or m.get("name") for m in m_json.get("data", []) if m.get("id") or m.get("name")]
-                    if installed:
-                        if target_model not in installed:
-                            preferred = [m for m in installed if "coding" in m or "qwen" in m or "gemma" in m or "glm" in m]
-                            target_model = preferred[0] if preferred else installed[0]
-                        break
-            except Exception:
-                pass
-
-        for base_url in candidates:
-            endpoint = f"{base_url}/chat/completions"
-            payload = {
-                "model": target_model,
-                "messages": [
-                    {"role": "system", "content": self.spec.system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": config.temperature,
-            }
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(endpoint, data=data_bytes, headers={"Content-Type": "application/json"})
-            if config.api_key:
-                req.add_header("Authorization", f"Bearer {config.api_key}")
-
-            try:
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    res_json = json.loads(response.read().decode("utf-8"))
-                    choices = res_json.get("choices", [])
-                    if choices:
-                        content = choices[0].get("message", {}).get("content", "")
-                        if content and content.strip():
-                            return _clean_code_block(content)
-            except Exception:
-                pass
-
-        return f"# Code generated by {self.spec.role} for task: {task_goal}\n"
+def _validation_messages(error: Exception) -> tuple[str, ...]:
+    if isinstance(error, ValidationError):
+        return tuple(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors(include_url=False)
+        )
+    return (str(error),)
