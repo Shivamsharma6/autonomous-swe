@@ -95,7 +95,7 @@ class TaskSpec(ContractModel):
     priority: int = Field(default=0, ge=-1_000, le=1_000)
     assigned_capability: Annotated[str, Field(min_length=1, max_length=100)]
     acceptance_criteria: tuple[Annotated[str, Field(min_length=1, max_length=1_000)], ...] = Field(
-        min_length=1, max_length=100
+        max_length=100
     )
     allowed_tools: tuple[Annotated[str, Field(min_length=1, max_length=100)], ...] = Field(
         default_factory=tuple, max_length=100
@@ -103,6 +103,9 @@ class TaskSpec(ContractModel):
     risk_ceiling: RiskLevel = RiskLevel.LOW
     expected_artifacts: tuple[Annotated[str, Field(min_length=1, max_length=100)], ...] = Field(
         default_factory=tuple, max_length=100
+    )
+    repository_paths: tuple[Annotated[str, Field(min_length=1, max_length=1_024)], ...] = Field(
+        default_factory=tuple, max_length=1_000
     )
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     budget: BudgetPolicy = Field(default_factory=BudgetPolicy)
@@ -135,8 +138,8 @@ class TaskPlan(ContractModel):
         for task in self.tasks:
             if task.project_id != self.project_id or task.repository_id != self.repository_id:
                 raise ValueError("task scope must match plan scope")
-            if task.plan_revision != self.revision:
-                raise ValueError("task revision must match plan revision")
+            if task.plan_revision > self.revision:
+                raise ValueError("task creation revision cannot exceed plan revision")
         return self
 
 

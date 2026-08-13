@@ -63,12 +63,12 @@
 - Create: `tests/property/test_dag_properties.py`
 - Modify: `pyproject.toml`
 
-- [ ] Write examples covering missing dependencies, self-dependencies, cycles, duplicate task IDs, invalid repository scope, missing acceptance criteria, unsupported tools, depth overflow, total-budget overflow, and total-execution-time overflow.
-- [ ] Write Hypothesis properties proving an accepted DAG is acyclic, every dependency exists, no admitted mutation changes an existing task, and all accepted mutations stay under `max_dynamic_tasks`, `max_plan_depth`, `max_total_budget`, and `max_total_execution_time`.
-- [ ] Run `pytest tests/unit/planning tests/property/test_dag_properties.py -q`; expect import failure.
-- [ ] Implement Kahn topological validation and incremental mutation validation. Return structured validation issues; do not partially mutate the current revision on rejection.
-- [ ] Run the narrow tests twice with a fixed Hypothesis seed to prove repeatability.
-- [ ] Commit: `feat: validate dynamic task dags and repair bounds`
+- [x] Write examples covering missing dependencies, self-dependencies, cycles, duplicate task IDs, invalid repository scope, missing acceptance criteria, unsupported tools, depth overflow, total-budget overflow, and total-execution-time overflow.
+- [x] Write Hypothesis properties proving an accepted DAG is acyclic, every dependency exists, no admitted mutation changes an existing task, and all accepted mutations stay under `max_dynamic_tasks`, `max_plan_depth`, `max_total_budget`, and `max_total_execution_time`.
+- [x] Run `pytest tests/unit/planning tests/property/test_dag_properties.py -q`; expect import failure.
+- [x] Implement Kahn topological validation and incremental mutation validation. Return structured validation issues; do not partially mutate the current revision on rejection.
+- [x] Run the narrow tests twice with a fixed Hypothesis seed to prove repeatability.
+- [x] Commit: `feat: validate dynamic task dags and repair bounds`
 
 ---
 
