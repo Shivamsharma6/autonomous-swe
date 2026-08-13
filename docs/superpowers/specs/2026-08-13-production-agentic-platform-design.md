@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13
 
-**Status:** Approved design; pending written-spec review
+**Status:** Frozen and approved for implementation
 
 **Deployment target:** Single-machine Docker Compose
 **Memory system:** Existing external Unified Agent Memory System (UAMS)
