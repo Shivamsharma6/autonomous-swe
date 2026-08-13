@@ -1,3 +1,3 @@
-from apps.api.main import app
+"""Production control-plane application package."""
 
-__all__ = ["app"]
+__all__: list[str] = []

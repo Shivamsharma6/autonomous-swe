@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     uams_url: str
     uams_token: SecretStr = SecretStr("")
     uams_timeout_seconds: float = Field(default=15.0, gt=0, le=300)
+    sandbox_manager_url: str = "http://sandbox-manager:8090"
     model_base_url: str
     model_api_key: SecretStr = SecretStr("")
     model_primary: str
@@ -66,6 +67,7 @@ class Settings(BaseSettings):
     max_total_budget_usd: float = Field(default=25.0, gt=0)
     max_total_execution_seconds: int = Field(default=7_200, ge=1, le=604_800)
     request_max_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
+    api_rate_limit_per_minute: int = Field(default=120, ge=1, le=100_000)
 
     @property
     def is_production(self) -> bool:
@@ -88,6 +90,7 @@ class Settings(BaseSettings):
             "database_url": self.database_url,
             "redis_url": self.redis_url,
             "uams_url": self.uams_url,
+            "sandbox_manager_url": self.sandbox_manager_url,
             "model_base_url": self.model_base_url,
             "model_primary": self.model_primary,
         }

@@ -313,12 +313,12 @@
 - Create: `tests/integration/api/test_control_plane.py`
 - Create: `tests/security/test_api_security.py`
 
-- [ ] Test constant-time single-admin bearer authentication, explicit CORS, request-size limits, rate limits, secret-free responses, validated IDs, scoped artifact downloads, exact-call approval, cancellation, dead-letter inspection/replay, liveness, dependency-aware readiness, and task-scoped event streams.
-- [ ] Prove API process startup does not launch dispatcher/worker loops; dispatcher claims leases; workers only execute dispatched graph threads; graceful shutdown stops claims and preserves resumability.
-- [ ] Run tests and observe failures against the monolithic background-task API.
-- [ ] Implement separate dependency-injected application factories and process entry points. Readiness checks PostgreSQL, Redis, checkpoint schema, sandbox manager, model configuration, and external UAMS; liveness checks only the process.
-- [ ] Run `pytest tests/unit/api tests/integration/api tests/security/test_api_security.py -q`.
-- [ ] Commit: `feat: separate and secure platform services`
+- [x] Test constant-time single-admin bearer authentication, explicit CORS, request-size limits, rate limits, secret-free responses, validated IDs, scoped artifact downloads, exact-call approval, cancellation, dead-letter inspection/replay, liveness, dependency-aware readiness, and task-scoped event streams.
+- [x] Prove API process startup does not launch dispatcher/worker loops; dispatcher claims leases; workers only execute dispatched graph threads; graceful shutdown stops claims and preserves resumability.
+- [x] Run tests and observe failures against the monolithic background-task API.
+- [x] Implement separate dependency-injected application factories and process entry points. Readiness checks PostgreSQL, Redis, checkpoint schema, sandbox manager, model configuration, and external UAMS; liveness checks only the process.
+- [x] Run `pytest tests/unit/api tests/integration/api tests/security/test_api_security.py -q`.
+- [x] Commit: `feat: separate and secure platform services`
 
 ### Task 16: Deliver the single-machine Compose stack and operator commands
 

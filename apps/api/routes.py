@@ -1,282 +1,307 @@
-import asyncio
-import json
-import os
-import time
-import urllib.request
-import urllib.error
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from __future__ import annotations
 
-from agents.base import ModelProviderConfig
-from knowledge.memory.storage import StorageEngine
-from execution.scheduler.scheduler import TaskScheduler, TaskNode, TaskStatus
-from apps.api.schemas import ProjectCreateReq, TaskCreateReq
-from apps.api.websocket import manager
+from datetime import datetime
+from typing import Annotated
+from uuid import UUID, uuid4
 
-router = APIRouter(prefix="/api/v1")
-storage = StorageEngine()
-scheduler = TaskScheduler()
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-active_provider_config = ModelProviderConfig(
-    provider="custom",
-    model_name="nemotron-3.5-lightning:30b-mlx",
-    base_url="",
-    api_key="",
-    temperature=0.2,
+from apps.api.dependencies import (
+    ControlPlaneServices,
+    get_services,
+    require_admin,
+    require_websocket_admin,
 )
+from apps.api.schemas import (
+    ApprovalDecisionRequest,
+    DeadLetterResponse,
+    ProjectCreated,
+    ProjectCreateRequest,
+    RunCreated,
+    RunCreateRequest,
+    TaskResponse,
+)
+from apps.api.websocket import EventCursor, PostgresTaskEventSource
+from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
+from persistence.tables import DeadLetterRow, TaskRow, utc_now
+from tools.approval import ApprovalBindingError, ApprovalExpired
+
+router = APIRouter(
+    prefix="/api/v1",
+    dependencies=[Depends(require_admin)],
+)
+Services = Annotated[ControlPlaneServices, Depends(get_services)]
+DeadLetterLimit = Annotated[int, Query(ge=1, le=500)]
 
 
-def _auto_detect_unsloth_key() -> str:
-    key_path = os.path.expanduser("~/.unsloth/studio/auth/agent_api_key.json")
-    if os.path.exists(key_path):
-        try:
-            with open(key_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            servers = data.get("servers", {})
-            for server_url, s_data in servers.items():
-                minted = s_data.get("minted", [])
-                if minted:
-                    return minted[0]
-        except Exception:
-            pass
-    return ""
+@router.get("/status")
+async def status() -> dict[str, str]:
+    return {"service": "autoswe-control-plane", "status": "ok"}
 
 
-def _resolve_url_candidates(base_url: str) -> List[str]:
-    candidates = []
-    if base_url:
-        candidates.append(base_url)
-        if "localhost" in base_url:
-            candidates.append(base_url.replace("localhost", "host.docker.internal"))
-        elif "127.0.0.1" in base_url:
-            candidates.append(base_url.replace("127.0.0.1", "host.docker.internal"))
-        elif "host.docker.internal" in base_url:
-            candidates.append(base_url.replace("host.docker.internal", "localhost"))
-    else:
-        candidates = ["http://localhost:11434/v1", "http://host.docker.internal:11434/v1"]
-
-    seen = set()
-    result = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            result.append(c)
-    return result
-
-
-async def _run_workflow_background(task_id: str, project_id: str, user_request: str):
-    from workflows.feature import WorkflowOrchestrator
-    base_dir = os.path.abspath("autonomous_agent_directory")
-    task_workspace = os.path.join(base_dir, task_id)
-    os.makedirs(task_workspace, exist_ok=True)
-    orchestrator = WorkflowOrchestrator(storage_engine=storage, workspace_path=task_workspace)
-    loop = asyncio.get_running_loop()
-
-    def progress_cb(event_type: str, message: str, payload: Any = None):
-        msg = {
-            "task_id": task_id,
-            "event_type": event_type,
-            "message": message,
-            "payload": payload,
-        }
-        if isinstance(payload, dict):
-            if "code_diff" in payload:
-                msg["code_diff"] = payload["code_diff"]
-            if "dag_nodes" in payload:
-                msg["dag_nodes"] = payload["dag_nodes"]
-        asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
-
-    await manager.broadcast({
-        "task_id": task_id,
-        "event_type": "SYSTEM",
-        "message": f"Multi-agent SDLC workflow initialized for task: {user_request}",
-        "payload": {"project_id": project_id, "provider": active_provider_config.provider, "model": active_provider_config.model_name}
-    })
-
-    res = await asyncio.to_thread(
-        orchestrator.run_workflow,
-        user_request=user_request,
-        project_id=project_id,
-        task_id=task_id,
-        provider_config=active_provider_config,
-        progress_callback=progress_cb,
+@router.post("/projects", response_model=ProjectCreated, status_code=201)
+async def create_project(
+    request: ProjectCreateRequest,
+    services: Services,
+) -> ProjectCreated:
+    async with services.database.transaction() as session:
+        await services.database_repository.create_project(
+            session,
+            project_id=request.project_id,
+            name=request.name,
+        )
+        await services.database_repository.create_repository(
+            session,
+            repository_id=request.repository_id,
+            project_id=request.project_id,
+            source_path=request.source_path,
+            default_branch=request.default_branch,
+        )
+    return ProjectCreated(
+        project_id=request.project_id,
+        repository_id=request.repository_id,
     )
 
-    await manager.broadcast({
-        "task_id": task_id,
-        "event_type": "SYSTEM",
-        "message": f"Task execution completed with status: {res.get('workflow_status')}",
-        "payload": res
-    })
 
-
-@router.get("/health")
-def health_check() -> Dict[str, Any]:
-    return {"status": "ok", "timestamp": time.time()}
-
-
-@router.get("/provider-config")
-def get_provider_config() -> Dict[str, Any]:
-    return active_provider_config.model_dump()
-
-
-@router.post("/provider-config")
-def update_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
-    global active_provider_config
-    if not config.api_key:
-        auto_key = _auto_detect_unsloth_key()
-        if auto_key:
-            config.api_key = auto_key
-    active_provider_config = config
-    return {"status": "updated", "config": active_provider_config.model_dump()}
-
-
-@router.post("/provider-config/test")
-def test_provider_config(config: ModelProviderConfig) -> Dict[str, Any]:
-    raw_base_url = config.base_url.rstrip("/")
-    if not raw_base_url:
-        if config.provider == "ollama":
-            raw_base_url = "http://localhost:11434/v1"
-        elif config.provider in ("custom", "unsloth", "local"):
-            raw_base_url = "http://localhost:8888/v1"
-
-    candidates = _resolve_url_candidates(raw_base_url)
-    api_key = config.api_key or _auto_detect_unsloth_key()
-    last_error = ""
-
-    for base_url in candidates:
-        models_url = f"{base_url}/models"
-        req = urllib.request.Request(models_url)
-        if api_key:
-            req.add_header("Authorization", f"Bearer {api_key}")
-
+@router.post("/runs", response_model=RunCreated, status_code=202)
+async def create_run(
+    request: RunCreateRequest,
+    services: Services,
+) -> RunCreated:
+    event_id = uuid4()
+    async with services.database.transaction() as session:
         try:
-            with urllib.request.urlopen(req, timeout=1.0) as response:
-                body = response.read().decode("utf-8")
-                data = json.loads(body)
-                models = []
-                if isinstance(data, dict) and "data" in data:
-                    models = [m.get("id") for m in data["data"] if isinstance(m, dict) and m.get("id")]
-                return {
-                    "success": True,
-                    "status_code": response.status,
-                    "base_url": base_url,
-                    "api_key_detected": bool(api_key),
-                    "api_key": api_key,
-                    "available_models": models,
-                    "message": f"Connected to {config.provider.upper()} server! Auto-detected models: {', '.join(models[:4]) or 'Loaded'}",
-                }
-        except Exception as e:
-            last_error = str(e)
+            await services.database_repository.create_run(
+                session,
+                run_id=request.run_id,
+                project_id=request.project_id,
+                repository_id=request.repository_id,
+                goal=request.goal,
+                baseline_commit=request.baseline_commit,
+            )
+        except IntegrityError as exc:
+            raise HTTPException(status_code=404, detail="project or repository not found") from exc
+        payload = {
+            "run_id": str(request.run_id),
+            "project_id": str(request.project_id),
+            "repository_id": str(request.repository_id),
+        }
+        await services.database_repository.append_audit(
+            session,
+            event_id=event_id,
+            event_type="run.requested",
+            aggregate_type="run",
+            aggregate_id=request.run_id,
+            payload=payload,
+            correlation_id=request.run_id,
+            causation_id=event_id,
+        )
+        await services.database_repository.enqueue_event(
+            session,
+            event_id=event_id,
+            topic="run-requests",
+            payload=payload,
+        )
+    return RunCreated(run_id=request.run_id, state="PENDING")
 
-    if config.provider == "ollama" or any("11434" in c for c in candidates):
-        for base_url in candidates:
-            tags_url = f"{base_url.replace('/v1', '').rstrip('/')}/api/tags"
-            try:
-                tags_req = urllib.request.Request(tags_url)
-                with urllib.request.urlopen(tags_req, timeout=1.0) as response:
-                    body = response.read().decode("utf-8")
-                    data = json.loads(body)
-                    models = []
-                    if isinstance(data, dict) and "models" in data:
-                        models = [m.get("name") for m in data["models"] if isinstance(m, dict) and m.get("name")]
-                    return {
-                        "success": True,
-                        "status_code": response.status,
-                        "base_url": base_url,
-                        "api_key_detected": False,
-                        "available_models": models,
-                        "message": f"Connected to Ollama server at {tags_url}! Installed models ({len(models)}): {', '.join(models[:5])}",
-                    }
-            except Exception as e:
-                last_error = str(e)
 
+@router.get("/projects/{project_id}/tasks/{task_id}", response_model=TaskResponse)
+async def get_task(
+    project_id: UUID,
+    task_id: UUID,
+    services: Services,
+) -> TaskResponse:
+    async with services.database.sessions() as session:
+        row = await services.database_repository.get_task(
+            session,
+            project_id=project_id,
+            task_id=task_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    return _task_response(row)
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/cancel", status_code=202)
+async def cancel_task(
+    project_id: UUID,
+    task_id: UUID,
+    services: Services,
+) -> dict[str, str]:
+    try:
+        await services.scheduler.cancel_task(
+            project_id=project_id,
+            task_id=task_id,
+            notify=services.cancel_notify,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    return {"task_id": str(task_id), "status": "CANCELLED"}
+
+
+@router.post("/approvals/{approval_id}/decision", status_code=202)
+async def decide_approval(
+    approval_id: UUID,
+    decision: ApprovalDecisionRequest,
+    services: Services,
+) -> dict[str, str]:
+    try:
+        await services.approvals.decide(
+            approval_id,
+            approver=decision.approver,
+            approved=decision.approved,
+            expected_call_hash=decision.expected_call_hash,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="approval not found") from exc
+    except ApprovalExpired as exc:
+        raise HTTPException(status_code=409, detail="approval expired") from exc
+    except ApprovalBindingError as exc:
+        raise HTTPException(status_code=409, detail="approval binding mismatch") from exc
     return {
-        "success": False,
-        "status_code": 500,
-        "base_url": raw_base_url,
-        "api_key_detected": bool(api_key),
-        "message": f"Connection failed to Ollama/LLM server: {last_error}",
+        "approval_id": str(approval_id),
+        "status": "APPROVED" if decision.approved else "REJECTED",
     }
 
 
-@router.post("/projects")
-def create_project(req: ProjectCreateReq) -> Dict[str, Any]:
-    project_id = req.project_id or f"proj-{int(time.time() * 1000)}"
-    proj = storage.create_project(
-        project_id=project_id,
-        name=req.name,
-        description=req.description,
-        metadata={"repo_path": req.repo_path},
-    )
-    return {"project_id": proj["id"], "name": proj["name"], "status": "created"}
-
-
-@router.post("/tasks")
-async def create_task(req: TaskCreateReq) -> Dict[str, Any]:
-    task_id = req.task_id or f"task-{int(time.time() * 1000)}"
-
-    proj = storage.get_project(req.project_id)
-    if not proj:
-        storage.create_project(
-            project_id=req.project_id,
-            name="Default Project",
-            description="Auto-created project",
-        )
-
-    task_dict = storage.create_task(
-        task_id=task_id,
-        project_id=req.project_id,
-        title=req.user_request,
-        description=req.description,
-        status=TaskStatus.PENDING,
-    )
-
-    node = TaskNode(
-        id=task_id,
-        title=req.user_request,
-        name=req.user_request,
-        description=req.description,
-        status=TaskStatus.PENDING,
-    )
-    scheduler.register_task(node)
-
-    asyncio.create_task(_run_workflow_background(task_id, req.project_id, req.user_request))
-
-    return {"task_id": task_dict["id"], "project_id": req.project_id, "status": "PENDING"}
-
-
-@router.get("/tasks/{task_id}")
-def get_task(task_id: str) -> Dict[str, Any]:
-    task = storage.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return task
-
-
-@router.post("/tasks/{task_id}/cancel")
-def cancel_task(task_id: str) -> Dict[str, Any]:
-    task = storage.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    storage.update_task_state(task_id=task_id, status=TaskStatus.CANCELLED)
-    scheduler.cancel_task(task_id)
-    return {"task_id": task_id, "status": "CANCELLED"}
-
-
-@router.websocket("/tasks/{task_id}/stream")
-async def websocket_stream(websocket: WebSocket, task_id: str) -> None:
-    await manager.connect(websocket)
+@router.get("/projects/{project_id}/artifacts/{artifact_id}")
+async def download_artifact(
+    project_id: UUID,
+    artifact_id: UUID,
+    services: Services,
+) -> Response:
     try:
-        task = await asyncio.to_thread(storage.get_task, task_id)
-        await websocket.send_json({"task_id": task_id, "task": task, "timestamp": time.time()})
-        while True:
-            data = await websocket.receive_text()
-            task = await asyncio.to_thread(storage.get_task, task_id)
-            await websocket.send_json(
-                {"task_id": task_id, "data": data, "task": task, "timestamp": time.time()}
+        async with services.database.transaction() as session:
+            row = await services.database_repository.get_artifact(
+                session,
+                project_id=project_id,
+                artifact_id=artifact_id,
             )
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.disconnect(websocket)
+            if row is None:
+                raise LookupError
+            content = await services.artifacts.get_verified(
+                session,
+                project_id=project_id,
+                artifact_id=artifact_id,
+            )
+            media_type = row.media_type
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="artifact not found") from exc
+    except (ArtifactIntegrityError, ArtifactPathError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="artifact failed integrity verification",
+        ) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{artifact_id}"'},
+    )
+
+
+@router.get("/dead-letters", response_model=tuple[DeadLetterResponse, ...])
+async def list_dead_letters(
+    services: Services,
+    include_resolved: bool = False,
+    limit: DeadLetterLimit = 100,
+) -> tuple[DeadLetterResponse, ...]:
+    async with services.database.sessions() as session:
+        statement = select(DeadLetterRow).order_by(
+            DeadLetterRow.created_at.desc(), DeadLetterRow.id
+        )
+        if not include_resolved:
+            statement = statement.where(DeadLetterRow.resolved_at.is_(None))
+        rows = tuple((await session.scalars(statement.limit(limit))).all())
+    return tuple(
+        DeadLetterResponse(
+            dead_letter_id=row.id,
+            event_id=row.event_id,
+            consumer=row.consumer,
+            topic=row.topic,
+            attempts=row.attempts,
+            last_error=_safe_delivery_error(row.last_error),
+            created_at=row.created_at.isoformat(),
+            resolved=row.resolved_at is not None,
+        )
+        for row in rows
+    )
+
+
+@router.post("/dead-letters/{dead_letter_id}/replay", status_code=202)
+async def replay_dead_letter(
+    dead_letter_id: UUID,
+    services: Services,
+) -> dict[str, str]:
+    async with services.database.transaction() as session:
+        row = await session.scalar(
+            select(DeadLetterRow)
+            .where(DeadLetterRow.id == dead_letter_id)
+            .with_for_update()
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="dead letter not found")
+        if row.resolved_at is None:
+            row.resolved_at = utc_now()
+            await services.database_repository.enqueue_event(
+                session,
+                event_id=uuid4(),
+                topic=row.topic,
+                payload={**row.payload, "replayed_dead_letter_id": str(row.id)},
+            )
+    return {"dead_letter_id": str(dead_letter_id), "status": "REQUEUED"}
+
+
+@router.websocket("/projects/{project_id}/tasks/{task_id}/events")
+async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> None:
+    try:
+        await require_websocket_admin(websocket)
+    except Exception:
+        return
+    services: ControlPlaneServices = websocket.app.state.services
+    async with services.database.sessions() as session:
+        task = await services.database_repository.get_task(
+            session,
+            project_id=project_id,
+            task_id=task_id,
+        )
+    if task is None:
+        await websocket.close(code=1008, reason="task not found")
+        return
+    await websocket.accept()
+    source = PostgresTaskEventSource(services.database)
+    cursor: EventCursor | None = None
+    try:
+        while True:
+            events = await source.next_events(task_id, after=cursor)
+            for event in events:
+                await websocket.send_json(event)
+                cursor = EventCursor(
+                    created_at=datetime.fromisoformat(str(event["created_at"])),
+                    event_id=UUID(str(event["event_id"])),
+                )
+    except Exception:
+        await websocket.close()
+
+
+def _task_response(row: TaskRow) -> TaskResponse:
+    return TaskResponse(
+        task_id=row.id,
+        run_id=row.run_id,
+        project_id=row.project_id,
+        repository_id=row.repository_id,
+        state=row.state.value,
+        version=row.version,
+        task_type=row.task_type.value,
+        title=row.title,
+        state_entered_at=row.state_entered_at.isoformat(),
+    )
+
+
+def _safe_delivery_error(value: str) -> str:
+    lowered = value.casefold()
+    sensitive_markers = ("bearer ", "api_key", "token=", "password=", "secret=")
+    if any(marker in lowered for marker in sensitive_markers):
+        return "delivery failed; sensitive details redacted"
+    return value[:1_000]

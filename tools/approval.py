@@ -134,6 +134,7 @@ class ApprovalService:
         *,
         approver: str,
         approved: bool,
+        expected_call_hash: str,
         now: datetime | None = None,
     ) -> None:
         if not approver.strip():
@@ -146,6 +147,8 @@ class ApprovalService:
             )
             if row is None:
                 raise LookupError(f"approval {approval_id} does not exist")
+            if not hmac.compare_digest(row.call_hash, expected_call_hash):
+                raise ApprovalBindingError("approval decision does not match the exact call")
             if decided_at >= row.expires_at:
                 row.status = ApprovalStatus.EXPIRED
                 row.decided_at = decided_at

@@ -83,6 +83,7 @@ async def test_approval_is_bound_to_exact_call_scope_approver_and_expiry(
         request.approval_id,
         approver="admin@example.com",
         approved=True,
+        expected_call_hash=request.call_hash,
         now=now + timedelta(seconds=1),
     )
 
@@ -177,6 +178,7 @@ async def test_gateway_interrupts_before_protected_tool_and_executes_only_after_
         paused.value.request.approval_id,
         approver="admin@example.com",
         approved=True,
+        expected_call_hash=paused.value.request.call_hash,
     )
 
     result = await gateway.execute(
