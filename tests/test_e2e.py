@@ -2,14 +2,20 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from autoswe.control_plane import app, storage as cp_storage
-from autoswe.models import TaskStatus
-from autoswe.orchestrator import WorkflowOrchestrator
-from autoswe.storage import StorageEngine
+from apps.api.main import app
+from apps.api.routes import storage as cp_storage
+from execution.scheduler.scheduler import TaskStatus
+from workflows.feature import WorkflowOrchestrator
+from knowledge.memory.storage import StorageEngine
 
 
 @pytest.fixture
-def e2e_env(tmp_path):
+def e2e_env(tmp_path, monkeypatch):
+    async def mock_background(task_id, project_id, user_request):
+        pass
+
+    monkeypatch.setattr("apps.api.routes._run_workflow_background", mock_background)
+
     workspace = str(tmp_path / "workspace")
     os.makedirs(workspace, exist_ok=True)
     db_path = str(tmp_path / "e2e_autoswe.db")
@@ -19,7 +25,6 @@ def e2e_env(tmp_path):
     storage = StorageEngine(db_path=db_path, storage_dir=artifact_dir)
     orchestrator = WorkflowOrchestrator(storage_engine=storage, workspace_path=workspace)
 
-    # Configure control plane storage to use the same isolated storage
     cp_storage.db_path = db_path
     cp_storage.storage_dir = artifact_dir
     cp_storage.artifact_dir = artifact_dir
@@ -55,7 +60,6 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
     assert proj_data["name"] == "E2E Platform Test Project"
     assert proj_data["status"] == "created"
 
-    # Audit log project registration event
     storage.log_audit_event(
         event_type="project_registered",
         actor="e2e_test_user",
@@ -76,14 +80,12 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
     assert task_data["project_id"] == "proj-e2e-001"
     assert task_data["status"] == "PENDING"
 
-    # Audit log task submission event
     storage.log_audit_event(
         event_type="task_submitted",
         actor="e2e_test_user",
         payload={"task_id": "task-e2e-001", "user_request": task_req["user_request"]},
     )
 
-    # Verify task retrieval before workflow execution
     get_task_res = client.get("/api/v1/tasks/task-e2e-001")
     assert get_task_res.status_code == 200
     task_info = get_task_res.json()
@@ -115,7 +117,6 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
         initial_tests=initial_tests,
     )
 
-    # Validate state returned by WorkflowOrchestrator
     assert result_state is not None
     assert result_state["workflow_status"] in ("COMPLETED", TaskStatus.COMPLETED)
     assert result_state["current_node"] in ("Final Reviewer", "Final_Reviewer", "COMPLETED")
@@ -153,7 +154,6 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
         },
     )
 
-    # Query database to confirm audit logs were persisted correctly
     with storage._get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM audit_logs ORDER BY id ASC")
@@ -165,7 +165,6 @@ def test_full_sdlc_platform_e2e_integration(e2e_env):
     assert "task_submitted" in event_types
     assert "workflow_completed" in event_types
 
-    # Verify task state in storage and Control Plane API after completion
     updated_task_res = client.get(f"/api/v1/tasks/{result_state['task_id']}")
     assert updated_task_res.status_code == 200
     updated_task_info = updated_task_res.json()
@@ -182,7 +181,6 @@ def test_e2e_auto_generation_and_self_healing_workflow(tmp_path):
     storage = StorageEngine(db_path=db_path, storage_dir=artifact_dir)
     orchestrator = WorkflowOrchestrator(storage_engine=storage, workspace_path=workspace)
 
-    # Run workflow without pre-defined initial code/tests (auto-generates code and tests)
     result_state = orchestrator.run_workflow(
         user_request="Build calculate_discount utility module",
         project_id="proj-auto-001",

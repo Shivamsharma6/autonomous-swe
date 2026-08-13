@@ -1,17 +1,11 @@
 import pytest
 from datetime import datetime
-from autoswe.models import (
-    RiskLevel,
-    TaskStatus,
-    AgentSpec,
-    ToolCallRequest,
-    ToolCallResult,
-    IdempotencyRecord,
-    TaskNode,
-    WorkflowState,
-    ModelProviderConfig,
-)
-
+from policies.risk.policy_engine import RiskLevel
+from execution.scheduler.scheduler import TaskStatus, TaskNode
+from agents.base import AgentSpec, ModelProviderConfig
+from tools.base import ToolCallRequest, ToolCallResult
+from knowledge.memory.storage import IdempotencyRecord
+from workflows.feature import WorkflowState
 
 
 def test_risk_level_enum():
@@ -100,25 +94,14 @@ def test_task_node_model():
 
 
 def test_workflow_state_model():
-    node = TaskNode(
-        id="task-1",
-        title="Setup project",
-    )
-    record = IdempotencyRecord(
-        key="op-1",
-        result="done",
-    )
-    state = WorkflowState(
-        workflow_id="wf-99",
-        task_nodes={"task-1": node},
-        idempotency_records={"op-1": record},
-    )
-    assert state.workflow_id == "wf-99"
-    assert state.status == TaskStatus.PENDING
-    assert "task-1" in state.task_nodes
-    assert state.task_nodes["task-1"].title == "Setup project"
-    assert "op-1" in state.idempotency_records
-    assert state.metadata == {}
+    state: WorkflowState = {
+        "workflow_id": "wf-99",
+        "task_id": "task-1",
+        "user_request": "Setup project",
+        "workflow_status": "PENDING",
+    }
+    assert state["workflow_id"] == "wf-99"
+    assert state["workflow_status"] == "PENDING"
 
 
 def test_model_provider_config():
@@ -133,4 +116,3 @@ def test_model_provider_config():
     assert config.model_name == "qwen2.5-coder"
     assert config.base_url == "http://localhost:8080/v1"
     assert config.api_key == ""
-

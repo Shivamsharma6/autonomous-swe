@@ -2,8 +2,9 @@ import pytest
 import os
 import sqlite3
 import tempfile
-from autoswe.storage import StorageEngine
-from autoswe.models import TaskStatus, RiskLevel
+from knowledge.memory.storage import StorageEngine
+from execution.scheduler.scheduler import TaskStatus
+from policies.risk.policy_engine import RiskLevel
 
 
 @pytest.fixture
@@ -137,7 +138,6 @@ def test_read_missing_artifact(temp_storage):
 
 
 def test_connection_cleanup_and_foreign_keys(temp_storage):
-    # Test foreign keys enforcement: creating task with non-existent project_id fails
     with pytest.raises(sqlite3.IntegrityError):
         temp_storage.create_task(
             task_id="task-fk-test",
@@ -145,7 +145,6 @@ def test_connection_cleanup_and_foreign_keys(temp_storage):
             title="FK Test",
         )
 
-    # Test explicit connection closing in _get_conn
     conn_instances = []
     with temp_storage._get_conn() as conn:
         conn_instances.append(conn)

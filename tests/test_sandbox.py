@@ -1,6 +1,6 @@
 import os
 import pytest
-from autoswe.sandbox import SandboxRunner
+from execution.sandbox.runner import SandboxRunner
 
 
 def test_sandbox_isolated_command_execution(tmp_path):
@@ -88,4 +88,3 @@ def test_sandbox_timeout_partial_output_preservation(tmp_path):
     assert "PARTIAL_STDOUT_DATA" in res["stdout"]
     assert "PARTIAL_STDERR_DATA" in res["stderr"]
     assert "TIMED_OUT" in res["stderr"]
-

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonomous-swe"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous Software Engineering Platform"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,19 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = [
+    "apps*",
+    "agents*",
+    "workflows*",
+    "tools*",
+    "execution*",
+    "knowledge*",
+    "policies*",
+    "evaluation*",
+    "observability*",
+    "infrastructure*",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-
+testpaths = ["tests"]

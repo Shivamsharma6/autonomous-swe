@@ -1,11 +1,16 @@
 import pytest
 from fastapi.testclient import TestClient
-from autoswe.control_plane import app, storage
+from apps.api.main import app
+from apps.api.routes import storage, manager
 
 
 @pytest.fixture
-def client(tmp_path):
-    # Set up temporary storage for control plane test
+def client(tmp_path, monkeypatch):
+    async def mock_background(task_id, project_id, user_request):
+        pass
+
+    monkeypatch.setattr("apps.api.routes._run_workflow_background", mock_background)
+
     db_path = str(tmp_path / "test_cp.db")
     artifact_dir = str(tmp_path / "artifacts")
     storage.db_path = db_path
@@ -37,14 +42,12 @@ def test_project_creation(client):
 
 
 def test_task_creation_retrieval_and_cancellation(client):
-    # Create project first
     res_proj = client.post(
         "/api/v1/projects",
         json={"name": "Demo App", "repo_path": "/tmp/demo"}
     )
     proj_id = res_proj.json()["project_id"]
 
-    # Create task
     res_task = client.post(
         "/api/v1/tasks",
         json={"project_id": proj_id, "user_request": "Implement authentication endpoint"}
@@ -55,21 +58,18 @@ def test_task_creation_retrieval_and_cancellation(client):
     task_id = task_data["task_id"]
     assert task_data["status"] == "PENDING"
 
-    # Get task
     res_get = client.get(f"/api/v1/tasks/{task_id}")
     assert res_get.status_code == 200
     get_data = res_get.json()
     assert get_data["id"] == task_id
     assert get_data["project_id"] == proj_id
 
-    # Cancel task
     res_cancel = client.post(f"/api/v1/tasks/{task_id}/cancel")
     assert res_cancel.status_code == 200
     cancel_data = res_cancel.json()
     assert cancel_data["task_id"] == task_id
     assert cancel_data["status"] == "CANCELLED"
 
-    # Verify status changed in get_task
     res_get_after = client.get(f"/api/v1/tasks/{task_id}")
     assert res_get_after.status_code == 200
     assert res_get_after.json()["status"].upper() == "CANCELLED"
@@ -87,19 +87,16 @@ def test_cancel_nonexistent_task(client):
 
 
 def test_websocket_stream_endpoint(client):
-    # Create task for streaming
     res_proj = client.post("/api/v1/projects", json={"name": "Stream Demo", "repo_path": "/tmp/stream"})
     proj_id = res_proj.json()["project_id"]
     res_task = client.post("/api/v1/tasks", json={"project_id": proj_id, "user_request": "Stream task progress"})
     task_id = res_task.json()["task_id"]
 
-    # Connect to WebSocket endpoint
     with client.websocket_connect(f"/api/v1/tasks/{task_id}/stream") as websocket:
         initial_msg = websocket.receive_json()
         assert "task_id" in initial_msg
         assert initial_msg["task_id"] == task_id
 
-        # Send a ping and receive message reply
         websocket.send_text("ping")
         reply = websocket.receive_json()
         assert "task_id" in reply
@@ -115,9 +112,7 @@ def test_create_task_invalid_project_id(client):
     assert "task_id" in res.json()
 
 
-
 def test_websocket_disconnect_cleanup(client):
-    from autoswe.control_plane import manager
     res_proj = client.post("/api/v1/projects", json={"name": "Cleanup Demo", "repo_path": "/tmp/cleanup"})
     proj_id = res_proj.json()["project_id"]
     res_task = client.post("/api/v1/tasks", json={"project_id": proj_id, "user_request": "Cleanup task"})
@@ -134,7 +129,7 @@ def test_websocket_disconnect_cleanup(client):
 
 def test_broadcast_removes_failed_connection():
     import asyncio
-    from autoswe.control_plane import ConnectionManager
+    from apps.api.websocket import ConnectionManager
 
     class MockWS:
         async def send_json(self, msg):
@@ -182,6 +177,3 @@ def test_ollama_provider_config(client):
     assert data["status"] == "updated"
     assert data["config"]["provider"] == "ollama"
     assert data["config"]["base_url"] == "http://localhost:11434/v1"
-
-
-

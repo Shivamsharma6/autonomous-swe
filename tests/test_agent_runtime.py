@@ -1,6 +1,4 @@
-# tests/test_agent_runtime.py
-from autoswe.agent_runtime import AgentRuntime, get_default_agent_specs
-from autoswe.models import AgentSpec
+from agents import AgentRuntime, get_default_agent_specs, AgentSpec
 
 
 def test_default_agent_specs():
@@ -13,7 +11,6 @@ def test_default_agent_specs():
     assert "Debugger" in specs
     assert "Final Reviewer" in specs
 
-    # Verify specs are AgentSpec instances and have expected roles
     assert specs["Architect"].role == "Architect"
     assert specs["Researcher"].role == "Researcher"
     assert specs["Coder"].role == "Coder"

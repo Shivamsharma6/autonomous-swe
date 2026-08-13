@@ -1,4 +1,4 @@
-from autoswe.context_engine import ContextEngine, ContextBuilder
+from knowledge.retrieval.context_engine import ContextEngine, ContextBuilder
 
 
 def test_context_engine_4d_assembly():

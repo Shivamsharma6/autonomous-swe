@@ -1,26 +1,22 @@
 import pytest
-from autoswe.models import RiskLevel, ToolCallRequest, ToolCallResult
-from autoswe.storage import StorageEngine
-from autoswe.tool_gateway import RiskPolicyEngine, ToolGateway
+from policies.risk.policy_engine import RiskLevel, RiskPolicyEngine
+from tools.base import ToolCallRequest, ToolCallResult, ToolGateway
+from knowledge.memory.storage import StorageEngine
 
 
 def test_risk_policy_engine_default_scoring():
     engine = RiskPolicyEngine()
 
-    # LOW risk tools
     assert engine.evaluate_risk("read_file", {"path": "main.py"}) == RiskLevel.LOW
     assert engine.evaluate_risk("list_dir", {"path": "."}) == RiskLevel.LOW
     assert engine.evaluate_risk("view_file", {"path": "README.md"}) == RiskLevel.LOW
 
-    # MEDIUM risk tools
     assert engine.evaluate_risk("write_file", {"path": "out.py"}) == RiskLevel.MEDIUM
     assert engine.evaluate_risk("edit_file", {"path": "out.py"}) == RiskLevel.MEDIUM
 
-    # HIGH risk tools
     assert engine.evaluate_risk("run_command", {"command": "ls -la"}) == RiskLevel.HIGH
     assert engine.evaluate_risk("delete_file", {"path": "old.py"}) == RiskLevel.HIGH
 
-    # CRITICAL risk commands / tools
     assert engine.evaluate_risk("run_command", {"command": "rm -rf /"}) == RiskLevel.CRITICAL
     assert engine.evaluate_risk("run_command", {"command": "drop database users"}) == RiskLevel.CRITICAL
     assert engine.evaluate_risk("purge_all_data", {}) == RiskLevel.CRITICAL
@@ -38,7 +34,6 @@ def test_risk_policy_engine_custom_rules():
 def test_secret_redaction():
     gateway = ToolGateway()
 
-    # Redact sensitive dict keys
     payload = {
         "api_key": "sk-1234567890abcdef1234567890abcdef",
         "user": "alice",
@@ -62,7 +57,6 @@ def test_secret_redaction():
 def test_secret_redaction_pattern_matching_in_text():
     gateway = ToolGateway()
 
-    # Strings containing tokens or secret patterns
     text = "Connecting with token ghp_1234567890abcdef1234567890abcdef and Key sk-abcdef1234567890abcdef1234"
     redacted_text = gateway.redact_secrets(text)
 
@@ -95,17 +89,15 @@ def test_idempotency_key_execution_check(tmp_path):
         requested_by="agent-1"
     )
 
-    # First call with idempotency key
     res1 = gateway.execute_tool(req, executor_func=executor, idempotency_key="idempotent-key-100")
     assert res1.is_success
     assert res1.output["count"] == 1
     assert execution_count == 1
 
-    # Second call with SAME idempotency key
     res2 = gateway.execute_tool(req, executor_func=executor, idempotency_key="idempotent-key-100")
     assert res2.is_success
-    assert res2.output["count"] == 1  # returned cached result
-    assert execution_count == 1  # executor was NOT called again!
+    assert res2.output["count"] == 1
+    assert execution_count == 1
 
 
 def test_audit_logging(tmp_path):
@@ -130,14 +122,12 @@ def test_audit_logging(tmp_path):
 
     gateway.execute_tool(req, executor_func=executor)
 
-    # Verify audit logs in storage
     with storage._get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM audit_logs ORDER BY id ASC")
         rows = cursor.fetchall()
 
     assert len(rows) >= 1
-    # Check that secrets in arguments were redacted in audit log payload
     payload_str = str([dict(row) for row in rows])
     assert "secret123" not in payload_str
     assert "[REDACTED]" in payload_str
@@ -163,7 +153,6 @@ def test_non_over_redaction_dict_keys():
 def test_error_message_secret_redaction():
     gateway = ToolGateway()
 
-    # 1. executor_func returns ToolCallResult with secret in error
     def executor_with_error(req: ToolCallRequest) -> ToolCallResult:
         return ToolCallResult(
             call_id=req.call_id,
@@ -178,7 +167,6 @@ def test_error_message_secret_redaction():
     assert "ghp_" not in res1.error
     assert "[REDACTED]" in res1.error
 
-    # 2. executor_func raises Exception containing a secret
     def executor_raises(req: ToolCallRequest) -> ToolCallResult:
         raise RuntimeError("Database error at postgres://user:secret123@localhost:5432/db")
 
@@ -191,25 +179,21 @@ def test_error_message_secret_redaction():
 def test_pem_key_and_pat_redaction():
     gateway = ToolGateway()
 
-    # GitHub fine-grained PAT
     pat_text = "Token: github_pat_11AAAAAAA0123456789abcdef_1234567890abcdef1234567890abcdef1234567890"
     redacted_pat = gateway.redact_secrets(pat_text)
     assert "github_pat_" not in redacted_pat
     assert "[REDACTED]" in redacted_pat
 
-    # Slack token
     slack_text = "Slack token xoxb-1234567890-1234567890-abcdefghij"
     redacted_slack = gateway.redact_secrets(slack_text)
     assert "xoxb-" not in redacted_slack
     assert "[REDACTED]" in redacted_slack
 
-    # PEM key
     pem_text = "-----BEGIN RSA PRIVATE KEY-----\nMIIE..."
     redacted_pem = gateway.redact_secrets(pem_text)
     assert "-----BEGIN RSA PRIVATE KEY-----" not in redacted_pem
     assert "[REDACTED]" in redacted_pem
 
-    # DB connection URI
     db_text = "Connecting to redis://admin:password123@127.0.0.1:6379"
     redacted_db = gateway.redact_secrets(db_text)
     assert "password123@" not in redacted_db
@@ -224,4 +208,3 @@ def test_rm_flag_permutations_risk_scoring():
     assert engine.evaluate_risk("run_command", {"command": "rm -f -r /tmp/data"}) == RiskLevel.CRITICAL
     assert engine.evaluate_risk("run_command", {"command": "rm --recursive /tmp/data"}) == RiskLevel.CRITICAL
     assert engine.evaluate_risk("run_command", {"command": "rm -rf /tmp/data"}) == RiskLevel.CRITICAL
-
