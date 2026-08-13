@@ -253,6 +253,38 @@ class ReservationRow(Base):
     )
 
 
+class ProjectTaskResourceEstimateRow(Base):
+    __tablename__ = "project_task_resource_estimates"
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_type: Mapped[TaskType] = mapped_column(TASK_TYPE_ENUM, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    average_cpu_time_ms: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    peak_memory_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    average_duration_ms: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    average_output_bytes: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    average_network_requests: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    average_model_tokens: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    average_cost_usd: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint("project_id", "task_type", name="uq_project_task_resource_estimate"),
+        CheckConstraint("sample_count >= 0", name="ck_resource_estimate_sample_count"),
+        CheckConstraint(
+            "average_cpu_time_ms >= 0 AND peak_memory_bytes >= 0 "
+            "AND average_duration_ms >= 0 AND average_output_bytes >= 0 "
+            "AND average_network_requests >= 0 AND average_model_tokens >= 0 "
+            "AND average_cost_usd >= 0",
+            name="ck_resource_estimates_nonnegative",
+        ),
+    )
+
+
 class GraphExecutionRow(TimestampMixin, Base):
     __tablename__ = "graph_executions"
 

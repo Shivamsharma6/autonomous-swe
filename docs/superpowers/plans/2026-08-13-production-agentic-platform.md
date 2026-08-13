@@ -126,13 +126,13 @@
 - Create: `tests/integration/scheduler/test_leases.py`
 - Create: `tests/integration/scheduler/test_reconciliation.py`
 
-- [ ] Write unit tests for dependency readiness and all four admission ceilings: total parallel tasks, per-project parallel tasks, model concurrency, and sandbox concurrency.
-- [ ] Write concurrent PostgreSQL tests proving `FOR UPDATE SKIP LOCKED` gives one lease to one dispatcher, reservations cannot oversubscribe, heartbeats extend only the owning lease, expired leases release reservations once, cancellation persists before notification, and retries honor category and budget.
-- [ ] Encode the full domain/checkpoint reconciliation matrix as parametrized integration tests. Run reconciliation twice for every case and assert identical final state and one logical audit effect.
-- [ ] Run the three scheduler test files and observe failures against the current in-memory scheduler.
-- [ ] Implement transactional ready-task selection, lease tokens, heartbeats, reservation acquisition/release, cancellation, retry classification, rolling resource estimates, and deterministic reconciliation hooks. Scheduler admission remains authoritative; graph fan-out receives only admitted task IDs.
-- [ ] Run scheduler tests plus `pytest tests/unit/planning -q`.
-- [ ] Commit: `feat: add durable bounded task scheduler`
+- [x] Write unit tests for dependency readiness and all four admission ceilings: total parallel tasks, per-project parallel tasks, model concurrency, and sandbox concurrency.
+- [x] Write concurrent PostgreSQL tests proving `FOR UPDATE SKIP LOCKED` gives one lease to one dispatcher, reservations cannot oversubscribe, heartbeats extend only the owning lease, expired leases release reservations once, cancellation persists before notification, and retries honor category and budget.
+- [x] Encode the full domain/checkpoint reconciliation matrix as parametrized integration tests. Run reconciliation twice for every case and assert identical final state and one logical audit effect.
+- [x] Run the three scheduler test files and observe failures against the current in-memory scheduler.
+- [x] Implement transactional ready-task selection, lease tokens, heartbeats, reservation acquisition/release, cancellation, retry classification, rolling resource estimates, and deterministic reconciliation hooks. Scheduler admission remains authoritative; graph fan-out receives only admitted task IDs.
+- [x] Run scheduler tests plus `pytest tests/unit/planning -q`.
+- [x] Commit: `feat: add durable bounded task scheduler`
 
 ### Task 7: Implement transactional outbox and at-least-once Redis Streams delivery
 
