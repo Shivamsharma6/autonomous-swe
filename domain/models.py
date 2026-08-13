@@ -264,6 +264,7 @@ class ToolCallRequest(ContractModel):
     attempt_id: UUID
     requested_by: Annotated[str, Field(min_length=1, max_length=100)]
     tool_name: Annotated[str, Field(min_length=1, max_length=100)]
+    tool_version: Annotated[str, Field(pattern=r"^\d+\.\d+$")] = "1.0"
     arguments: dict[str, Any]
     idempotency_key: Annotated[str, Field(min_length=1, max_length=500)]
 

@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Union
+from typing import Any
 
 SENSITIVE_KEY_EXACT = {
     "key",
@@ -24,7 +24,10 @@ SENSITIVE_KEY_EXACT = {
 
 SENSITIVE_KEY_PATTERNS = [
     re.compile(r"^.*_(key|secret|password|token|credentials|auth)$", re.IGNORECASE),
-    re.compile(r"^(api_key|secret|password|auth_token|access_key|private_key|credentials|token|auth)$", re.IGNORECASE),
+    re.compile(
+        r"^(api_key|secret|password|auth_token|access_key|private_key|credentials|token|auth)$",
+        re.IGNORECASE,
+    ),
 ]
 
 SECRET_PATTERNS = [

@@ -1,66 +1,78 @@
-import re
-from enum import Enum
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from domain.enums import RiskLevel
+
+_RISK_ORDER = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
 
 
-class RiskLevel(str, Enum):
-    """Risk level classification for tools and operations."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+def maximum_risk(*levels: RiskLevel) -> RiskLevel:
+    return max(levels, key=_RISK_ORDER.__getitem__)
 
 
-CRITICAL_ARG_PATTERNS = [
-    re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\s+-f|-f\s+-r|--recursive)", re.IGNORECASE),
-    re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
-    re.compile(r"\bdrop\s+table\b", re.IGNORECASE),
-    re.compile(r"\btruncate\s+table\b", re.IGNORECASE),
-    re.compile(r"\bpurge_all\b", re.IGNORECASE),
-    re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE),
-    re.compile(r"\bshutdown\b", re.IGNORECASE),
-]
+def risk_exceeds(level: RiskLevel, ceiling: RiskLevel) -> bool:
+    return _RISK_ORDER[level] > _RISK_ORDER[ceiling]
 
 
-class RiskPolicyEngine:
-    """Evaluates risk levels of tool executions and system actions."""
+@dataclass(frozen=True, slots=True)
+class ToolRiskPolicy:
+    protected_paths: tuple[str, ...] = (
+        ".github/workflows",
+        ".git",
+        "infra",
+        "infrastructure",
+        "terraform",
+    )
+    repository_floor: RiskLevel = RiskLevel.LOW
 
-    def __init__(self, custom_rules: Optional[Dict[str, RiskLevel]] = None):
-        self.custom_rules: Dict[str, RiskLevel] = custom_rules or {}
-
-    def register_risk_rule(self, tool_name: str, risk_level: RiskLevel) -> None:
-        """Register a custom risk classification rule for a tool."""
-        self.custom_rules[tool_name] = risk_level
-
-    def evaluate_risk(
-        self, tool_name: str, arguments: Optional[Dict[str, Any]] = None
+    def calculate(
+        self,
+        *,
+        base: RiskLevel,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        side_effect: object,
     ) -> RiskLevel:
-        """Evaluate the risk level of executing a tool with given arguments."""
-        # 1. Custom rule check
-        if tool_name in self.custom_rules:
-            return self.custom_rules[tool_name]
+        levels = [base, self.repository_floor]
+        effect = str(getattr(side_effect, "value", side_effect)).casefold()
+        if effect == "local":
+            levels.append(RiskLevel.MEDIUM)
+        elif effect == "external":
+            levels.append(RiskLevel.HIGH)
 
-        args_str = str(arguments or {})
+        paths = _argument_paths(arguments)
+        if any(
+            path == protected or path.startswith(protected + "/")
+            for path in paths
+            for protected in self.protected_paths
+        ):
+            levels.append(RiskLevel.HIGH)
+        lowered = tool_name.casefold()
+        if any(value in lowered for value in ("delete", "destroy", "drop", "purge")):
+            levels.append(RiskLevel.HIGH)
+        if any(value in lowered for value in ("deploy", "push", "commit", "pull_request")):
+            levels.append(RiskLevel.HIGH)
+        return maximum_risk(*levels)
 
-        # 2. Check for CRITICAL destructive patterns in arguments or tool name
-        for pattern in CRITICAL_ARG_PATTERNS:
-            if pattern.search(args_str):
-                return RiskLevel.CRITICAL
 
-        if any(keyword in tool_name.lower() for keyword in ["purge", "destroy_all", "drop_db", "delete_database"]):
-            return RiskLevel.CRITICAL
-
-        # 3. High risk tools / commands
-        if tool_name in ("run_command", "bash", "shell", "exec") or tool_name.startswith(("delete_", "remove_", "kill_", "drop_")):
-            return RiskLevel.HIGH
-
-        # 4. Medium risk tools (state modifying)
-        if tool_name.startswith(("write_", "edit_", "create_", "update_", "modify_", "save_", "post_", "put_")):
-            return RiskLevel.MEDIUM
-
-        # 5. Low risk tools (read-only)
-        if tool_name.startswith(("read_", "list_", "get_", "view_", "search_", "fetch_", "describe_", "check_", "inspect_")):
-            return RiskLevel.LOW
-
-        return RiskLevel.MEDIUM
+def _argument_paths(arguments: Mapping[str, Any]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for key, value in arguments.items():
+        if key.casefold() in {"path", "paths", "target", "file", "directory"}:
+            if isinstance(value, str):
+                paths.append(value.replace("\\", "/").removeprefix("./"))
+            elif isinstance(value, list):
+                paths.extend(
+                    item.replace("\\", "/").removeprefix("./")
+                    for item in value
+                    if isinstance(item, str)
+                )
+    return tuple(paths)

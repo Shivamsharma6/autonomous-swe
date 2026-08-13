@@ -455,6 +455,7 @@ class DomainRepository:
             attempt_id=call.attempt_id,
             requested_by=call.requested_by,
             tool_name=call.tool_name,
+            tool_version=call.tool_version,
             arguments=call.arguments,
             idempotency_key=call.idempotency_key,
             status=status,

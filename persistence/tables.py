@@ -534,6 +534,7 @@ class ToolExecutionRow(Base):
     )
     requested_by: Mapped[str] = mapped_column(String(100), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    tool_version: Mapped[str] = mapped_column(String(20), nullable=False, default="1.0")
     arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False)

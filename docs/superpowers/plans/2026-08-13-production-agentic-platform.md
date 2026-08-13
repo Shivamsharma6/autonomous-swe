@@ -252,11 +252,11 @@
 - Create: `tests/integration/tools/test_idempotency.py`
 - Create: `tests/security/test_approval_binding.py`
 
-- [ ] Write tests for versioned argument/result schemas, capability ownership, eligible agents, risk calculation, timeout/retry/replay policies, path containment, side-effect declaration, and mandatory approval for commit/push/PR/infra/deploy.
-- [ ] Prove the gateway atomically claims a stable idempotency key; a replay returns the persisted result; concurrent calls execute once; and an uncertain side effect becomes `NEEDS_RECONCILIATION` rather than retrying.
-- [ ] Prove approval is bound to normalized arguments, repository, baseline commit, approver, and expiry. Any difference invalidates it.
-- [ ] Run tests against the current gateway, implement the registry/gateway/approval service, and rerun.
-- [ ] Commit: `feat: govern typed tool calls and approvals`
+- [x] Write tests for versioned argument/result schemas, capability ownership, eligible agents, risk calculation, timeout/retry/replay policies, path containment, side-effect declaration, and mandatory approval for commit/push/PR/infra/deploy.
+- [x] Prove the gateway atomically claims a stable idempotency key; a replay returns the persisted result; concurrent calls execute once; and an uncertain side effect becomes `NEEDS_RECONCILIATION` rather than retrying.
+- [x] Prove approval is bound to normalized arguments, repository, baseline commit, approver, and expiry. Any difference invalidates it.
+- [x] Run tests against the current gateway, implement the registry/gateway/approval service, and rerun.
+- [x] Commit: `feat: govern typed tool calls and approvals`
 
 ### Task 13: Add Python and Node.js/TypeScript repository adapters
 
