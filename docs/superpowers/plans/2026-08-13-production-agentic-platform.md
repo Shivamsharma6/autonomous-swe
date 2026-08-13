@@ -170,14 +170,14 @@
 - Create: `tests/unit/memory/test_promotion.py`
 - Create: `tests/integration/memory/test_uams_failure.py`
 
-- [ ] Define one contract suite and run it against the deterministic in-memory adapter and an HTTP mock of external UAMS for `ready`, `get_context`, `search`, and `remember`.
-- [ ] Prove retrieval preserves memory/revision/provenance IDs, rejects expired knowledge, marks commit-scoped knowledge stale after baseline movement, and never silently falls back when UAMS is unavailable.
-- [ ] Test the promotion gate for verified outcome, classification, evidence, redaction, contradiction/duplicate checks, quality score, and approval-sensitive knowledge. Test UUIDv5 stability from project/source/type/content/schema.
-- [ ] Prove a crash after UAMS write but before local acknowledgement retries the same `memory_id`; promotion is complete only after UAMS reports the current revision searchable.
-- [ ] Run tests against the existing SQLite implementation and observe failures.
-- [ ] Implement the narrow `MemoryPort`, HTTPX UAMS adapter, test fake, promotion service, freshness/provenance metadata, and visible `WAITING_FOR_MEMORY` graph transitions. Delete SQLite connection and schema code from `knowledge/memory/storage.py`; retain only compatibility imports that point to the port for one commit, then remove those imports in Task 18.
-- [ ] Run `pytest tests/contract/test_memory_port.py tests/unit/memory tests/integration/memory -q`.
-- [ ] Commit: `feat: integrate external uams as durable memory`
+- [x] Define one contract suite and run it against the deterministic in-memory adapter and an HTTP mock of external UAMS for `ready`, `get_context`, `search`, and `remember`.
+- [x] Prove retrieval preserves memory/revision/provenance IDs, rejects expired knowledge, marks commit-scoped knowledge stale after baseline movement, and never silently falls back when UAMS is unavailable.
+- [x] Test the promotion gate for verified outcome, classification, evidence, redaction, contradiction/duplicate checks, quality score, and approval-sensitive knowledge. Test UUIDv5 stability from project/source/type/content/schema.
+- [x] Prove a crash after UAMS write but before local acknowledgement retries the same `memory_id`; promotion is complete only after UAMS reports the current revision searchable.
+- [x] Run tests against the existing SQLite implementation and observe failures.
+- [x] Implement the narrow `MemoryPort`, HTTPX UAMS adapter, test fake, promotion service, freshness/provenance metadata, and visible `WAITING_FOR_MEMORY` graph transitions. Delete SQLite connection and schema code from `knowledge/memory/storage.py`; retain only compatibility imports that point to the port for one commit, then remove those imports in Task 18.
+- [x] Run `pytest tests/contract/test_memory_port.py tests/unit/memory tests/integration/memory -q`.
+- [x] Commit: `feat: integrate external uams as durable memory`
 
 ### Task 9: Build the typed OpenAI-compatible model gateway and declarative agents
 

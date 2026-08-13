@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     redis_url: str
     uams_url: str
     uams_token: SecretStr = SecretStr("")
+    uams_timeout_seconds: float = Field(default=15.0, gt=0, le=300)
     model_base_url: str
     model_api_key: SecretStr = SecretStr("")
 
@@ -78,10 +79,10 @@ class Settings(BaseSettings):
             if not value.strip():
                 raise ValueError(f"{field_name} must be configured")
 
-        test_adapter_used = any(
-            value.startswith(_TEST_SCHEMES) for value in service_values.values()
-        ) or self.python_runner_image.startswith("test://") or self.node_runner_image.startswith(
-            "test://"
+        test_adapter_used = (
+            any(value.startswith(_TEST_SCHEMES) for value in service_values.values())
+            or self.python_runner_image.startswith("test://")
+            or self.node_runner_image.startswith("test://")
         )
         if test_adapter_used and not self.is_test:
             raise ValueError("test adapters may only be used when AUTOSWE_ENV=test")

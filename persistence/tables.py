@@ -543,11 +543,18 @@ class MemoryCandidateRow(Base):
     candidate: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False)
     deterministic_memory_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    uams_memory_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    uams_revision_id: Mapped[str | None] = mapped_column(String(200))
+    uams_searchable_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (Index("ix_memory_candidates_status", "status", "created_at"),)
+    __table_args__ = (
+        Index("ix_memory_candidates_status", "status", "created_at"),
+        Index("ix_memory_candidates_uams_memory", "uams_memory_id"),
+    )
 
 
 class SandboxExecutionRow(Base):

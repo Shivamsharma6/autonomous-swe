@@ -1,13 +1,3 @@
-from knowledge.memory.storage import StorageEngine, IdempotencyRecord
-from knowledge.retrieval.context_engine import ContextEngine, ContextBuilder
-from knowledge.indexing.ast_indexer import ASTIndexer
-from knowledge.code_graph.graph import CodeGraphAnalyzer
+from knowledge.memory import MemoryPort, PromotionGate, PromotionService, UAMSMemoryAdapter
 
-__all__ = [
-    "StorageEngine",
-    "IdempotencyRecord",
-    "ContextEngine",
-    "ContextBuilder",
-    "ASTIndexer",
-    "CodeGraphAnalyzer",
-]
+__all__ = ["MemoryPort", "PromotionGate", "PromotionService", "UAMSMemoryAdapter"]
