@@ -89,14 +89,14 @@
 - Create: `tests/integration/persistence/test_migrations.py`
 - Modify: `pyproject.toml`
 
-- [ ] Write integration tests against real PostgreSQL for projects, repositories, runs, plan revisions, tasks, attempts, leases, reservations, graph-execution metadata, messages, outbox records, consumer receipts, dead letters, tool executions, approvals, artifacts, memory candidates, sandbox executions, state durations, and immutable audit events.
-- [ ] Prove compare-and-set transitions reject stale revisions; terminal states cannot regress; a task transition and its audit/outbox records commit atomically; and repository methods always require project scope.
-- [ ] Run `pytest tests/integration/persistence -q`; expect import or connection fixture failures.
-- [ ] Implement SQLAlchemy async tables with PostgreSQL enums, UUID primary keys, UTC timestamps, check constraints, unique idempotency keys, content-hash constraints, foreign keys, and indexes for ready work, expired leases, unpublished outbox events, pending approvals, state age, and unresolved dead letters.
-- [ ] Implement a transaction boundary object. Repository methods accept an existing session so orchestration services can update state, audit, and outbox atomically.
-- [ ] Implement Alembic upgrade and downgrade. Run upgrade on an empty database, populate it, downgrade, upgrade again, and verify retained compatible records.
-- [ ] Run `pytest tests/integration/persistence -q` and `alembic check`.
-- [ ] Commit: `feat: add authoritative postgres domain store`
+- [x] Write integration tests against real PostgreSQL for projects, repositories, runs, plan revisions, tasks, attempts, leases, reservations, graph-execution metadata, messages, outbox records, consumer receipts, dead letters, tool executions, approvals, artifacts, memory candidates, sandbox executions, state durations, and immutable audit events.
+- [x] Prove compare-and-set transitions reject stale revisions; terminal states cannot regress; a task transition and its audit/outbox records commit atomically; and repository methods always require project scope.
+- [x] Run `pytest tests/integration/persistence -q`; expect import or connection fixture failures.
+- [x] Implement SQLAlchemy async tables with PostgreSQL enums, UUID primary keys, UTC timestamps, check constraints, unique idempotency keys, content-hash constraints, foreign keys, and indexes for ready work, expired leases, unpublished outbox events, pending approvals, state age, and unresolved dead letters.
+- [x] Implement a transaction boundary object. Repository methods accept an existing session so orchestration services can update state, audit, and outbox atomically.
+- [x] Implement Alembic upgrade and downgrade. Run upgrade on an empty database, populate it, downgrade, upgrade again, and verify retained compatible records.
+- [x] Run `pytest tests/integration/persistence -q` and `alembic check`.
+- [x] Commit: `feat: add authoritative postgres domain store`
 
 ### Task 5: Build content-addressed artifact storage with corruption quarantine
 
