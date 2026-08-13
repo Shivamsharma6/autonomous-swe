@@ -46,13 +46,13 @@
 - Create: `tests/unit/domain/test_messages.py`
 - Modify: `pyproject.toml`
 
-- [ ] Write tests for the six `TaskType` values; separate scheduler and graph execution enums; legal transition tables; immutable IDs; budget fields; task dependencies; plan revisions; `AgentSpec` hashing; typed results; `SandboxExecution`; `MemoryCandidate`; approval call hashes; and artifact lifecycle states including `CORRUPT`.
-- [ ] Write parametrized serialization tests for the discriminated message union: `ContextHandoff`, `ResearchEvidence`, `PatchProposal`, `TestEvidence`, `ReviewFinding`, `ValidationResult`, `Blocker`, and `TaskCompletion`. Verify every message carries schema version, sender, recipient, run/task/attempt IDs, timestamp, causation/correlation IDs, artifact references, and content SHA-256.
-- [ ] Run `pytest tests/unit/domain -q`; expect failures because `domain` does not exist.
-- [ ] Implement strict Pydantic models with `extra="forbid"`, timezone-aware UTC timestamps, bounded collection sizes, UUID identifiers, non-negative budgets, and canonical SHA-256 helpers. Define `TaskPlan`, `TaskPlanMutation`, `ReleaseDecision`, and all model-facing outputs as versioned structured schemas.
-- [ ] Add `domain*` to package discovery.
-- [ ] Run `pytest tests/unit/domain -q` and `mypy domain`.
-- [ ] Commit: `feat: define typed platform contracts`
+- [x] Write tests for the six `TaskType` values; separate scheduler and graph execution enums; legal transition tables; immutable IDs; budget fields; task dependencies; plan revisions; `AgentSpec` hashing; typed results; `SandboxExecution`; `MemoryCandidate`; approval call hashes; and artifact lifecycle states including `CORRUPT`.
+- [x] Write parametrized serialization tests for the discriminated message union: `ContextHandoff`, `ResearchEvidence`, `PatchProposal`, `TestEvidence`, `ReviewFinding`, `ValidationResult`, `Blocker`, and `TaskCompletion`. Verify every message carries schema version, sender, recipient, run/task/attempt IDs, timestamp, causation/correlation IDs, artifact references, and content SHA-256.
+- [x] Run `pytest tests/unit/domain -q`; expect failures because `domain` does not exist.
+- [x] Implement strict Pydantic models with `extra="forbid"`, timezone-aware UTC timestamps, bounded collection sizes, UUID identifiers, non-negative budgets, and canonical SHA-256 helpers. Define `TaskPlan`, `TaskPlanMutation`, `ReleaseDecision`, and all model-facing outputs as versioned structured schemas.
+- [x] Add `domain*` to package discovery.
+- [x] Run `pytest tests/unit/domain -q` and `mypy domain`.
+- [x] Commit: `feat: define typed platform contracts`
 
 ### Task 3: Validate task DAGs and bounded dynamic mutations
 
