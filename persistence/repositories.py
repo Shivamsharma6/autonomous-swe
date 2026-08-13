@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.enums import GraphExecutionState, TaskStatus
+from domain.enums import ArtifactState, GraphExecutionState, TaskStatus
 from domain.events import require_task_transition
 from domain.messages import MessageEnvelope
 from domain.models import (
@@ -411,6 +411,85 @@ class DomainRepository:
             verified_at=utc_now() if artifact.state.value == "VALID" else None,
         )
         session.add(row)
+        await session.flush()
+        return row
+
+    async def get_artifact(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: UUID,
+        artifact_id: UUID,
+        for_update: bool = False,
+    ) -> ArtifactRow | None:
+        statement = select(ArtifactRow).where(
+            ArtifactRow.id == artifact_id,
+            ArtifactRow.project_id == project_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return cast(ArtifactRow | None, await session.scalar(statement))
+
+    async def list_valid_artifacts(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: UUID,
+        task_id: UUID,
+    ) -> tuple[ArtifactRow, ...]:
+        result = await session.scalars(
+            select(ArtifactRow)
+            .where(
+                ArtifactRow.project_id == project_id,
+                ArtifactRow.task_id == task_id,
+                ArtifactRow.state == ArtifactState.VALID,
+            )
+            .order_by(ArtifactRow.created_at, ArtifactRow.id)
+        )
+        return tuple(result)
+
+    async def mark_artifact_corrupt(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: UUID,
+        artifact_id: UUID,
+    ) -> ArtifactRow:
+        row = await self.get_artifact(
+            session,
+            project_id=project_id,
+            artifact_id=artifact_id,
+            for_update=True,
+        )
+        if row is None:
+            raise LookupError(f"artifact {artifact_id} does not exist in project {project_id}")
+        if row.state is ArtifactState.CORRUPT:
+            return row
+        row.state = ArtifactState.CORRUPT
+        row.verified_at = None
+        event_id = uuid4()
+        payload = {
+            "artifact_id": str(row.id),
+            "project_id": str(row.project_id),
+            "sha256": row.sha256,
+            "state": ArtifactState.CORRUPT.value,
+        }
+        await self.append_audit(
+            session,
+            event_id=event_id,
+            event_type="artifact.corrupt",
+            aggregate_type="artifact",
+            aggregate_id=row.id,
+            payload=payload,
+            correlation_id=row.run_id,
+            causation_id=event_id,
+        )
+        await self.enqueue_event(
+            session,
+            event_id=event_id,
+            topic="artifact-integrity",
+            payload=payload,
+        )
         await session.flush()
         return row
 

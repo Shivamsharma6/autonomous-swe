@@ -105,12 +105,12 @@
 - Create: `tests/unit/persistence/test_artifacts.py`
 - Create: `tests/integration/persistence/test_artifact_integrity.py`
 
-- [ ] Write tests that store bytes under a SHA-256-derived path, persist metadata, verify metadata-to-object hashes on every retrieval, reject path traversal and symlinks, deduplicate identical bytes, and atomically finalize temporary writes.
-- [ ] Write the acceptance test that mutates stored bytes, then proves retrieval marks metadata `CORRUPT`, emits an audit/outbox event, excludes the object from an evidence query, and cannot return it as valid evidence.
-- [ ] Run the tests and observe import failure.
-- [ ] Implement `ArtifactStore.put`, `verify`, `open_verified`, and `quarantine`. Use filesystem primitives without following user-controlled symlinks and never trust a client-supplied digest.
-- [ ] Run `pytest tests/unit/persistence/test_artifacts.py tests/integration/persistence/test_artifact_integrity.py -q`.
-- [ ] Commit: `feat: enforce artifact integrity and quarantine`
+- [x] Write tests that store bytes under a SHA-256-derived path, persist metadata, verify metadata-to-object hashes on every retrieval, reject path traversal and symlinks, deduplicate identical bytes, and atomically finalize temporary writes.
+- [x] Write the acceptance test that mutates stored bytes, then proves retrieval marks metadata `CORRUPT`, emits an audit/outbox event, excludes the object from an evidence query, and cannot return it as valid evidence.
+- [x] Run the tests and observe import failure.
+- [x] Implement `ArtifactStore.put`, `verify`, `open_verified`, and `quarantine`. Use filesystem primitives without following user-controlled symlinks and never trust a client-supplied digest.
+- [x] Run `pytest tests/unit/persistence/test_artifacts.py tests/integration/persistence/test_artifact_integrity.py -q`.
+- [x] Commit: `feat: enforce artifact integrity and quarantine`
 
 ---
 
