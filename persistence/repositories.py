@@ -10,7 +10,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.enums import ArtifactState, GraphExecutionState, TaskStatus
-from domain.events import require_task_transition
+from domain.events import require_graph_transition, require_task_transition
 from domain.messages import MessageEnvelope
 from domain.models import (
     ApprovalRequest,
@@ -275,6 +275,95 @@ class DomainRepository:
             checkpoint_id=checkpoint_id,
         )
         session.add(row)
+        await session.flush()
+        return row
+
+    async def transition_graph_execution(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: UUID,
+        run_id: UUID,
+        repository_id: UUID,
+        baseline_commit: str,
+        thread_id: str,
+        target: GraphExecutionState,
+        checkpoint_id: str | None,
+    ) -> GraphExecutionRow:
+        """Persist graph state without changing the authoritative scheduler task state."""
+        now = utc_now()
+        row = await session.scalar(
+            select(GraphExecutionRow).where(GraphExecutionRow.task_id == task_id).with_for_update()
+        )
+        if row is None:
+            if target not in {
+                GraphExecutionState.RUNNING,
+                GraphExecutionState.CANCELLED,
+            }:
+                raise ValueError("new graph execution must start RUNNING or CANCELLED")
+            row = await self.record_graph_execution(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                repository_id=repository_id,
+                baseline_commit=baseline_commit,
+                thread_id=thread_id,
+                state=target,
+                checkpoint_id=checkpoint_id,
+            )
+            previous = GraphExecutionState.NOT_STARTED
+        else:
+            if (
+                row.run_id != run_id
+                or row.repository_id != repository_id
+                or row.baseline_commit != baseline_commit
+                or row.thread_id != thread_id
+            ):
+                raise ValueError(
+                    "graph execution identity does not match run, task, repository, or baseline"
+                )
+            previous = row.state
+            if previous is target:
+                row.checkpoint_id = checkpoint_id or row.checkpoint_id
+                await session.flush()
+                return row
+            require_graph_transition(previous, target)
+            await self.record_state_duration(
+                session,
+                aggregate_type="workflow",
+                aggregate_id=row.id,
+                state=previous.value,
+                entered_at=row.state_entered_at,
+                exited_at=now,
+            )
+            row.state = target
+            row.state_entered_at = now
+            row.checkpoint_id = checkpoint_id or row.checkpoint_id
+
+        event_id = uuid4()
+        payload = {
+            "task_id": str(task_id),
+            "thread_id": thread_id,
+            "from": previous.value,
+            "to": target.value,
+            "checkpoint_id": row.checkpoint_id,
+        }
+        await self.append_audit(
+            session,
+            event_id=event_id,
+            event_type="workflow.state_changed",
+            aggregate_type="workflow",
+            aggregate_id=row.id,
+            payload=payload,
+            correlation_id=run_id,
+            causation_id=event_id,
+        )
+        await self.enqueue_event(
+            session,
+            event_id=event_id,
+            topic="workflow-state",
+            payload=payload,
+        )
         await session.flush()
         return row
 

@@ -214,14 +214,14 @@
 - Create: `tests/integration/workflows/test_postgres_checkpoints.py`
 - Create: `tests/integration/workflows/test_parallel_fanout.py`
 
-- [ ] Write routing tests for the approved subgraphs: research, implementation, test, refactor, documentation, and validation. Assert each uses only its required nodes and returns typed result/message/artifact IDs.
-- [ ] Write real PostgresSaver tests proving a stable thread identity, checkpoint resume after process recreation, graph states distinct from scheduler states, and explicit interrupts for tool, approval, and UAMS waits.
-- [ ] Write a fan-out test with three independent admitted tasks and one dependent integration task. Assert max observed concurrency equals configured admission, result ordering is deterministic by task ID at fan-in, and non-admitted tasks never execute.
-- [ ] Run tests and observe failures against `MemorySaver` and the fixed graph.
-- [ ] Implement the top-level intake/recall/analyze/architect/validate/admit/send/fan-in/verify/repair/review/approval/complete graph. Compile production graphs only with PostgresSaver. Nodes pass compact typed state and durable IDs, not unbounded bodies.
-- [ ] Ensure every side-effecting node uses an outbox/idempotency or explicit uncertain-outcome boundary and checks cancellation before and after I/O.
-- [ ] Run `pytest tests/unit/workflows tests/integration/workflows -q`.
-- [ ] Commit: `feat: execute typed workflows with postgres checkpoints`
+- [x] Write routing tests for the approved subgraphs: research, implementation, test, refactor, documentation, and validation. Assert each uses only its required nodes and returns typed result/message/artifact IDs.
+- [x] Write real PostgresSaver tests proving a stable thread identity, checkpoint resume after process recreation, graph states distinct from scheduler states, and explicit interrupts for tool, approval, and UAMS waits.
+- [x] Write a fan-out test with three independent admitted tasks and one dependent integration task. Assert max observed concurrency equals configured admission, result ordering is deterministic by task ID at fan-in, and non-admitted tasks never execute.
+- [x] Run tests and observe failures against `MemorySaver` and the fixed graph.
+- [x] Implement the top-level intake/recall/analyze/architect/validate/admit/send/fan-in/verify/repair/review/approval/complete graph. Compile production graphs only with PostgresSaver. Nodes pass compact typed state and durable IDs, not unbounded bodies.
+- [x] Ensure every side-effecting node uses an outbox/idempotency or explicit uncertain-outcome boundary and checks cancellation before and after I/O.
+- [x] Run `pytest tests/unit/workflows tests/integration/workflows -q`.
+- [x] Commit: `feat: execute typed workflows with postgres checkpoints`
 
 ### Task 11: Implement bounded repair mutation and deterministic release review
 
