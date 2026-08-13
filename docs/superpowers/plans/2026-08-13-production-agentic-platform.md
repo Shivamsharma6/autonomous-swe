@@ -335,11 +335,11 @@
 - Create: `scripts/smoke.sh`
 - Create: `tests/compose/test_compose_config.py`
 
-- [ ] Write static tests that parse the rendered Compose model and require api, dispatcher, workers, postgres, redis, sandbox-manager, docker-socket-proxy, and web. Assert health checks, resource limits, restart policies, pinned images, persistent volumes, internal networks, no broad Docker socket mount, and external UAMS configured only by URL/token.
-- [ ] Assert Compose contains no credential values and specifically no committed LangSmith/model/admin/UAMS secret. Remove the currently committed tracing key from `docker-compose.yml`; report that the user must rotate it because deleting it from the current file cannot erase Git history.
-- [ ] Implement admin-token generation with restrictive permissions; locked migrations; verified PostgreSQL backup/restore; reconciliation; and one smoke command that initializes, migrates, starts, checks readiness, runs a deterministic workflow, verifies artifacts, and shuts down cleanly.
-- [ ] Validate with `docker compose config --quiet` and `pytest tests/compose -q`.
-- [ ] Commit: `ops: deliver production single-host compose stack`
+- [x] Write static tests that parse the rendered Compose model and require api, dispatcher, workers, postgres, redis, sandbox-manager, docker-socket-proxy, and web. Assert health checks, resource limits, restart policies, pinned images, persistent volumes, internal networks, no broad Docker socket mount, and external UAMS configured only by URL/token.
+- [x] Assert Compose contains no credential values and specifically no committed LangSmith/model/admin/UAMS secret. Remove the currently committed tracing key from `docker-compose.yml`; report that the user must rotate it because deleting it from the current file cannot erase Git history.
+- [x] Implement admin-token generation with restrictive permissions; locked migrations; verified PostgreSQL backup/restore; reconciliation; and one smoke command that initializes, migrates, starts, checks readiness, runs a deterministic workflow, verifies artifacts, and shuts down cleanly.
+- [x] Validate with `docker compose config --quiet` and `pytest tests/compose -q`.
+- [x] Commit: `ops: deliver production single-host compose stack`
 
 ---
 
@@ -360,11 +360,11 @@
 - Create: `tests/unit/observability/test_metrics.py`
 - Create: `tests/integration/observability/test_state_durations.py`
 
-- [ ] Test correlation propagation across request/run/task/graph/message/model/tool/sandbox/artifact/UAMS spans and redaction in logs, traces, and metric attributes.
-- [ ] Test atomic `state_entered_at` duration recording and exact histogram names: `task_state_duration_seconds`, `workflow_state_duration_seconds`, `approval_wait_duration_seconds`, and `uams_wait_duration_seconds`. Assert no run/task/project IDs are Prometheus labels.
-- [ ] Encode all approved initial SLO definitions, eligibility rules, burn-rate calculations, and alert thresholds. Add dashboards for state age/blocking reason, reservations versus actual use, outbox/dead letters, UAMS waits, artifacts, sandbox resources, and error budgets.
-- [ ] Run tests, implement telemetry, then rerun.
-- [ ] Commit: `feat: add platform telemetry and reliability slos`
+- [x] Test correlation propagation across request/run/task/graph/message/model/tool/sandbox/artifact/UAMS spans and redaction in logs, traces, and metric attributes.
+- [x] Test atomic `state_entered_at` duration recording and exact histogram names: `task_state_duration_seconds`, `workflow_state_duration_seconds`, `approval_wait_duration_seconds`, and `uams_wait_duration_seconds`. Assert no run/task/project IDs are Prometheus labels.
+- [x] Encode all approved initial SLO definitions, eligibility rules, burn-rate calculations, and alert thresholds. Add dashboards for state age/blocking reason, reservations versus actual use, outbox/dead letters, UAMS waits, artifacts, sandbox resources, and error budgets.
+- [x] Run tests, implement telemetry, then rerun.
+- [x] Commit: `feat: add platform telemetry and reliability slos`
 
 ### Task 18: Prove recovery, migration rollback, and the branching-repair E2E; remove legacy paths
 
@@ -382,13 +382,13 @@
 - Create: `docs/repository-adapters.md`
 - Replace: `README.md`
 
-- [ ] Write the deterministic E2E with scripted structured responses: architect creates research, implementation, and test branches; scheduler runs admitted independent tasks in parallel; messages persist; integration intentionally fails; debugger proposes one valid repair mutation; verification passes; exact Git action pauses for approval; approval resumes it; artifacts verify; a UAMS candidate passes the promotion gate.
-- [ ] Assert the E2E traverses the real planner, PostgreSQL scheduler, PostgresSaver graph, outbox/Redis transport, tool gateway, constrained sandbox, Git worktrees, artifact store, and UAMS test contract. It must not monkeypatch core services or accept only a final status assertion.
-- [ ] Inject worker death during model, checkpoint, tool, outbox, integration, and UAMS promotion boundaries; Redis loss; UAMS unavailability; lease expiry; duplicate events; corrupted artifacts; cancellation of an active sandbox; and unknown side-effect outcomes. Assert the documented deterministic recovery and no duplicate external effects.
-- [ ] Populate a prior schema, upgrade, resume a checkpointed workflow, roll back where reversible, and exercise backup restoration where downgrade is unsafe. Start the prior pinned application fixture and prove it can read/resume the compatibility-window state.
-- [ ] Search with `rg -n 'sqlite3|MemorySaver|shell\s*=\s*True|```|hard.?coded|FixedPlanner|create_subprocess_shell' --glob '*.py' .`. Remove every production hit and update imports/tests so the new engine is the only authoritative runtime.
-- [ ] Write operator, recovery, security, external-UAMS, and adapter-extension runbooks with exact commands and failure states.
-- [ ] Run the complete verification gate:
+- [x] Write the deterministic E2E with scripted structured responses: architect creates research, implementation, and test branches; scheduler runs admitted independent tasks in parallel; messages persist; integration intentionally fails; debugger proposes one valid repair mutation; verification passes; exact Git action pauses for approval; approval resumes it; artifacts verify; a UAMS candidate passes the promotion gate.
+- [x] Assert the E2E traverses the real planner, PostgreSQL scheduler, PostgresSaver graph, outbox/Redis transport, tool gateway, constrained sandbox, Git worktrees, artifact store, and UAMS test contract. It must not monkeypatch core services or accept only a final status assertion.
+- [x] Inject worker death during model, checkpoint, tool, outbox, integration, and UAMS promotion boundaries; Redis loss; UAMS unavailability; lease expiry; duplicate events; corrupted artifacts; cancellation of an active sandbox; and unknown side-effect outcomes. Assert the documented deterministic recovery and no duplicate external effects.
+- [x] Populate a prior schema, upgrade, resume a checkpointed workflow, roll back where reversible, and exercise backup restoration where downgrade is unsafe. Start the prior pinned application fixture and prove it can read/resume the compatibility-window state.
+- [x] Search with `rg -n 'sqlite3|MemorySaver|shell\s*=\s*True|```|hard.?coded|FixedPlanner|create_subprocess_shell' --glob '*.py' .`. Remove every production hit and update imports/tests so the new engine is the only authoritative runtime.
+- [x] Write operator, recovery, security, external-UAMS, and adapter-extension runbooks with exact commands and failure states.
+- [x] Run the complete verification gate:
 
 ```bash
 ruff check .
@@ -400,19 +400,19 @@ docker compose config --quiet
 ./scripts/smoke.sh
 ```
 
-- [ ] Verify `git status --short` contains only intended changes, no credentials, no generated secrets, and no artifact/worktree contents.
-- [ ] Commit: `feat: cut over to production agentic engine`
+- [x] Verify `git status --short` contains only intended changes, no credentials, no generated secrets, and no artifact/worktree contents.
+- [x] Commit: `feat: cut over to production agentic engine`
 
 ---
 
 ## Plan Self-Review Gate
 
-- [ ] Every requirement in Sections 3–18 of the approved design maps to at least one task and an executable test above.
-- [ ] The domain/checkpoint two-authority risk has a complete reconciliation-matrix integration suite.
-- [ ] The deterministic E2E includes parallel branching, intentional failure, dynamic repair, verification, approval, artifact validation, and UAMS promotion.
-- [ ] Artifact metadata/object/hash matching and corruption exclusion are release-gating assertions.
-- [ ] PostgreSQL migration acceptance includes tested downgrade or verified backup restoration and prior-version resume.
-- [ ] UAMS is external and the sole durable shared memory; Google A2A is absent by explicit scope decision.
-- [ ] All model and agent boundaries are structured; all process execution uses argument arrays; all mutable repository work runs in isolated worktrees/containers.
-- [ ] No step contains deferred implementation, pseudocode omissions, or unspecified files and commands.
-- [ ] The final verification command proves Python and Node.js/TypeScript repository support on the single-machine Docker Compose target.
+- [x] Every requirement in Sections 3–18 of the approved design maps to at least one task and an executable test above.
+- [x] The domain/checkpoint two-authority risk has a complete reconciliation-matrix integration suite.
+- [x] The deterministic E2E includes parallel branching, intentional failure, dynamic repair, verification, approval, artifact validation, and UAMS promotion.
+- [x] Artifact metadata/object/hash matching and corruption exclusion are release-gating assertions.
+- [x] PostgreSQL migration acceptance includes tested downgrade or verified backup restoration and prior-version resume.
+- [x] UAMS is external and the sole durable shared memory; Google A2A is absent by explicit scope decision.
+- [x] All model and agent boundaries are structured; all process execution uses argument arrays; all mutable repository work runs in isolated worktrees/containers.
+- [x] No step contains deferred implementation, pseudocode omissions, or unspecified files and commands.
+- [x] The final verification command proves Python and Node.js/TypeScript repository support on the single-machine Docker Compose target.

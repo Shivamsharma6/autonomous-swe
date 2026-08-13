@@ -1,10 +1,10 @@
-from typing import Any, Dict
+from typing import Any
 
 
 class EvaluatorMetrics:
     """Evaluates resolution status, test pass rates, and patch quality."""
 
-    def evaluate_task(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate_task(self, test_results: dict[str, Any]) -> dict[str, Any]:
         exit_code = test_results.get("exit_code", -1)
         passed = exit_code == 0
         return {

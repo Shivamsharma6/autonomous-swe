@@ -9,13 +9,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.enums import RetryCategory, TaskStatus, TaskType
+from domain.enums import GraphExecutionState, RetryCategory, RiskLevel, TaskStatus, TaskType
+from observability.metrics import PlatformMetrics, platform_metrics
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import (
+    GraphExecutionRow,
     LeaseRow,
     ProjectTaskResourceEstimateRow,
+    RepositoryRow,
     ReservationRow,
+    RunRow,
+    TaskAttemptRow,
     TaskRow,
 )
 
@@ -79,6 +84,23 @@ class TaskClaim:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class TaskExecutionLease:
+    task_id: UUID
+    run_id: UUID
+    project_id: UUID
+    repository_id: UUID
+    attempt_id: UUID
+    baseline_commit: str
+    source_path: str
+    task_type: TaskType
+    goal: str
+    allowed_tools: tuple[str, ...]
+    risk_ceiling: RiskLevel
+    dependencies: tuple[UUID, ...]
+    already_terminal: bool = False
+
+
 def dependencies_satisfied(dependencies: Sequence[UUID], states: dict[UUID, TaskStatus]) -> bool:
     return all(states.get(dependency) is TaskStatus.COMPLETED for dependency in dependencies)
 
@@ -137,6 +159,7 @@ class SchedulerService:
         policy: ConcurrencyPolicy,
         lease_ttl: timedelta,
         repository: DomainRepository | None = None,
+        metrics: PlatformMetrics | None = None,
     ) -> None:
         if lease_ttl.total_seconds() <= 0:
             raise ValueError("lease_ttl must be positive")
@@ -144,6 +167,36 @@ class SchedulerService:
         self.policy = policy
         self.lease_ttl = lease_ttl
         self.repository = repository or DomainRepository()
+        self.metrics = metrics or platform_metrics
+
+    async def publish_metrics(self) -> None:
+        """Publish a low-cardinality scheduler snapshot from PostgreSQL authority."""
+        async with self.database.sessions() as session:
+            reservation_rows = (
+                await session.execute(
+                    select(ReservationRow.resource, func.sum(ReservationRow.units))
+                    .where(ReservationRow.released_at.is_(None))
+                    .group_by(ReservationRow.resource)
+                )
+            ).all()
+            reservation_counts = {
+                str(resource): int(units or 0) for resource, units in reservation_rows
+            }
+            state_rows = (
+                await session.execute(
+                    select(TaskRow.state, func.count()).group_by(TaskRow.state)
+                )
+            ).all()
+            state_counts = {TaskStatus(state): int(count) for state, count in state_rows}
+        for resource in ("task", "model", "sandbox"):
+            self.metrics.set_resource_reservations(
+                resource, reservation_counts.get(resource, 0)
+            )
+        self.metrics.set_resource_actual(
+            "task", state_counts.get(TaskStatus.RUNNING, 0)
+        )
+        for state in TaskStatus:
+            self.metrics.set_queue_depth(state.value, state_counts.get(state, 0))
 
     async def claim_ready(
         self,
@@ -227,6 +280,46 @@ class SchedulerService:
                 )
         return tuple(claims)
 
+    async def promote_dependency_ready(self, *, limit: int = 500) -> int:
+        """Promote PENDING tasks only after every durable dependency is COMPLETED."""
+        promoted = 0
+        async with self.database.transaction() as session:
+            candidates = tuple(
+                (
+                    await session.scalars(
+                        select(TaskRow)
+                        .where(TaskRow.state == TaskStatus.PENDING)
+                        .order_by(TaskRow.created_at, TaskRow.id)
+                        .limit(limit)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for task in candidates:
+                dependency_ids = tuple(UUID(value) for value in task.dependencies)
+                if not dependency_ids:
+                    ready = True
+                else:
+                    states = {
+                        row.id: row.state
+                        for row in (
+                            await session.scalars(
+                                select(TaskRow).where(TaskRow.id.in_(dependency_ids))
+                            )
+                        ).all()
+                    }
+                    ready = dependencies_satisfied(dependency_ids, states)
+                if ready:
+                    await self.repository.transition_task(
+                        session,
+                        project_id=task.project_id,
+                        task_id=task.id,
+                        expected_version=task.version,
+                        target=TaskStatus.READY,
+                    )
+                    promoted += 1
+        return promoted
+
     async def heartbeat(
         self,
         *,
@@ -250,6 +343,148 @@ class SchedulerService:
                 )
             )
             return bool(getattr(result, "rowcount", 0))
+
+    async def start_claim(
+        self,
+        *,
+        task_id: UUID,
+        project_id: UUID,
+        owner: str,
+        token: UUID,
+        attempt_id: UUID,
+        agent_spec_hash: str,
+        now: datetime | None = None,
+    ) -> TaskExecutionLease:
+        """Validate an exact dispatch lease and atomically enter RUNNING."""
+        current_time = now or datetime.now(UTC)
+        async with self.database.transaction() as session:
+            task = await session.scalar(
+                select(TaskRow)
+                .where(TaskRow.id == task_id, TaskRow.project_id == project_id)
+                .with_for_update()
+            )
+            if task is None:
+                raise LookupError(f"task {task_id} does not exist in project {project_id}")
+            run = await session.get(RunRow, task.run_id)
+            repository = await session.get(RepositoryRow, task.repository_id)
+            if run is None or repository is None:
+                raise RuntimeError("task run or repository is missing")
+            if task.state is TaskStatus.COMPLETED:
+                return self._execution_lease(
+                    task, run, repository, attempt_id, already_terminal=True
+                )
+            lease = await session.scalar(
+                select(LeaseRow).where(LeaseRow.task_id == task_id).with_for_update()
+            )
+            if (
+                lease is None
+                or lease.owner != owner
+                or lease.token != token
+                or lease.expires_at <= current_time
+            ):
+                raise PermissionError("worker dispatch lease is missing, expired, or mismatched")
+            if task.state is TaskStatus.LEASED:
+                await self.repository.transition_task(
+                    session,
+                    project_id=project_id,
+                    task_id=task_id,
+                    expected_version=task.version,
+                    target=TaskStatus.RUNNING,
+                )
+            elif task.state is not TaskStatus.RUNNING:
+                raise PermissionError(f"worker cannot start task in {task.state.value}")
+            attempt = await session.get(TaskAttemptRow, attempt_id)
+            if attempt is None:
+                await self.repository.create_attempt(
+                    session,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    agent_spec_hash=agent_spec_hash,
+                )
+            elif attempt.task_id != task_id or attempt.agent_spec_hash != agent_spec_hash:
+                raise PermissionError("worker attempt identity does not match dispatch")
+            return self._execution_lease(task, run, repository, attempt_id)
+
+    async def finish_claim(
+        self,
+        *,
+        task_id: UUID,
+        project_id: UUID,
+        owner: str,
+        token: UUID,
+        attempt_id: UUID,
+        target: TaskStatus,
+    ) -> None:
+        if target not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            raise ValueError("worker claim may finish only in a terminal state")
+        current_time = datetime.now(UTC)
+        async with self.database.transaction() as session:
+            task = await session.scalar(
+                select(TaskRow)
+                .where(TaskRow.id == task_id, TaskRow.project_id == project_id)
+                .with_for_update()
+            )
+            if task is None:
+                raise LookupError(f"task {task_id} does not exist in project {project_id}")
+            if task.state is target:
+                return
+            lease = await session.scalar(
+                select(LeaseRow).where(LeaseRow.task_id == task_id).with_for_update()
+            )
+            if lease is None or lease.owner != owner or lease.token != token:
+                raise PermissionError("worker cannot finish a claim owned by another dispatcher")
+            graph = await session.scalar(
+                select(GraphExecutionRow).where(GraphExecutionRow.task_id == task_id)
+            )
+            required_graph_state = {
+                TaskStatus.COMPLETED: GraphExecutionState.COMPLETED,
+                TaskStatus.FAILED: GraphExecutionState.FAILED,
+                TaskStatus.CANCELLED: GraphExecutionState.CANCELLED,
+            }[target]
+            if graph is None or graph.state is not required_graph_state:
+                raise RuntimeError(
+                    f"cannot finish task {target.value} before graph is "
+                    f"{required_graph_state.value}"
+                )
+            await self.repository.transition_task(
+                session,
+                project_id=project_id,
+                task_id=task_id,
+                expected_version=task.version,
+                target=target,
+            )
+            attempt = await session.get(TaskAttemptRow, attempt_id)
+            if attempt is None or attempt.task_id != task_id:
+                raise PermissionError("worker attempt does not belong to task")
+            attempt.status = target.value
+            attempt.ended_at = current_time
+            await self._release_reservations(session, task_id, current_time)
+            await session.delete(lease)
+
+    @staticmethod
+    def _execution_lease(
+        task: TaskRow,
+        run: RunRow,
+        repository: RepositoryRow,
+        attempt_id: UUID,
+        *,
+        already_terminal: bool = False,
+    ) -> TaskExecutionLease:
+        return TaskExecutionLease(
+            task_id=task.id,
+            run_id=task.run_id,
+            project_id=task.project_id,
+            repository_id=task.repository_id,
+            attempt_id=attempt_id,
+            baseline_commit=run.baseline_commit,
+            source_path=repository.source_path,
+            task_type=task.task_type,
+            goal=task.description,
+            allowed_tools=tuple(str(value) for value in task.allowed_tools),
+            risk_ceiling=RiskLevel(task.risk_ceiling),
+            dependencies=tuple(UUID(value) for value in task.dependencies),
+            already_terminal=already_terminal,
+        )
 
     async def reclaim_expired(self, *, now: datetime | None = None) -> int:
         current_time = now or datetime.now(UTC)

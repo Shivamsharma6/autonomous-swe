@@ -21,6 +21,10 @@ class GitWorktreeManager:
             raise WorktreePolicyError("managed worktree root cannot be a symlink")
         self._managed_root = managed_root.resolve(strict=True)
 
+    @property
+    def managed_root(self) -> Path:
+        return self._managed_root
+
     def create_task_worktree(
         self,
         source_repository: Path,
@@ -47,6 +51,40 @@ class GitWorktreeManager:
             baseline_commit,
         )
 
+    def integrate_task_dependencies(
+        self,
+        source_repository: Path,
+        target_worktree: Path,
+        dependency_ids: tuple[UUID, ...],
+    ) -> None:
+        """Replay dependency worktree changes into a dependent task exactly once."""
+        source = self._source(source_repository)
+        target = self._managed_child(target_worktree)
+        if not target.is_dir() or target.is_symlink():
+            raise WorktreePolicyError("target task worktree is unavailable")
+        for dependency_id in sorted(dependency_ids, key=lambda value: value.int):
+            dependency = self._managed_child(
+                self._managed_root / f"task-{dependency_id}"
+            )
+            if not dependency.is_dir() or dependency.is_symlink():
+                raise WorktreePolicyError(
+                    f"completed dependency worktree is unavailable: {dependency_id}"
+                )
+            patch = self._git(dependency, "diff", "--binary", "--no-ext-diff", "HEAD")
+            if patch:
+                patch += "\n"
+                already_applied = self._git_with_input_optional(
+                    target,
+                    patch,
+                    "apply",
+                    "--reverse",
+                    "--check",
+                )
+                if not already_applied:
+                    self._git_with_input(target, patch, "apply", "--3way")
+            self._copy_untracked(dependency, target)
+        self._git(source, "worktree", "list", "--porcelain")
+
     def cleanup(
         self,
         source_repository: Path,
@@ -66,6 +104,30 @@ class GitWorktreeManager:
         self._git(source, "worktree", "remove", "--force", str(candidate))
         self._git(source, "worktree", "prune")
         return True
+
+    def commit_task_worktree(self, worktree: Path, *, message: str) -> str:
+        """Perform the exact local commit only after the caller proves approval."""
+        candidate = self._managed_child(worktree)
+        if not candidate.is_dir() or candidate.is_symlink():
+            raise WorktreePolicyError("approved task worktree is unavailable")
+        normalized = " ".join(message.split())
+        if not normalized or len(normalized) > 300:
+            raise WorktreePolicyError("commit message must be a bounded single line")
+        self._git(candidate, "add", "--all")
+        staged = self._git_optional(candidate, "diff", "--cached", "--quiet")
+        if not staged:
+            self._git(
+                candidate,
+                "-c",
+                "user.name=AutoSWE",
+                "-c",
+                "user.email=autoswe@localhost.invalid",
+                "commit",
+                "--no-gpg-sign",
+                "-m",
+                normalized,
+            )
+        return self._git(candidate, "rev-parse", "HEAD")
 
     def _create(
         self,
@@ -163,3 +225,63 @@ class GitWorktreeManager:
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorktreePolicyError("cannot inspect governed Git branch") from exc
         return completed.returncode == 0
+
+    @staticmethod
+    def _git_with_input(repository: Path, value: str, *arguments: str) -> str:
+        if _GIT_EXECUTABLE is None:
+            raise WorktreePolicyError("Git executable is unavailable")
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed Git and policy arguments
+                (_GIT_EXECUTABLE, "-C", str(repository), *arguments),
+                input=value,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                shell=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = getattr(exc, "stderr", None) or str(exc)
+            raise WorktreePolicyError(f"dependency integration failed: {detail}") from exc
+        return completed.stdout.strip()
+
+    @staticmethod
+    def _git_with_input_optional(repository: Path, value: str, *arguments: str) -> bool:
+        if _GIT_EXECUTABLE is None:
+            raise WorktreePolicyError("Git executable is unavailable")
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed Git and policy arguments
+                (_GIT_EXECUTABLE, "-C", str(repository), *arguments),
+                input=value,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorktreePolicyError("cannot inspect dependency integration") from exc
+        return completed.returncode == 0
+
+    def _copy_untracked(self, dependency: Path, target: Path) -> None:
+        output = self._git(dependency, "ls-files", "--others", "--exclude-standard", "-z")
+        for raw in output.split("\x00"):
+            if not raw:
+                continue
+            relative = Path(raw)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise WorktreePolicyError("untracked dependency path escapes worktree")
+            source = (dependency / relative).resolve(strict=True)
+            destination = (target / relative).resolve(strict=False)
+            source.relative_to(dependency)
+            destination.relative_to(target)
+            if source.is_symlink() or not source.is_file():
+                raise WorktreePolicyError("untracked dependency content must be a regular file")
+            if destination.exists():
+                if destination.is_symlink() or destination.read_bytes() != source.read_bytes():
+                    raise WorktreePolicyError(
+                        f"dependency integration conflict at {relative.as_posix()}"
+                    )
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())

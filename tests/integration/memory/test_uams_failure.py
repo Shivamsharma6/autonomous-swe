@@ -18,7 +18,7 @@ from knowledge.memory.promotion import (
     PromotionService,
 )
 from persistence.repositories import DomainRepository
-from persistence.tables import GraphExecutionRow, MemoryCandidateRow, OutboxRow
+from persistence.tables import GraphExecutionRow, MemoryCandidateRow, OutboxRow, StateDurationRow
 from tests.integration.messaging.helpers import seed_task
 
 
@@ -141,6 +141,12 @@ async def test_retry_uses_same_memory_id_and_completes_only_when_revision_is_sea
         promoted_event = await session.scalar(
             select(OutboxRow).where(OutboxRow.topic == "memory-promoted")
         )
+        uams_duration = await session.scalar(
+            select(StateDurationRow).where(
+                StateDurationRow.aggregate_type == "uams",
+                StateDurationRow.aggregate_id == item.candidate_id,
+            )
+        )
     assert row is not None
     assert row.status == "PROMOTED"
     assert row.promoted_at is not None
@@ -148,6 +154,9 @@ async def test_retry_uses_same_memory_id_and_completes_only_when_revision_is_sea
     assert graph is not None
     assert graph.state is GraphExecutionState.RUNNING
     assert promoted_event is not None
+    assert uams_duration is not None
+    assert uams_duration.state == GraphExecutionState.WAITING_FOR_MEMORY.value
+    assert uams_duration.duration_seconds >= 0
 
 
 class WriteThenCrashPort(FakeMemoryPort):

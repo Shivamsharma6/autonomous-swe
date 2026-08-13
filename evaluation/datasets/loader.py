@@ -1,10 +1,10 @@
-from typing import Any, Dict, List
+from typing import Any
 
 
 class DatasetLoader:
     """Loader for software engineering evaluation datasets and benchmark problems."""
 
-    def load_swe_bench_dataset(self) -> List[Dict[str, Any]]:
+    def load_swe_bench_dataset(self) -> list[dict[str, Any]]:
         """Return sample SWE benchmark tasks."""
         return [
             {

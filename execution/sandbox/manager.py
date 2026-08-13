@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.models import ContractModel
 from execution.sandbox.runner import SandboxRequest, SandboxResult
+from observability.metrics import track_actual_resource
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import SandboxContainerRow, SandboxExecutionRow, utc_now
@@ -252,11 +253,12 @@ class SandboxManager:
             await self._store.register(request, container_id)
             registered = True
             await self._store.mark_running(request.execution_id)
-            result = await asyncio.to_thread(
-                self._runner.run_created,
-                request,
-                container_id,
-            )
+            with track_actual_resource("sandbox"):
+                result = await asyncio.to_thread(
+                    self._runner.run_created,
+                    request,
+                    container_id,
+                )
             if await self._store.cancellation_requested(request.execution_id):
                 execution = result.execution.model_copy(
                     update={

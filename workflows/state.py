@@ -101,6 +101,9 @@ class NodeExecutionRequest(ContractModel):
     node_name: str = Field(min_length=1, max_length=100)
     goal: NonEmptyText
     input_refs: dict[str, str] = Field(default_factory=dict, max_length=1_000)
+    prior_summaries: dict[str, str] = Field(default_factory=dict, max_length=100)
+    prior_message_ids: tuple[UUID, ...] = Field(default_factory=tuple, max_length=1_000)
+    prior_artifact_ids: tuple[UUID, ...] = Field(default_factory=tuple, max_length=1_000)
     idempotency_key: str = Field(min_length=1, max_length=500)
 
     @classmethod
@@ -120,6 +123,9 @@ class NodeExecutionRequest(ContractModel):
             node_name=node_name,
             goal=state["goal"],
             input_refs=state.get("input_refs", {}),
+            prior_summaries=state.get("summaries", {}),
+            prior_message_ids=tuple(UUID(value) for value in state.get("message_ids", ())),
+            prior_artifact_ids=tuple(UUID(value) for value in state.get("artifact_ids", ())),
             idempotency_key=identity,
         )
 
@@ -230,6 +236,15 @@ class DispatchWorkflowState(TypedDict, total=False):
     task: dict[str, Any]
     results: Annotated[list[dict[str, Any]], merge_dispatch_results]
     ordered_task_ids: list[str]
+
+
+class SchedulerPublishState(TypedDict, total=False):
+    """Compact LangGraph state for scheduler-admitted transport fan-out."""
+
+    dispatch_messages: list[dict[str, Any]]
+    dispatch_message: dict[str, Any]
+    published_lease_tokens: Annotated[list[str], merge_unique]
+    ordered_lease_tokens: list[str]
 
 
 class SchedulerDispatchBatch(ContractModel):

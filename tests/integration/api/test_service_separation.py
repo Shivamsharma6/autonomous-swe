@@ -41,6 +41,27 @@ class FakePublisher:
         self.messages.append(message)
 
 
+class ConcurrentPublisher(FakePublisher):
+    def __init__(self, expected: int) -> None:
+        super().__init__()
+        self.expected = expected
+        self.running = 0
+        self.max_running = 0
+        self._all_started = asyncio.Event()
+        self._lock = asyncio.Lock()
+
+    async def publish(self, message: DispatchMessage) -> None:
+        async with self._lock:
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            if self.running == self.expected:
+                self._all_started.set()
+        await asyncio.wait_for(self._all_started.wait(), timeout=2)
+        self.messages.append(message)
+        async with self._lock:
+            self.running -= 1
+
+
 class FakeInbox:
     def __init__(self, records: tuple[RedisStreamRecord, ...]) -> None:
         self.records = records
@@ -99,6 +120,33 @@ async def test_dispatcher_claims_leases_and_worker_executes_only_dispatch_record
     assert await WorkerService(inbox=inbox, executor=executor).process_once() == 1
     assert executor.messages == publisher.messages
     assert inbox.acknowledged == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_uses_langgraph_send_for_scheduler_admitted_fanout() -> None:
+    claims = tuple(
+        TaskClaim(
+            task_id=uuid4(),
+            project_id=uuid4(),
+            owner="dispatcher-test",
+            token=uuid4(),
+            expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        )
+        for _ in range(3)
+    )
+    publisher = ConcurrentPublisher(expected=3)
+
+    dispatched = await DispatcherService(
+        scheduler=FakeScheduler(claims),
+        publisher=publisher,
+        owner="dispatcher-test",
+    ).dispatch_once()
+
+    assert dispatched == 3
+    assert publisher.max_running == 3
+    assert {message.lease_token for message in publisher.messages} == {
+        claim.token for claim in claims
+    }
 
 
 @pytest.mark.asyncio

@@ -70,16 +70,26 @@ class PythonRepositoryAdapter(RepositoryAdapter):
             )
             return CommandSpec(argv=(*prefix, "mypy", *targets), timeout_seconds=900)
         if request.kind is CommandKind.TARGETED_TEST:
-            _require_dependency(manifest, "pytest")
             assert request.target is not None
             target = validate_target(
                 manifest.root,
                 request.target,
                 allowed_files=manifest.test_files,
             )
+            if "pytest" not in manifest.dependencies:
+                module = target.removesuffix(".py").replace("/", ".")
+                return CommandSpec(
+                    argv=("python", "-m", "unittest", module),
+                    timeout_seconds=900,
+                )
             return CommandSpec(argv=(*prefix, "pytest", target), timeout_seconds=900)
         if request.kind is CommandKind.FULL_TEST:
-            _require_dependency(manifest, "pytest")
+            if "pytest" not in manifest.dependencies:
+                test_root = "tests" if (manifest.root / "tests").is_dir() else "test"
+                return CommandSpec(
+                    argv=("python", "-m", "unittest", "discover", "-s", test_root),
+                    timeout_seconds=1_800,
+                )
             return CommandSpec(argv=(*prefix, "pytest"), timeout_seconds=1_800)
         if request.kind is CommandKind.BUILD:
             if manifest.lockfile == "uv.lock":

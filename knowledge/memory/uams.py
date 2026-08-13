@@ -21,6 +21,7 @@ from knowledge.memory.port import (
     is_fresh,
     render_context,
 )
+from observability.tracing import current_correlation
 
 _PROVENANCE = re.compile(r"<!--\s*autoswe-provenance:(\{.*?\})\s*-->")
 
@@ -194,7 +195,7 @@ class UAMSMemoryAdapter:
             response = await self._client.request(
                 method,
                 f"{self._base_url}{path}",
-                headers=self._headers,
+                headers=self._headers | current_correlation().to_headers(),
                 json=json_body,
             )
         except httpx.RequestError as error:
@@ -252,7 +253,7 @@ def memory_document(write: MemoryWrite) -> str:
         f"<!-- autoswe-provenance:{compact_metadata} -->\n\n"
         f"## Summary\n{candidate.content}\n\n"
         "## Provenance\n"
-        f"```json\n{json.dumps(metadata, sort_keys=True, indent=2)}\n```\n"
+        f"{json.dumps(metadata, sort_keys=True, indent=2)}\n"
     )
 
 

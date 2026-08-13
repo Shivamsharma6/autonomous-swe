@@ -70,6 +70,7 @@ include = [
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = ["--import-mode=importlib", "--ignore=tests/fixtures"]
 
 [tool.ruff]
 target-version = "py312"

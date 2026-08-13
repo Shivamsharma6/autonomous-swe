@@ -208,9 +208,21 @@ class PromotionService:
                     .where(GraphExecutionRow.task_id == candidate.source_task_id)
                     .with_for_update()
                 )
-                if graph is not None:
-                    graph.state = graph_state
-                    graph.state_entered_at = datetime.now(UTC)
+                if graph is not None and graph.state in {
+                    GraphExecutionState.RUNNING,
+                    GraphExecutionState.PAUSED,
+                    GraphExecutionState.WAITING_FOR_MEMORY,
+                } and graph.state is not graph_state:
+                    await self._repository.transition_graph_execution(
+                        session,
+                        task_id=graph.task_id,
+                        run_id=graph.run_id,
+                        repository_id=graph.repository_id,
+                        baseline_commit=graph.baseline_commit,
+                        thread_id=graph.thread_id,
+                        target=graph_state,
+                        checkpoint_id=graph.checkpoint_id,
+                    )
             await session.flush()
 
     async def _complete(
@@ -236,8 +248,24 @@ class PromotionService:
                 .with_for_update()
             )
             if graph is not None and graph.state is GraphExecutionState.WAITING_FOR_MEMORY:
-                graph.state = GraphExecutionState.RUNNING
-                graph.state_entered_at = now
+                await self._repository.record_state_duration(
+                    session,
+                    aggregate_type="uams",
+                    aggregate_id=row.id,
+                    state=GraphExecutionState.WAITING_FOR_MEMORY.value,
+                    entered_at=graph.state_entered_at,
+                    exited_at=now,
+                )
+                await self._repository.transition_graph_execution(
+                    session,
+                    task_id=graph.task_id,
+                    run_id=graph.run_id,
+                    repository_id=graph.repository_id,
+                    baseline_commit=graph.baseline_commit,
+                    thread_id=graph.thread_id,
+                    target=GraphExecutionState.RUNNING,
+                    checkpoint_id=graph.checkpoint_id,
+                )
             event_id = uuid5(NAMESPACE_URL, f"autoswe:memory-promoted:{memory_id}:{revision_id}")
             payload = {
                 "candidate_id": str(candidate.candidate_id),

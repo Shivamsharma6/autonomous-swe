@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.dependencies import (
     ControlPlaneServices,
@@ -16,16 +18,31 @@ from apps.api.dependencies import (
 )
 from apps.api.schemas import (
     ApprovalDecisionRequest,
+    ApprovalResponse,
+    ArtifactMetadataResponse,
+    AuditEventResponse,
     DeadLetterResponse,
     ProjectCreated,
     ProjectCreateRequest,
     RunCreated,
     RunCreateRequest,
+    RunResponse,
     TaskResponse,
 )
 from apps.api.websocket import EventCursor, PostgresTaskEventSource
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
-from persistence.tables import DeadLetterRow, TaskRow, utc_now
+from persistence.tables import (
+    ApprovalRow,
+    ArtifactRow,
+    AuditEventRow,
+    DeadLetterRow,
+    ModelCallRow,
+    PlanRevisionRow,
+    RunRow,
+    TaskRow,
+    ToolExecutionRow,
+    utc_now,
+)
 from tools.approval import ApprovalBindingError, ApprovalExpired
 
 router = APIRouter(
@@ -34,6 +51,7 @@ router = APIRouter(
 )
 Services = Annotated[ControlPlaneServices, Depends(get_services)]
 DeadLetterLimit = Annotated[int, Query(ge=1, le=500)]
+RunEventLimit = Annotated[int, Query(ge=1, le=1_000)]
 
 
 @router.get("/status")
@@ -46,6 +64,10 @@ async def create_project(
     request: ProjectCreateRequest,
     services: Services,
 ) -> ProjectCreated:
+    source_path = _validated_repository_source(
+        services.settings.repository_import_root,
+        request.source_path,
+    )
     async with services.database.transaction() as session:
         await services.database_repository.create_project(
             session,
@@ -56,7 +78,7 @@ async def create_project(
             session,
             repository_id=request.repository_id,
             project_id=request.project_id,
-            source_path=request.source_path,
+            source_path=str(source_path),
             default_branch=request.default_branch,
         )
     return ProjectCreated(
@@ -105,6 +127,165 @@ async def create_run(
             payload=payload,
         )
     return RunCreated(run_id=request.run_id, state="PENDING")
+
+
+@router.get("/runs/{run_id}", response_model=RunResponse)
+async def get_run(run_id: UUID, services: Services) -> RunResponse:
+    async with services.database.sessions() as session:
+        run = await session.get(RunRow, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        active_revision = await session.scalar(
+            select(func.max(PlanRevisionRow.revision)).where(PlanRevisionRow.run_id == run_id)
+        )
+        counts = tuple(
+            (
+                await session.execute(
+                    select(TaskRow.state, func.count())
+                    .where(TaskRow.run_id == run_id)
+                    .group_by(TaskRow.state)
+                )
+            ).all()
+        )
+        usage = (
+            await session.execute(
+                select(
+                    func.coalesce(func.sum(ModelCallRow.input_tokens), 0),
+                    func.coalesce(func.sum(ModelCallRow.output_tokens), 0),
+                    func.coalesce(func.sum(ModelCallRow.cost_usd), 0.0),
+                ).where(ModelCallRow.run_id == run_id)
+            )
+        ).one()
+    now = utc_now()
+    return RunResponse(
+        run_id=run.id,
+        project_id=run.project_id,
+        repository_id=run.repository_id,
+        goal=run.goal,
+        baseline_commit=run.baseline_commit,
+        state=run.state,
+        state_entered_at=run.state_entered_at.isoformat(),
+        state_duration_seconds=max(0.0, (now - run.state_entered_at).total_seconds()),
+        active_plan_revision=active_revision,
+        task_counts={state.value: int(count) for state, count in counts},
+        model_input_tokens=int(usage[0]),
+        model_output_tokens=int(usage[1]),
+        model_cost_usd=float(usage[2]),
+        created_at=run.created_at.isoformat(),
+        updated_at=run.updated_at.isoformat(),
+    )
+
+
+@router.get("/runs/{run_id}/tasks", response_model=tuple[TaskResponse, ...])
+async def list_run_tasks(run_id: UUID, services: Services) -> tuple[TaskResponse, ...]:
+    async with services.database.sessions() as session:
+        await _require_run(session, run_id)
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.run_id == run_id)
+                    .order_by(TaskRow.plan_revision, TaskRow.created_at, TaskRow.id)
+                )
+            ).all()
+        )
+    return tuple(_task_response(row) for row in rows)
+
+
+@router.get("/runs/{run_id}/approvals", response_model=tuple[ApprovalResponse, ...])
+async def list_run_approvals(
+    run_id: UUID, services: Services
+) -> tuple[ApprovalResponse, ...]:
+    async with services.database.sessions() as session:
+        await _require_run(session, run_id)
+        rows = tuple(
+            (
+                await session.execute(
+                    select(ApprovalRow, ToolExecutionRow)
+                    .join(ToolExecutionRow, ToolExecutionRow.id == ApprovalRow.call_id)
+                    .where(ToolExecutionRow.run_id == run_id)
+                    .order_by(ApprovalRow.created_at, ApprovalRow.id)
+                )
+            ).all()
+        )
+    return tuple(
+        ApprovalResponse(
+            approval_id=approval.id,
+            call_id=approval.call_id,
+            status=approval.status.value,
+            call_hash=approval.call_hash,
+            tool_name=execution.tool_name,
+            requested_by=execution.requested_by,
+            arguments=execution.arguments,
+            expires_at=approval.expires_at.isoformat(),
+            created_at=approval.created_at.isoformat(),
+            decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
+            approver=approval.approver,
+        )
+        for approval, execution in rows
+    )
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=tuple[ArtifactMetadataResponse, ...])
+async def list_run_artifacts(
+    run_id: UUID, services: Services
+) -> tuple[ArtifactMetadataResponse, ...]:
+    async with services.database.sessions() as session:
+        await _require_run(session, run_id)
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(ArtifactRow)
+                    .where(ArtifactRow.run_id == run_id)
+                    .order_by(ArtifactRow.created_at, ArtifactRow.id)
+                )
+            ).all()
+        )
+    return tuple(
+        ArtifactMetadataResponse(
+            artifact_id=row.id,
+            task_id=row.task_id,
+            sha256=row.sha256,
+            media_type=row.media_type,
+            state=row.state.value,
+            size_bytes=row.size_bytes,
+            verified_at=row.verified_at.isoformat() if row.verified_at else None,
+            created_at=row.created_at.isoformat(),
+        )
+        for row in rows
+    )
+
+
+@router.get("/runs/{run_id}/events", response_model=tuple[AuditEventResponse, ...])
+async def list_run_events(
+    run_id: UUID,
+    services: Services,
+    limit: RunEventLimit = 500,
+) -> tuple[AuditEventResponse, ...]:
+    async with services.database.sessions() as session:
+        await _require_run(session, run_id)
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(AuditEventRow)
+                    .where(AuditEventRow.correlation_id == run_id)
+                    .order_by(AuditEventRow.created_at, AuditEventRow.id)
+                    .limit(limit)
+                )
+            ).all()
+        )
+    return tuple(
+        AuditEventResponse(
+            event_id=row.id,
+            event_type=row.event_type,
+            aggregate_type=row.aggregate_type,
+            aggregate_id=row.aggregate_id,
+            payload=row.payload,
+            content_hash=row.content_hash,
+            created_at=row.created_at.isoformat(),
+        )
+        for row in rows
+    )
 
 
 @router.get("/projects/{project_id}/tasks/{task_id}", response_model=TaskResponse)
@@ -296,7 +477,35 @@ def _task_response(row: TaskRow) -> TaskResponse:
         task_type=row.task_type.value,
         title=row.title,
         state_entered_at=row.state_entered_at.isoformat(),
+        plan_revision=row.plan_revision,
+        dependencies=tuple(UUID(value) for value in row.dependencies),
+        assigned_capability=row.assigned_capability,
+        acceptance_criteria=tuple(row.acceptance_criteria),
+        allowed_tools=tuple(row.allowed_tools),
+        risk_ceiling=row.risk_ceiling,
     )
+
+
+async def _require_run(session: AsyncSession, run_id: UUID) -> RunRow:
+    row = await session.get(RunRow, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return row
+
+
+def _validated_repository_source(import_root: Path, requested: str) -> Path:
+    try:
+        root = import_root.resolve(strict=True)
+        candidate = Path(requested).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="repository source must be an existing path inside the import root",
+        ) from exc
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise HTTPException(status_code=422, detail="repository source must be a directory")
+    return candidate
 
 
 def _safe_delivery_error(value: str) -> str:

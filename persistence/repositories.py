@@ -21,6 +21,7 @@ from domain.models import (
     ToolCallRequest,
     canonical_sha256,
 )
+from observability.metrics import platform_metrics
 from persistence.tables import (
     AgentMessageRow,
     ApprovalRow,
@@ -175,9 +176,19 @@ class DomainRepository:
             )
         require_task_transition(row.state, target)
         previous = row.state
+        previous_entered_at = row.state_entered_at
+        now = utc_now()
+        await self.record_state_duration(
+            session,
+            aggregate_type="task",
+            aggregate_id=row.id,
+            state=previous.value,
+            entered_at=previous_entered_at,
+            exited_at=now,
+        )
         row.state = target
         row.version += 1
-        row.state_entered_at = utc_now()
+        row.state_entered_at = now
         event_id = uuid4()
         payload = {
             "task_id": str(task_id),
@@ -645,6 +656,7 @@ class DomainRepository:
         )
         session.add(row)
         await session.flush()
+        platform_metrics.observe_state_duration(aggregate_type, state, row.duration_seconds)
         return row
 
     async def append_audit(

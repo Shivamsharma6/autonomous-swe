@@ -1,39 +1,299 @@
+x-platform-environment: &platform-environment
+  AUTOSWE_ENV: production
+  AUTOSWE_ADMIN_TOKEN: ${AUTOSWE_ADMIN_TOKEN:-}
+  AUTOSWE_DATABASE_URL: postgresql+asyncpg://autoswe:${AUTOSWE_POSTGRES_PASSWORD:-}@postgres:5432/autoswe
+  AUTOSWE_REDIS_URL: redis://redis:6379/0
+  AUTOSWE_UAMS_URL: ${AUTOSWE_UAMS_URL:-http://host.docker.internal:8000}
+  AUTOSWE_UAMS_TOKEN: ${AUTOSWE_UAMS_TOKEN:-}
+  AUTOSWE_UAMS_TIMEOUT_SECONDS: ${AUTOSWE_UAMS_TIMEOUT_SECONDS:-15}
+  AUTOSWE_MODEL_BASE_URL: ${AUTOSWE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
+  AUTOSWE_MODEL_API_KEY: ${AUTOSWE_MODEL_API_KEY:-}
+  AUTOSWE_MODEL_PRIMARY: ${AUTOSWE_MODEL_PRIMARY:-qwen3-coder}
+  AUTOSWE_MODEL_FALLBACKS: ${AUTOSWE_MODEL_FALLBACKS:-[]}
+  AUTOSWE_MODEL_TIMEOUT_SECONDS: ${AUTOSWE_MODEL_TIMEOUT_SECONDS:-120}
+  AUTOSWE_MODEL_INPUT_COST_PER_MILLION: ${AUTOSWE_MODEL_INPUT_COST_PER_MILLION:-0}
+  AUTOSWE_MODEL_CACHED_INPUT_COST_PER_MILLION: ${AUTOSWE_MODEL_CACHED_INPUT_COST_PER_MILLION:-0}
+  AUTOSWE_MODEL_OUTPUT_COST_PER_MILLION: ${AUTOSWE_MODEL_OUTPUT_COST_PER_MILLION:-0}
+  AUTOSWE_MODEL_CAPABILITY_MODE: ${AUTOSWE_MODEL_CAPABILITY_MODE:-declared}
+  AUTOSWE_MODEL_DECLARED_CAPABILITIES: ${AUTOSWE_MODEL_DECLARED_CAPABILITIES:-["structured_outputs","native_tool_calls","streaming","usage_accounting"]}
+  AUTOSWE_CORS_ORIGINS: ${AUTOSWE_CORS_ORIGINS:-["http://localhost:3000"]}
+  AUTOSWE_ARTIFACT_ROOT: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}/artifacts
+  AUTOSWE_REPOSITORY_IMPORT_ROOT: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}/imports
+  AUTOSWE_MANAGED_WORKTREE_ROOT: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}/worktrees
+  AUTOSWE_UID: ${AUTOSWE_UID:-65532}
+  AUTOSWE_GID: ${AUTOSWE_GID:-65532}
+  AUTOSWE_SANDBOX_MANAGER_URL: http://sandbox-manager:8090
+  AUTOSWE_PYTHON_RUNNER_IMAGE: ${AUTOSWE_PYTHON_RUNNER_IMAGE:-ghcr.io/astral-sh/uv@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca}
+  AUTOSWE_NODE_RUNNER_IMAGE: ${AUTOSWE_NODE_RUNNER_IMAGE:-node@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436}
+  AUTOSWE_MAX_PARALLEL_TASKS: ${AUTOSWE_MAX_PARALLEL_TASKS:-8}
+  AUTOSWE_MAX_PARALLEL_TASKS_PER_PROJECT: ${AUTOSWE_MAX_PARALLEL_TASKS_PER_PROJECT:-4}
+  AUTOSWE_MAX_MODEL_CONCURRENCY: ${AUTOSWE_MAX_MODEL_CONCURRENCY:-4}
+  AUTOSWE_MAX_SANDBOX_CONCURRENCY: ${AUTOSWE_MAX_SANDBOX_CONCURRENCY:-4}
+  AUTOSWE_MAX_DYNAMIC_TASKS: ${AUTOSWE_MAX_DYNAMIC_TASKS:-24}
+  AUTOSWE_MAX_PLAN_DEPTH: ${AUTOSWE_MAX_PLAN_DEPTH:-12}
+  AUTOSWE_MAX_TOTAL_BUDGET_USD: ${AUTOSWE_MAX_TOTAL_BUDGET_USD:-25}
+  AUTOSWE_MAX_TOTAL_EXECUTION_SECONDS: ${AUTOSWE_MAX_TOTAL_EXECUTION_SECONDS:-7200}
+  AUTOSWE_REQUEST_MAX_BYTES: ${AUTOSWE_REQUEST_MAX_BYTES:-1048576}
+  AUTOSWE_API_RATE_LIMIT_PER_MINUTE: ${AUTOSWE_API_RATE_LIMIT_PER_MINUTE:-120}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+  LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+  LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-autoswe-production}
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+x-app-security: &app-security
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  user: "${AUTOSWE_UID:-65532}:${AUTOSWE_GID:-65532}"
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+    - /run:rw,noexec,nosuid,nodev,size=16m
+
+x-app-deploy: &app-deploy
+  resources:
+    limits:
+      cpus: "2.0"
+      memory: 2G
+    reservations:
+      cpus: "0.10"
+      memory: 128M
+
 services:
-  backend:
+  postgres:
+    image: postgres:16-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+    environment:
+      POSTGRES_DB: autoswe
+      POSTGRES_USER: autoswe
+      POSTGRES_PASSWORD: ${AUTOSWE_POSTGRES_PASSWORD:-}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [control]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 2G}
+
+  redis:
+    image: redis:7.4-bookworm@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73
+    command: [redis-server, --appendonly, "yes", --save, "60", "1"]
+    volumes:
+      - redis-data:/data
+    networks: [control]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M}
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
+    env_file: [infrastructure/docker-socket-proxy.env]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+    networks: [docker-api]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O - http://127.0.0.1:2375/_ping | grep -q OK"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 128M}
+
+  sandbox-manager:
+    <<: *app-security
+    image: autoswe-platform:local
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: autoswe_backend
-    ports:
-      - "8000:8000"
+      target: platform
+    command: [uvicorn, "apps.sandbox_manager.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8090", --no-access-log]
     environment:
-      - LANGCHAIN_TRACING_V2=true
-      - LANGCHAIN_API_KEY=
-      - LANGCHAIN_PROJECT=autonomous-swe-platform
-      - LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+      <<: *platform-environment
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     volumes:
-      - ./data:/app/data
-      - ./artifacts:/app/artifacts
-      - ./logs:/app/logs
-      - ./autonomous_agent_directory:/app/autonomous_agent_directory
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: autoswe_frontend
-    ports:
-      - "3000:80"
+      - type: bind
+        source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+        target: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+    networks: [control, docker-api]
     depends_on:
-      - backend
+      postgres: {condition: service_healthy}
+      docker-socket-proxy: {condition: service_healthy}
     restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy: *app-deploy
 
-  games_demo:
+  migrations:
+    <<: *app-security
+    image: autoswe-platform:local
+    pull_policy: never
     build:
       context: .
-      dockerfile: Dockerfile.games_demo
-    container_name: autoswe_games_demo
+      dockerfile: Dockerfile
+      target: platform
+    command: [python, -m, infrastructure.migrate]
+    environment: *platform-environment
+    networks: [control]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+    deploy: *app-deploy
+
+  api:
+    <<: *app-security
+    image: autoswe-platform:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: platform
+    command: [uvicorn, "apps.api.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8000", --no-access-log]
+    environment: *platform-environment
+    volumes:
+      - type: bind
+        source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+        target: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+    networks: [edge, control, external-services]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      sandbox-manager: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
     ports:
-      - "5001:5000"
+      - "127.0.0.1:${AUTOSWE_API_PORT:-8080}:8000"
     restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    deploy: *app-deploy
+
+  dispatcher:
+    <<: *app-security
+    image: autoswe-platform:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: platform
+    command: [python, -m, apps.dispatcher.main]
+    environment: *platform-environment
+    volumes:
+      - type: bind
+        source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+        target: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+    networks: [control, external-services]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy: *app-deploy
+
+  workers:
+    <<: *app-security
+    image: autoswe-platform:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: platform
+    command: [python, -m, apps.worker.main]
+    environment: *platform-environment
+    volumes:
+      - type: bind
+        source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+        target: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}
+    networks: [control, external-services]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      sandbox-manager: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test: [CMD, python, -c, "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy: *app-deploy
+
+  web:
+    image: autoswe-web:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${AUTOSWE_WEB_PORT:-3000}:8080"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m,uid=101,gid=101,mode=0750
+      - /var/run:rw,noexec,nosuid,nodev,size=1m,uid=101,gid=101,mode=0750
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 128M}
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  edge:
+  control:
+    internal: true
+  docker-api:
+    internal: true
+  external-services:

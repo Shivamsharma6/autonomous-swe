@@ -1,0 +1,93 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Task time in state (p95)",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, state) (rate(task_state_duration_seconds_bucket[5m])))", "legendFormat": "{{state}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "Workflow time in state (p95)",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, state) (rate(workflow_state_duration_seconds_bucket[5m])))", "legendFormat": "{{state}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Approval and UAMS waits (p95)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, state) (rate(approval_wait_duration_seconds_bucket[5m])))", "legendFormat": "approval {{state}}"},
+        {"expr": "histogram_quantile(0.95, sum by (le, state) (rate(uams_wait_duration_seconds_bucket[5m])))", "legendFormat": "uams {{state}}"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "Queue depth by state / blocking reason",
+      "type": "timeseries",
+      "targets": [{"expr": "autoswe_task_queue_depth", "legendFormat": "{{state}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "Sandbox CPU by exit reason",
+      "type": "timeseries",
+      "targets": [{"expr": "rate(autoswe_sandbox_cpu_time_seconds_sum[5m])", "legendFormat": "{{exit_reason}}"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16}
+    },
+    {
+      "id": 6,
+      "title": "Unresolved dead letters",
+      "type": "stat",
+      "targets": [{"expr": "autoswe_unresolved_dead_letters"}],
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16}
+    },
+    {
+      "id": 7,
+      "title": "Artifact integrity failures",
+      "type": "stat",
+      "targets": [{"expr": "increase(autoswe_artifact_integrity_failures_total[24h])"}],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16}
+    },
+    {
+      "id": 8,
+      "title": "Scheduler reservations vs actual use",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "autoswe_resource_reservations", "legendFormat": "reserved {{resource}}"},
+        {"expr": "autoswe_resource_actual_usage", "legendFormat": "actual {{resource}}"}
+      ],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24}
+    },
+    {
+      "id": 9,
+      "title": "Outbox delivery latency (p99)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(autoswe_event_delivery_latency_seconds_bucket[5m])))", "legendFormat": "{{outcome}}"}
+      ],
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24}
+    },
+    {
+      "id": 10,
+      "title": "SLO error-budget burn rate",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "autoswe_slo_error_budget_burn_rate", "legendFormat": "{{slo}} {{window}}"}
+      ],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["autoswe", "agentic", "slo"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "AutoSWE Platform Reliability",
+  "uid": "autoswe-platform-reliability",
+  "version": 1
+}

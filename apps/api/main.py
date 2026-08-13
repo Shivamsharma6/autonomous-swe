@@ -5,15 +5,17 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 from sqlalchemy import text
 
 from apps.api.auth import AdminAuthenticator
 from apps.api.dependencies import ControlPlaneServices, ReadinessChecks
 from apps.api.middleware import (
+    CorrelationMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -22,6 +24,8 @@ from apps.api.routes import router
 from execution.scheduler.service import ConcurrencyPolicy, SchedulerService
 from infrastructure.config import Settings
 from knowledge.memory.uams import UAMSMemoryAdapter
+from observability.logging import configure_logging
+from observability.tracing import configure_telemetry
 from persistence.artifacts import ArtifactService, ArtifactStore
 from persistence.database import Database
 from persistence.repositories import DomainRepository
@@ -43,6 +47,7 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
     application.state.authenticator = AdminAuthenticator(
         services.settings.admin_token.get_secret_value()
     )
+    application.add_middleware(CorrelationMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=services.settings.cors_origins,
@@ -74,11 +79,16 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
             status_code=200 if ready else 503,
         )
 
+    @application.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     application.include_router(router)
     return application
 
 
 def create_production_app() -> FastAPI:
+    configure_logging()
     settings = Settings()
     database = Database(settings.database_url)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -155,4 +165,11 @@ def create_production_app() -> FastAPI:
         database_repository=repository,
         close_callbacks=(http_client.aclose, memory.close, redis.aclose, database.dispose),
     )
-    return create_app(services)
+    application = create_app(services)
+    configure_telemetry(
+        service_name="autoswe-api",
+        endpoint=settings.otel_exporter_otlp_endpoint,
+        application=application,
+        sqlalchemy_engine=database.engine,
+    )
+    return application

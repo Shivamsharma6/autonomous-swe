@@ -17,6 +17,7 @@ from workflows.state import (
     RunStageResult,
     RunWorkflowState,
     SchedulerDispatchBatch,
+    SchedulerPublishState,
     TaskDispatchResult,
 )
 
@@ -37,6 +38,9 @@ class RunStageExecutor(Protocol):
 
 class RunWorkflowCancelled(RuntimeError):
     pass
+
+
+DispatchPublish = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 RUN_STAGE_SEQUENCE = (
@@ -100,6 +104,42 @@ def build_admitted_task_graph(
     builder.add_edge("execute_task", "fan_in")
     builder.add_edge("fan_in", END)
     return builder.compile(name="scheduler-admitted-task-fanout")
+
+
+def build_scheduler_publish_graph(
+    publish: DispatchPublish,
+) -> CompiledStateGraph[Any, Any, Any, Any]:
+    """Use LangGraph Send fan-out only after the scheduler has issued exact leases."""
+
+    async def dispatch(_: SchedulerPublishState) -> dict[str, Any]:
+        return {}
+
+    def sends(state: SchedulerPublishState) -> list[Send] | str:
+        messages = state.get("dispatch_messages", ())
+        if not messages:
+            return "fan_in"
+        return [Send("publish", {"dispatch_message": message}) for message in messages]
+
+    async def publish_one(state: SchedulerPublishState) -> dict[str, Any]:
+        message = state["dispatch_message"]
+        token = str(message["lease_token"])
+        await publish(message)
+        return {"published_lease_tokens": [token]}
+
+    async def fan_in(state: SchedulerPublishState) -> dict[str, Any]:
+        return {
+            "ordered_lease_tokens": sorted(state.get("published_lease_tokens", ()))
+        }
+
+    builder = StateGraph(SchedulerPublishState)
+    builder.add_node("dispatch", cast(Any, dispatch))
+    builder.add_node("publish", cast(Any, publish_one))
+    builder.add_node("fan_in", fan_in)
+    builder.add_edge(START, "dispatch")
+    builder.add_conditional_edges("dispatch", sends, ["publish", "fan_in"])
+    builder.add_edge("publish", "fan_in")
+    builder.add_edge("fan_in", END)
+    return builder.compile(name="scheduler-admitted-dispatch-fanout")
 
 
 def build_run_graph(

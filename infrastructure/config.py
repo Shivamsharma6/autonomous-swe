@@ -54,6 +54,7 @@ class Settings(BaseSettings):
 
     cors_origins: list[str]
     artifact_root: Path = Path("/var/lib/autoswe/artifacts")
+    repository_import_root: Path = Path("/var/lib/autoswe/imports")
     managed_worktree_root: Path = Path("/var/lib/autoswe/worktrees")
     python_runner_image: str
     node_runner_image: str
@@ -68,6 +69,22 @@ class Settings(BaseSettings):
     max_total_execution_seconds: int = Field(default=7_200, ge=1, le=604_800)
     request_max_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
     api_rate_limit_per_minute: int = Field(default=120, ge=1, le=100_000)
+    host_uid: int = Field(
+        default=65532,
+        ge=1,
+        validation_alias=AliasChoices("host_uid", "AUTOSWE_UID"),
+    )
+    host_gid: int = Field(
+        default=65532,
+        ge=1,
+        validation_alias=AliasChoices("host_gid", "AUTOSWE_GID"),
+    )
+    otel_exporter_otlp_endpoint: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "otel_exporter_otlp_endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ),
+    )
 
     @property
     def is_production(self) -> bool:

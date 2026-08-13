@@ -1,0 +1,107 @@
+services:
+  api:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      otel-collector: {condition: service_started}
+
+  dispatcher:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    expose: ["9100"]
+    depends_on:
+      otel-collector: {condition: service_started}
+
+  workers:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    expose: ["9100"]
+    depends_on:
+      otel-collector: {condition: service_started}
+
+  sandbox-manager:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      otel-collector: {condition: service_started}
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    volumes:
+      - ./infrastructure/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks: [control]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,noexec,nosuid,nodev,size=16m]
+    healthcheck:
+      test: [CMD, /otelcol-contrib, --version]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M}
+
+  prometheus:
+    image: prom/prometheus:latest@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [control]
+    depends_on:
+      api: {condition: service_healthy}
+      sandbox-manager: {condition: service_healthy}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,noexec,nosuid,nodev,size=16m]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9090/-/healthy]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 1G}
+
+  grafana:
+    image: grafana/grafana:latest@sha256:ab5cb380e3ff3172d6c8bd2e7cfd31cce977d2881b260e1f5bc089bf0b759b43
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${AUTOSWE_GRAFANA_ADMIN_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [control]
+    ports:
+      - "127.0.0.1:${AUTOSWE_GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      prometheus: {condition: service_healthy}
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O - http://127.0.0.1:3000/api/health | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M}
+
+volumes:
+  prometheus-data:
+  grafana-data:

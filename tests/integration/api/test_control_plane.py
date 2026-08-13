@@ -55,8 +55,11 @@ async def probe() -> bool:
 
 def services(database: Database, tmp_path: Path) -> ControlPlaneServices:
     repository = DomainRepository()
+    import_root = tmp_path / "imports"
+    import_root.mkdir(exist_ok=True)
+    configured = settings().model_copy(update={"repository_import_root": import_root})
     return ControlPlaneServices(
-        settings=settings(),
+        settings=configured,
         database=database,
         redis=ReadyRedis(),
         memory=FakeMemoryPort(),
@@ -102,6 +105,8 @@ async def test_control_plane_scopes_state_artifacts_approval_and_dead_letter_rep
     tmp_path: Path,
 ) -> None:
     dependencies = services(database, tmp_path)
+    imported_repository = dependencies.settings.repository_import_root / "saas"
+    imported_repository.mkdir()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(dependencies)),
         base_url="http://control-plane.test",
@@ -109,7 +114,7 @@ async def test_control_plane_scopes_state_artifacts_approval_and_dead_letter_rep
     ) as client:
         project = await client.post(
             "/api/v1/projects",
-            json={"name": "SaaS", "source_path": "/imports/saas.git"},
+            json={"name": "SaaS", "source_path": str(imported_repository)},
         )
         assert project.status_code == 201
         project_id = UUID(project.json()["project_id"])
@@ -238,6 +243,29 @@ async def test_control_plane_scopes_state_artifacts_approval_and_dead_letter_rep
         )
         assert mismatch.status_code == 409
         assert approved.status_code == 202
+
+        run_status = await client.get(f"/api/v1/runs/{run_id}")
+        run_tasks = await client.get(f"/api/v1/runs/{run_id}/tasks")
+        run_approvals = await client.get(f"/api/v1/runs/{run_id}/approvals")
+        run_artifacts = await client.get(f"/api/v1/runs/{run_id}/artifacts")
+        run_events = await client.get(f"/api/v1/runs/{run_id}/events")
+        assert run_status.status_code == 200
+        assert run_status.json()["run_id"] == str(run_id)
+        assert run_status.json()["active_plan_revision"] == 1
+        assert run_tasks.status_code == 200
+        assert run_tasks.json()[0]["dependencies"] == []
+        assert run_approvals.status_code == 200
+        assert run_approvals.json()[0]["call_hash"] == approval.call_hash
+        assert run_artifacts.status_code == 200
+        assert run_artifacts.json()[0]["sha256"] == stored.sha256
+        assert run_events.status_code == 200
+        assert any(event["event_type"] == "run.requested" for event in run_events.json())
+
+        escaped = await client.post(
+            "/api/v1/projects",
+            json={"name": "Escaped", "source_path": str(tmp_path)},
+        )
+        assert escaped.status_code == 422
 
         dead_letters = await client.get("/api/v1/dead-letters")
         replayed = await client.post(f"/api/v1/dead-letters/{dead_letter_id}/replay")

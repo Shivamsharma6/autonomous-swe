@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -9,6 +10,40 @@ from collections.abc import Awaitable, Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+from observability.tracing import CorrelationContext, bind_correlation, reset_correlation
+
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+class CorrelationMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: object, *, trust_internal_headers: bool = False) -> None:
+        super().__init__(app)  # type: ignore[arg-type]
+        self._trust_internal_headers = trust_internal_headers
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        from uuid import uuid4
+
+        incoming = request.headers.get("x-request-id", "")
+        request_id = incoming if _REQUEST_ID.fullmatch(incoming) else str(uuid4())
+        if self._trust_internal_headers:
+            context = CorrelationContext.from_headers(dict(request.headers)).model_copy(
+                update={"request_id": request_id}
+            )
+        else:
+            context = CorrelationContext(request_id=request_id)
+        token = bind_correlation(context)
+        request.state.correlation = context
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            reset_correlation(token)
 
 
 class RequestSizeLimitMiddleware(BaseHTTPMiddleware):

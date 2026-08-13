@@ -72,6 +72,25 @@ def test_integration_worktree_is_separate_from_task_worktrees(
     assert git("branch", "--show-current", cwd=integration) == f"autoswe/integration/{run_id}"
 
 
+def test_dependent_worktree_integrates_modified_and_untracked_files_idempotently(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    manager = GitWorktreeManager(tmp_path / "managed")
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    dependency_id = uuid4()
+    target_id = uuid4()
+    dependency = manager.create_task_worktree(source_repository, dependency_id, baseline)
+    target = manager.create_task_worktree(source_repository, target_id, baseline)
+    (dependency / "app.py").write_text("VALUE = 2\n")
+    (dependency / "new.py").write_text("NEW = True\n")
+
+    manager.integrate_task_dependencies(source_repository, target, (dependency_id,))
+    manager.integrate_task_dependencies(source_repository, target, (dependency_id,))
+
+    assert (target / "app.py").read_text() == "VALUE = 2\n"
+    assert (target / "new.py").read_text() == "NEW = True\n"
+
+
 def test_worktree_source_and_baseline_are_strictly_validated(
     source_repository: Path, tmp_path: Path
 ) -> None:

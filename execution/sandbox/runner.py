@@ -362,8 +362,10 @@ class DockerSandboxRunner:
                     break
                 time.sleep(self._poll_interval_seconds)
         finally:
-            collector.complete.wait(timeout=1)
-            output_thread.join(timeout=0.1)
+            if not collector.complete.wait(timeout=1):
+                _close_stream(stream)
+            output_thread.join(timeout=0.5)
+            _close_stream(stream)
 
         duration_ms = max(0, int((time.monotonic() - started) * 1_000))
         container.reload()
@@ -470,6 +472,23 @@ def _exit_reason(
     if exit_code == 0:
         return "COMPLETED", None
     return "NON_ZERO_EXIT", None
+
+
+def _close_stream(stream: Any) -> None:
+    response = getattr(stream, "_response", None)
+    response_close = getattr(response, "close", None)
+    if callable(response_close):
+        try:
+            response_close()
+            return
+        except (OSError, ValueError, docker.errors.DockerException):
+            pass
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except (OSError, ValueError, docker.errors.DockerException):
+            pass
 
 
 def _parse_stats(stats: Any) -> tuple[int, int, int, int, int] | None:

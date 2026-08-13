@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from uuid import UUID
 
+from domain.enums import TaskType
 from domain.models import TaskPlan, TaskPlanMutation, TaskSpec
 
 
@@ -33,8 +34,14 @@ class MutationValidationResult:
 
 
 class TaskPlanValidator:
-    def __init__(self, *, allowed_tools: set[str] | frozenset[str]) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_tools: set[str] | frozenset[str],
+        require_final_validation_sink: bool = False,
+    ) -> None:
         self.allowed_tools = frozenset(allowed_tools)
+        self.require_final_validation_sink = require_final_validation_sink
 
     def validate(self, plan: TaskPlan) -> PlanValidationResult:
         issues: list[ValidationIssue] = []
@@ -65,6 +72,18 @@ class TaskPlanValidator:
                 ValidationIssue(
                     code="CYCLE",
                     message="task dependencies contain at least one cycle",
+                )
+            )
+        elif self.require_final_validation_sink and not self._has_final_validation_sink(
+            tasks_by_id
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="FINAL_VALIDATION_SINK",
+                    message=(
+                        "plan requires exactly one final VALIDATION sink transitively "
+                        "covering every task"
+                    ),
                 )
             )
 
@@ -312,3 +331,30 @@ class TaskPlanValidator:
             ]
             depths[task_id] = 1 + max(dependencies, default=0)
         return max(depths.values(), default=0)
+
+    @staticmethod
+    def _has_final_validation_sink(tasks_by_id: dict[UUID, TaskSpec]) -> bool:
+        depended_on = {
+            dependency for task in tasks_by_id.values() for dependency in task.dependencies
+        }
+        sinks = tuple(task for task in tasks_by_id.values() if task.id not in depended_on)
+
+        def ancestors(task_id: UUID) -> set[UUID]:
+            found: set[UUID] = set()
+            pending = list(tasks_by_id[task_id].dependencies)
+            while pending:
+                dependency = pending.pop()
+                if dependency in found:
+                    continue
+                found.add(dependency)
+                pending.extend(tasks_by_id[dependency].dependencies)
+            return found
+
+        complete = set(tasks_by_id)
+        valid = tuple(
+            task
+            for task in sinks
+            if task.task_type is TaskType.VALIDATION
+            and ancestors(task.id) | {task.id} == complete
+        )
+        return len(valid) == 1

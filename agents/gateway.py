@@ -11,6 +11,8 @@ import httpx
 from pydantic import Field, computed_field, model_validator
 
 from domain.models import ContractModel
+from observability.metrics import track_actual_resource
+from observability.tracing import current_correlation
 
 
 class FailureClass(StrEnum):
@@ -194,7 +196,7 @@ class OpenAICompatibleGateway:
         try:
             response = await self._client.get(
                 f"{self._base_url}/models",
-                headers=self._headers,
+                headers=self._headers | current_correlation().to_headers(),
                 timeout=5.0,
             )
         except httpx.RequestError as error:
@@ -233,13 +235,14 @@ class OpenAICompatibleGateway:
         if cancel is not None and cancel.is_set():
             raise GatewayCancelled()
         async with self.admission.slot():
-            try:
-                async with asyncio.timeout(request.timeout_seconds):
-                    return await self._complete_with_cancellation(request, cancel=cancel)
-            except TimeoutError as error:
-                raise GatewayError(
-                    "model request timed out", failure_class=FailureClass.TIMEOUT
-                ) from error
+            with track_actual_resource("model"):
+                try:
+                    async with asyncio.timeout(request.timeout_seconds):
+                        return await self._complete_with_cancellation(request, cancel=cancel)
+                except TimeoutError as error:
+                    raise GatewayError(
+                        "model request timed out", failure_class=FailureClass.TIMEOUT
+                    ) from error
 
     async def _complete_with_cancellation(
         self, request: ModelRequest, *, cancel: asyncio.Event | None
@@ -261,7 +264,9 @@ class OpenAICompatibleGateway:
         try:
             response = await self._client.post(
                 f"{self._base_url}/chat/completions",
-                headers=self._headers | {"x-trace-id": request.trace_id},
+                headers=self._headers
+                | current_correlation().to_headers()
+                | {"x-trace-id": request.trace_id},
                 json=self._payload(request, stream=False),
             )
         except httpx.TimeoutException as error:
@@ -282,40 +287,43 @@ class OpenAICompatibleGateway:
         capabilities = await self.capabilities(request.model)
         self._require_capabilities(request, capabilities, streaming=True)
         async with self.admission.slot():
-            try:
-                async with asyncio.timeout(request.timeout_seconds):
-                    async with self._client.stream(
+            with track_actual_resource("model"):
+                try:
+                    async with asyncio.timeout(request.timeout_seconds):
+                        async with self._client.stream(
                         "POST",
                         f"{self._base_url}/chat/completions",
-                        headers=self._headers | {"x-trace-id": request.trace_id},
-                        json=self._payload(request, stream=True),
-                    ) as response:
-                        self._raise_for_status(response)
-                        async for line in response.aiter_lines():
-                            if cancel is not None and cancel.is_set():
-                                raise GatewayCancelled()
-                            if not line.startswith("data:"):
-                                continue
-                            data = line[5:].strip()
-                            if data == "[DONE]":
-                                return
-                            body = json.loads(data)
-                            choice = body.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
-                            yield ModelStreamChunk(
-                                trace_id=request.trace_id,
-                                text=str(delta.get("content") or ""),
-                                finish_reason=choice.get("finish_reason"),
-                            )
-            except TimeoutError as error:
-                raise GatewayError(
-                    "model stream timed out", failure_class=FailureClass.TIMEOUT
-                ) from error
-            except httpx.RequestError as error:
-                raise GatewayError(
-                    f"model stream failed: {error}",
-                    failure_class=FailureClass.TRANSIENT,
-                ) from error
+                        headers=self._headers
+                        | current_correlation().to_headers()
+                        | {"x-trace-id": request.trace_id},
+                            json=self._payload(request, stream=True),
+                        ) as response:
+                            self._raise_for_status(response)
+                            async for line in response.aiter_lines():
+                                if cancel is not None and cancel.is_set():
+                                    raise GatewayCancelled()
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if data == "[DONE]":
+                                    return
+                                body = json.loads(data)
+                                choice = body.get("choices", [{}])[0]
+                                delta = choice.get("delta", {})
+                                yield ModelStreamChunk(
+                                    trace_id=request.trace_id,
+                                    text=str(delta.get("content") or ""),
+                                    finish_reason=choice.get("finish_reason"),
+                                )
+                except TimeoutError as error:
+                    raise GatewayError(
+                        "model stream timed out", failure_class=FailureClass.TIMEOUT
+                    ) from error
+                except httpx.RequestError as error:
+                    raise GatewayError(
+                        f"model stream failed: {error}",
+                        failure_class=FailureClass.TRANSIENT,
+                    ) from error
 
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {

@@ -17,3 +17,5 @@ autonomous_agent_directory/
 logs/
 artifacts/
 data/
+runtime/
+.compose-test-runtime/

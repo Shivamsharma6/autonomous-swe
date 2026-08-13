@@ -251,6 +251,27 @@ class TaskAttemptRow(Base):
     )
 
 
+class RunStageAttemptRow(Base):
+    __tablename__ = "run_stage_attempts"
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    agent_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="RUNNING", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("run_id", "stage", name="uq_run_stage_attempt"),
+        CheckConstraint("length(agent_spec_hash) = 64", name="ck_run_stage_agent_spec_hash"),
+        Index("ix_run_stage_attempts_run", "run_id", "stage"),
+    )
+
+
 class ModelCallRow(Base):
     __tablename__ = "model_calls"
 
@@ -258,13 +279,16 @@ class ModelCallRow(Base):
     run_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
     )
-    task_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    task_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE")
     )
-    attempt_id: Mapped[UUID] = mapped_column(
+    attempt_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("task_attempts.id", ondelete="CASCADE"),
-        nullable=False,
+    )
+    run_stage_attempt_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("run_stage_attempts.id", ondelete="CASCADE"),
     )
     trace_id: Mapped[str] = mapped_column(String(500), nullable=False)
     provider_request_id: Mapped[str | None] = mapped_column(String(500))
@@ -282,8 +306,15 @@ class ModelCallRow(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     __table_args__ = (
-        UniqueConstraint("attempt_id", "turn", name="uq_model_call_attempt_turn"),
+        UniqueConstraint(
+            "run_id", "trace_id", "turn", name="uq_model_call_invocation_turn"
+        ),
         CheckConstraint("turn >= 1", name="ck_model_call_turn_positive"),
+        CheckConstraint(
+            "(attempt_id IS NOT NULL AND run_stage_attempt_id IS NULL AND task_id IS NOT NULL) "
+            "OR (attempt_id IS NULL AND run_stage_attempt_id IS NOT NULL AND task_id IS NULL)",
+            name="ck_model_call_attempt_scope",
+        ),
         CheckConstraint("length(agent_spec_hash) = 64", name="ck_model_call_agent_spec_hash"),
         CheckConstraint(
             "input_tokens >= 0 AND output_tokens >= 0 "
@@ -731,6 +762,36 @@ class StateDurationRow(Base):
     __table_args__ = (
         CheckConstraint("duration_seconds >= 0", name="ck_state_duration_nonnegative"),
         Index("ix_state_duration_aggregate", "aggregate_type", "aggregate_id"),
+    )
+
+
+class WorkflowNodeExecutionRow(Base):
+    __tablename__ = "workflow_node_executions"
+
+    id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("task_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    node_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('RUNNING', 'COMPLETED', 'FAILED')",
+            name="ck_workflow_node_execution_status",
+        ),
+        UniqueConstraint("attempt_id", "node_name", name="uq_workflow_node_attempt_name"),
+        Index("ix_workflow_node_task_status", "task_id", "status"),
     )
 
 

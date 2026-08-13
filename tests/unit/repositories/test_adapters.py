@@ -79,6 +79,35 @@ def test_python_detection_discovery_commands_and_artifacts(python_project: Path)
     )
 
 
+def test_python_uses_standard_library_unittest_when_pytest_is_not_declared(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stdlib-project"
+    (root / "tests").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "stdlib-project"\nversion = "0.1.0"\ndependencies = []\n'
+    )
+    (root / "requirements.txt").write_text("")
+    (root / "tests" / "test_app.py").write_text(
+        "import unittest\n\nclass AppTest(unittest.TestCase):\n    pass\n"
+    )
+    adapter = PythonRepositoryAdapter()
+    manifest = adapter.inspect(root)
+
+    assert adapter.command(
+        manifest,
+        CommandRequest(kind=CommandKind.TARGETED_TEST, target="tests/test_app.py"),
+    ).argv == ("python", "-m", "unittest", "tests.test_app")
+    assert adapter.command(manifest, CommandRequest(kind=CommandKind.FULL_TEST)).argv == (
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+    )
+
+
 def test_node_detection_discovery_commands_and_artifacts(node_project: Path) -> None:
     adapter = NodeRepositoryAdapter()
     manifest = adapter.inspect(node_project)

@@ -201,8 +201,13 @@ class ArtifactService:
         project_id: UUID,
         run_id: UUID,
         task_id: UUID,
+        artifact_id: UUID | None = None,
     ) -> StoredArtifact:
-        stored = self.store.put(content, artifact_id=uuid4(), media_type=media_type)
+        stored = self.store.put(
+            content,
+            artifact_id=artifact_id or uuid4(),
+            media_type=media_type,
+        )
         await self.repository.record_artifact(
             session,
             artifact=ArtifactRef(

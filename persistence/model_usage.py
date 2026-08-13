@@ -58,7 +58,7 @@ class PostgresUsageRecorder:
             statement = (
                 insert(ModelCallRow)
                 .values(**values)
-                .on_conflict_do_nothing(constraint="uq_model_call_attempt_turn")
+                .on_conflict_do_nothing(constraint="uq_model_call_invocation_turn")
                 .returning(ModelCallRow.id)
             )
             inserted = await session.scalar(statement)

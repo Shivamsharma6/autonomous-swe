@@ -12,6 +12,25 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+_LANGGRAPH_TABLES = {
+    "checkpoint_blobs",
+    "checkpoint_migrations",
+    "checkpoint_writes",
+    "checkpoints",
+}
+
+
+def include_name(
+    name: str | None,
+    type_: str,
+    parent_names: dict[str, str | None],
+) -> bool:
+    """LangGraph owns its checkpoint schema; Alembic owns only domain tables."""
+    if type_ == "table" and name in _LANGGRAPH_TABLES:
+        return False
+    if parent_names.get("table_name") in _LANGGRAPH_TABLES:
+        return False
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -21,6 +40,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -37,6 +57,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_name=include_name,
         )
         with context.begin_transaction():
             context.run_migrations()
