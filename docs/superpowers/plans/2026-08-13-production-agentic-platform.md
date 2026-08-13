@@ -287,12 +287,12 @@
 - Create: `tests/integration/sandbox/test_container.py`
 - Create: `tests/security/test_sandbox_escape.py`
 
-- [ ] Write policy tests rejecting privileged mode, host network, arbitrary mounts, devices, capabilities, root, mutable rootfs, unpinned images, unrestricted egress, unbounded PIDs/output/time, and commands that are not argument arrays.
-- [ ] Write Git worktree tests for one branch/worktree per mutable task, read-only source repository import, separate integration worktree, normalized paths, symlink escape prevention, and deterministic cleanup after terminal state.
-- [ ] With the controlled Docker integration fixture, prove network disabled by default, cancellation terminates the persisted container ID, output truncation is byte-accurate, and CPU/memory/PID/time limits produce explicit exit reasons.
-- [ ] Verify persisted telemetry fields: CPU time, peak memory, peak processes, processes created or null, stdout/stderr bytes, duration, network counts/bytes, exit code/reason, triggered limit, measurement source, and completeness.
-- [ ] Run sandbox tests, remove every `shell=True` and host command execution path, implement the Docker Engine adapter and worktree manager, then rerun.
-- [ ] Commit: `feat: isolate repository work in constrained containers`
+- [x] Write policy tests rejecting privileged mode, host network, arbitrary mounts, devices, capabilities, root, mutable rootfs, unpinned images, unrestricted egress, unbounded PIDs/output/time, and commands that are not argument arrays.
+- [x] Write Git worktree tests for one branch/worktree per mutable task, read-only source repository import, separate integration worktree, normalized paths, symlink escape prevention, and deterministic cleanup after terminal state.
+- [x] With the controlled Docker integration fixture, prove network disabled by default, cancellation terminates the persisted container ID, output truncation is byte-accurate, and CPU/memory/PID/time limits produce explicit exit reasons.
+- [x] Verify persisted telemetry fields: CPU time, peak memory, peak processes, processes created or null, stdout/stderr bytes, duration, network counts/bytes, exit code/reason, triggered limit, measurement source, and completeness.
+- [x] Run sandbox tests, remove every `shell=True` and host command execution path, implement the Docker Engine adapter and worktree manager, then rerun.
+- [x] Commit: `feat: isolate repository work in constrained containers`
 
 ---
 

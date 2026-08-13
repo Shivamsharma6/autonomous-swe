@@ -65,7 +65,7 @@ class CommandSpec(ContractModel):
         ):
             raise ValueError("command arguments cannot contain control characters")
         if self.cwd != ".":
-            raise ValueError("repository commands must execute at the managed root")
+            raise ValueError("cwd must be the managed repository root")
         return self
 
 
