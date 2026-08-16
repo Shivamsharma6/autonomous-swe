@@ -145,6 +145,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       docker-socket-proxy: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
     restart: unless-stopped
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/ready', timeout=2)"]
