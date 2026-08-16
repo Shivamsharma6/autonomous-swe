@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import re
 import time
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
@@ -70,10 +70,17 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: object, *, requests_per_minute: int) -> None:
+    def __init__(
+        self,
+        app: object,
+        *,
+        requests_per_minute: int,
+        max_tracked_keys: int = 10_000,
+    ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         self._limit = requests_per_minute
-        self._requests: dict[str, deque[float]] = defaultdict(deque)
+        self._max_tracked_keys = max_tracked_keys
+        self._requests: dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
 
     async def dispatch(
@@ -90,9 +97,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         key = f"{host}:{request.url.path}:{credential_digest}"
         now = time.monotonic()
         async with self._lock:
-            entries = self._requests[key]
+            if len(self._requests) >= self._max_tracked_keys:
+                stale_keys = [
+                    k
+                    for k, timestamps in self._requests.items()
+                    if not timestamps or timestamps[-1] <= now - 60
+                ]
+                for k in stale_keys:
+                    self._requests.pop(k, None)
+                while len(self._requests) >= self._max_tracked_keys:
+                    oldest_key = next(iter(self._requests))
+                    self._requests.pop(oldest_key, None)
+
+            entries = self._requests.get(key)
+            if entries is None:
+                entries = deque()
+                self._requests[key] = entries
+
             while entries and entries[0] <= now - 60:
                 entries.popleft()
+
             if len(entries) >= self._limit:
                 return JSONResponse(
                     {"detail": "rate limit exceeded"},

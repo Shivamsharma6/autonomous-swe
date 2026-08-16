@@ -159,15 +159,25 @@ def _fixed_python_program(source: str) -> str:
 
 
 class SandboxManagerClient:
-    def __init__(self, *, base_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str = "",
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._token = token
         self._client = client or httpx.AsyncClient(timeout=3_700)
         self._owns_client = client is None
 
     async def execute(self, request: SandboxRequest) -> SandboxResult:
+        headers = dict(current_correlation().to_headers())
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         response = await self._client.post(
             f"{self._base_url}/executions",
-            headers=current_correlation().to_headers(),
+            headers=headers,
             json=request.model_dump(mode="json"),
         )
         response.raise_for_status()

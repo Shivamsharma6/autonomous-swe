@@ -555,7 +555,11 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
         base_url="http://sandbox.test",
         timeout=120,
     )
-    sandbox = SandboxManagerClient(base_url="http://sandbox.test", client=sandbox_http)
+    sandbox = SandboxManagerClient(
+        base_url="http://sandbox.test",
+        token=ADMIN_TOKEN,
+        client=sandbox_http,
+    )
 
     settings = Settings.model_validate(
         {

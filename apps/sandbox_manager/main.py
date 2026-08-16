@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import docker  # type: ignore[import-untyped]
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
+from apps.api.auth import AdminAuthenticator
+from apps.api.dependencies import require_admin
 from apps.api.middleware import CorrelationMiddleware
 from execution.sandbox.manager import PostgresSandboxRunStore, SandboxManager
 from execution.sandbox.runner import DockerSandboxRunner, SandboxRequest, SandboxResult
@@ -40,6 +42,9 @@ def create_production_app() -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
+    application.state.authenticator = AdminAuthenticator(
+        settings.admin_token.get_secret_value()
+    )
     application.add_middleware(CorrelationMiddleware, trust_internal_headers=True)
 
     @application.get("/live")
@@ -71,14 +76,22 @@ def create_production_app() -> FastAPI:
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @application.post("/executions", response_model=SandboxResult)
+    @application.post(
+        "/executions",
+        response_model=SandboxResult,
+        dependencies=[Depends(require_admin)],
+    )
     async def execute(request: SandboxRequest) -> SandboxResult:
         try:
             return await manager.execute(request)
         except Exception as exc:
             raise HTTPException(status_code=409, detail="sandbox execution failed") from exc
 
-    @application.post("/executions/{execution_id}/cancel", status_code=202)
+    @application.post(
+        "/executions/{execution_id}/cancel",
+        status_code=202,
+        dependencies=[Depends(require_admin)],
+    )
     async def cancel(execution_id: str) -> dict[str, str]:
         from uuid import UUID
 

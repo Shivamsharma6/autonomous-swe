@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import contextlib
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -463,7 +462,8 @@ async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> 
                     event_id=UUID(str(event["event_id"])),
                 )
     except Exception:
-        await websocket.close()
+        with contextlib.suppress(Exception):
+            await websocket.close()
 
 
 def _task_response(row: TaskRow) -> TaskResponse:

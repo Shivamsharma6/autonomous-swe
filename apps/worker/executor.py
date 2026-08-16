@@ -103,8 +103,11 @@ class DispatchedTaskExecutor:
                 graph_thread_id=f"run:{context.run_id}:task:{context.task_id}",
             )
         )
+        current_execution_task = asyncio.current_task()
         heartbeat_stop = asyncio.Event()
-        heartbeat = asyncio.create_task(self._heartbeat(message, heartbeat_stop))
+        heartbeat = asyncio.create_task(
+            self._heartbeat(message, heartbeat_stop, execution_task=current_execution_task)
+        )
         try:
             async with self._checkpointer_factory() as checkpointer:
                 graph = build_task_subgraph(
@@ -164,10 +167,19 @@ class DispatchedTaskExecutor:
             raise
         finally:
             heartbeat_stop.set()
-            await heartbeat
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except (asyncio.CancelledError, PermissionError):
+                pass
             reset_correlation(correlation_token)
 
-    async def _heartbeat(self, message: DispatchMessage, stop: asyncio.Event) -> None:
+    async def _heartbeat(
+        self,
+        message: DispatchMessage,
+        stop: asyncio.Event,
+        execution_task: asyncio.Task[Any] | None = None,
+    ) -> None:
         while not stop.is_set():
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._heartbeat_seconds)
@@ -177,4 +189,6 @@ class DispatchedTaskExecutor:
                     owner=message.owner,
                     token=message.lease_token,
                 ):
+                    if execution_task is not None and not execution_task.done():
+                        execution_task.cancel()
                     raise PermissionError("worker lost its scheduler lease") from None

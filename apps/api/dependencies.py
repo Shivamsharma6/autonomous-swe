@@ -108,10 +108,16 @@ async def require_admin(
 
 
 async def require_websocket_admin(websocket: WebSocket) -> AdminPrincipal:
+    token = ""
     authorization = websocket.headers.get("authorization", "")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer":
-        token = ""
+    scheme, _, auth_token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and auth_token.strip():
+        token = auth_token.strip()
+    elif "token" in websocket.query_params:
+        token = websocket.query_params.get("token", "").strip()
+    elif "sec-websocket-protocol" in websocket.headers:
+        token = websocket.headers.get("sec-websocket-protocol", "").strip()
+
     authenticator: AdminAuthenticator = websocket.app.state.authenticator
     try:
         return authenticator.authenticate(token)

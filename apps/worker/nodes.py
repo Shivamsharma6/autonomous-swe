@@ -6,7 +6,7 @@ from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import Field
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from agents.base import (
@@ -223,30 +223,21 @@ class ProductionNodeExecutor:
             return task is None or task.state is TaskStatus.CANCELLED
 
     async def execute(self, request: NodeExecutionRequest) -> NodeExecutionResult:
-        lock_key = int(request.idempotency_uuid("lock").hex[:15], 16)
-        async with self._database.engine.connect() as lock_connection:
-            await lock_connection.execute(
-                text("SELECT pg_advisory_lock(:key)"), {"key": lock_key}
+        replay = await self._claim(request)
+        if replay is not None:
+            return replay
+        try:
+            output, memory_ids, tool_calls, role = await self._invoke(request)
+            return await self._persist(
+                request,
+                output=output,
+                memory_ids=memory_ids,
+                tool_calls=tool_calls,
+                role=role,
             )
-            try:
-                replay = await self._claim(request)
-                if replay is not None:
-                    return replay
-                output, memory_ids, tool_calls, role = await self._invoke(request)
-                return await self._persist(
-                    request,
-                    output=output,
-                    memory_ids=memory_ids,
-                    tool_calls=tool_calls,
-                    role=role,
-                )
-            except Exception:
-                await self._mark_failed(request)
-                raise
-            finally:
-                await lock_connection.execute(
-                    text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key}
-                )
+        except Exception:
+            await self._mark_failed(request)
+            raise
 
     async def _claim(self, request: NodeExecutionRequest) -> NodeExecutionResult | None:
         execution_id = request.idempotency_uuid("node-execution")

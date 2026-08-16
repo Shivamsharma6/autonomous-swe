@@ -5,6 +5,7 @@ SENSITIVE_KEY_EXACT = {
     "key",
     "api_key",
     "apikey",
+    "api-key",
     "secret",
     "password",
     "token",
@@ -20,25 +21,31 @@ SENSITIVE_KEY_EXACT = {
     "secret_key",
     "client_secret",
     "aws_secret",
+    "admin_token",
+    "session_token",
+    "jwt",
+    "x-api-key",
 }
 
 SENSITIVE_KEY_PATTERNS = [
-    re.compile(r"^.*_(key|secret|password|token|credentials|auth)$", re.IGNORECASE),
+    re.compile(r"^.*[-_](key|secret|password|token|credentials|auth|jwt)$", re.IGNORECASE),
     re.compile(
-        r"^(api_key|secret|password|auth_token|access_key|private_key|credentials|token|auth)$",
+        r"^(api_key|secret|password|auth_token|access_key|private_key|credentials|token|auth|admin_token)$",
         re.IGNORECASE,
     ),
 ]
 
 SECRET_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9_]{10,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{10,}"),
     re.compile(r"github_pat_[a-zA-Z0-9_]{30,}"),
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{10,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]+"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]+"),
     re.compile(r"xox[baprs]-[a-zA-Z0-9_-]{10,}"),
-    re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE)(?:\s+PRIVATE)? KEY-----"),
+    re.compile(r"-----BEGIN (?:[A-Z0-9\s_-]+)?KEY-----"),
     re.compile(r"(?:postgres|mysql|mongodb|redis)://[^:\s]+:[^@\s]+@"),
+    re.compile(r"(?i)(?:api_key|token|secret|password|admin_token)=[A-Za-z0-9_\-\.]{8,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]{10,}\b"),
 ]
 
 

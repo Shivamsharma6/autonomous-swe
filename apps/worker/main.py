@@ -51,7 +51,10 @@ async def run_worker() -> None:
         output_cost_per_million=settings.model_output_cost_per_million,
         default_capabilities=declared,
     )
-    sandbox = SandboxManagerClient(base_url=settings.sandbox_manager_url)
+    sandbox = SandboxManagerClient(
+        base_url=settings.sandbox_manager_url,
+        token=settings.admin_token.get_secret_value(),
+    )
     repository = DomainRepository()
     artifacts = ArtifactService(
         store=ArtifactStore(settings.artifact_root),

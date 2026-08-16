@@ -1,7 +1,7 @@
-from __future__ import annotations
-
+import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from domain.enums import RiskLevel
@@ -49,11 +49,7 @@ class ToolRiskPolicy:
             levels.append(RiskLevel.HIGH)
 
         paths = _argument_paths(arguments)
-        if any(
-            path == protected or path.startswith(protected + "/")
-            for path in paths
-            for protected in self.protected_paths
-        ):
+        if any(_is_protected_path(path, self.protected_paths) for path in paths):
             levels.append(RiskLevel.HIGH)
         lowered = tool_name.casefold()
         if any(value in lowered for value in ("delete", "destroy", "drop", "purge")):
@@ -63,16 +59,30 @@ class ToolRiskPolicy:
         return maximum_risk(*levels)
 
 
+def _is_protected_path(raw_path: str, protected_targets: tuple[str, ...]) -> bool:
+    normalized = posixpath.normpath(raw_path.replace("\\", "/")).strip("/")
+    if not normalized or normalized == ".":
+        return False
+    parts = PurePosixPath(normalized).parts
+    for protected in protected_targets:
+        prot_norm = posixpath.normpath(protected.replace("\\", "/")).strip("/")
+        prot_parts = PurePosixPath(prot_norm).parts
+        if normalized == prot_norm or normalized.startswith(prot_norm + "/"):
+            return True
+        if len(prot_parts) == 1 and prot_parts[0] in parts:
+            return True
+        for i in range(len(parts) - len(prot_parts) + 1):
+            if parts[i : i + len(prot_parts)] == prot_parts:
+                return True
+    return False
+
+
 def _argument_paths(arguments: Mapping[str, Any]) -> tuple[str, ...]:
     paths: list[str] = []
     for key, value in arguments.items():
         if key.casefold() in {"path", "paths", "target", "file", "directory"}:
             if isinstance(value, str):
-                paths.append(value.replace("\\", "/").removeprefix("./"))
+                paths.append(value)
             elif isinstance(value, list):
-                paths.extend(
-                    item.replace("\\", "/").removeprefix("./")
-                    for item in value
-                    if isinstance(item, str)
-                )
+                paths.extend(item for item in value if isinstance(item, str))
     return tuple(paths)
