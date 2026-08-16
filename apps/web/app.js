@@ -107,6 +107,69 @@
     if (!state.token) {
       window.setTimeout(openAuth, 300);
     }
+  // Handle File / Directory Picker for Local Repository Selection
+  async function selectDirectory() {
+    if (window.showDirectoryPicker) {
+      try {
+        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+        const dirName = dirHandle.name;
+        el('projectName').value = dirName;
+        el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
+
+        try {
+          const gitHandle = await dirHandle.getDirectoryHandle('.git');
+          if (gitHandle) {
+            const headHandle = await gitHandle.getFileHandle('HEAD');
+            const headFile = await headHandle.getFile();
+            const headText = (await headFile.text()).trim();
+
+            if (headText.startsWith('ref: refs/heads/')) {
+              const branch = headText.replace('ref: refs/heads/', '').trim();
+              el('defaultBranch').value = branch;
+
+              try {
+                const refsHandle = await gitHandle.getDirectoryHandle('refs');
+                const headsHandle = await refsHandle.getDirectoryHandle('heads');
+                const branchHandle = await headsHandle.getFileHandle(branch);
+                const branchFile = await branchHandle.getFile();
+                const commitSha = (await branchFile.text()).trim();
+                if (commitSha && commitSha.length >= 40) {
+                  el('baselineCommit').value = commitSha;
+                  showToast(`Selected "${dirName}" (${branch} · ${commitSha.slice(0, 8)})`);
+                  return;
+                }
+              } catch (_) {}
+              showToast(`Selected "${dirName}" (Branch: ${branch})`);
+              return;
+            } else if (headText.length >= 40) {
+              el('baselineCommit').value = headText;
+              showToast(`Selected "${dirName}" (Commit: ${headText.slice(0, 8)})`);
+              return;
+            }
+          }
+        } catch (_) {}
+        showToast(`Selected repository directory: ${dirName}`);
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          showToast(`Directory picker: ${err.message}`, true);
+        }
+      }
+    } else {
+      el('dirPickerFallback').click();
+    }
+  }
+
+  function handleFallbackDirPicker(event) {
+    const files = event.target.files;
+    if (!files || !files.length) return;
+    const firstFile = files[0];
+    const pathParts = (firstFile.webkitRelativePath || '').split('/');
+    if (pathParts.length > 1) {
+      const dirName = pathParts[0];
+      el('projectName').value = dirName;
+      el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
+      showToast(`Selected folder: ${dirName}`);
+    }
   }
 
   // Register New Project Repository
@@ -704,6 +767,8 @@
     if (state.runId) void loadRun(state.runId);
   });
 
+  el('browseFolderBtn').addEventListener('click', selectDirectory);
+  el('dirPickerFallback').addEventListener('change', handleFallbackDirPicker);
   el('projectForm').addEventListener('submit', registerProject);
   el('runForm').addEventListener('submit', startRun);
   el('lookupForm').addEventListener('submit', (e) => {
