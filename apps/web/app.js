@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // Application Global State
+  // Global State
   const state = {
     token: sessionStorage.getItem('autoswe.adminToken') || '',
     projectId: sessionStorage.getItem('autoswe.projectId') || '',
@@ -13,6 +13,7 @@
     approvals: [],
     artifacts: [],
     currentFilter: 'ALL',
+    searchQuery: '',
     pollTimer: null,
     ws: null,
     wsReconnectTimer: null,
@@ -55,6 +56,7 @@
   // Toast Notification Manager
   function showToast(message, isError = false) {
     const toast = el('toast');
+    if (!toast) return;
     toast.textContent = message;
     toast.classList.toggle('error', isError);
     toast.classList.remove('hidden');
@@ -70,6 +72,60 @@
 
   function closeAuth() {
     if (el('authDialog').open) el('authDialog').close();
+  }
+
+  // Recent Runs Manager (Local Storage)
+  const RECENT_RUNS_KEY = 'autoswe.recentRuns';
+
+  function getRecentRuns() {
+    try {
+      return JSON.parse(localStorage.getItem(RECENT_RUNS_KEY)) || [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function saveRecentRun(runId, goalText) {
+    if (!runId) return;
+    let list = getRecentRuns();
+    list = list.filter(item => item.id !== runId);
+    list.unshift({
+      id: runId,
+      goal: (goalText || 'Workflow Execution').slice(0, 40),
+      time: Date.now(),
+    });
+    list = list.slice(0, 6);
+    try {
+      localStorage.setItem(RECENT_RUNS_KEY, JSON.stringify(list));
+    } catch (_) {}
+    renderRecentRuns();
+  }
+
+  function renderRecentRuns() {
+    const container = el('recentRunsContainer');
+    const listEl = el('recentRunsList');
+    if (!container || !listEl) return;
+
+    const runs = getRecentRuns();
+    if (!runs.length) {
+      container.classList.add('hidden');
+      return;
+    }
+
+    container.classList.remove('hidden');
+    listEl.replaceChildren();
+
+    runs.forEach(run => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'recent-run-chip';
+      chip.innerHTML = `<span>#${run.id.slice(0, 8)}</span> <span style="opacity: 0.7;">· ${run.goal}</span>`;
+      chip.addEventListener('click', () => {
+        el('runLookup').value = run.id;
+        void loadRun(run.id);
+      });
+      listEl.appendChild(chip);
+    });
   }
 
   // Platform Readiness Healthcheck
@@ -107,9 +163,14 @@
       el('authBtnText').textContent = 'Admin Connected';
     }
     if (state.projectId && state.repositoryId) {
-      el('projectIdentity').textContent = `${state.projectName || 'Project'} · ${state.projectId}`;
+      const ident = el('projectIdentity');
+      if (ident) {
+        const textSpan = ident.querySelector('.identity-text');
+        if (textSpan) textSpan.textContent = `${state.projectName || 'Project'} · ${state.projectId}`;
+      }
       el('startRun').disabled = false;
     }
+    renderRecentRuns();
     if (state.runId) {
       el('runLookup').value = state.runId;
       void loadRun(state.runId);
@@ -119,11 +180,9 @@
     }
   }
 
-  // Handle File / Directory Picker for Local Repository Selection
+  // Directory Picker Fallback & Local Git Inspection
   async function selectDirectory(event) {
-    if (event) {
-      event.preventDefault();
-    }
+    if (event) event.preventDefault();
     if (window.showDirectoryPicker) {
       try {
         const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
@@ -250,15 +309,20 @@
       sessionStorage.setItem('autoswe.projectId', state.projectId);
       sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
       sessionStorage.setItem('autoswe.projectName', state.projectName);
-      el('projectIdentity').textContent = `${state.projectName} · ${state.projectId}`;
+      
+      const ident = el('projectIdentity');
+      if (ident) {
+        const textSpan = ident.querySelector('.identity-text');
+        if (textSpan) textSpan.textContent = `${state.projectName} · ${state.projectId}`;
+      }
       el('startRun').disabled = false;
-      showToast('Repository registered inside governed import boundary.');
+      showToast('Repository registered in governed boundary.');
     } catch (error) {
       showToast(error.message, true);
     }
   }
 
-  // Start Autonomous Run Workflow
+  // Start Autonomous Mission Run
   async function startRun(event) {
     event.preventDefault();
     const runBtn = el('startRun');
@@ -266,7 +330,6 @@
     runBtn.disabled = true;
 
     try {
-      // Auto-register project repository if not registered yet in this session
       if (!state.projectId || !state.repositoryId) {
         showToast('Registering repository...');
         const projBody = await api('/api/v1/projects', {
@@ -283,23 +346,30 @@
         sessionStorage.setItem('autoswe.projectId', state.projectId);
         sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
         sessionStorage.setItem('autoswe.projectName', state.projectName);
-        el('projectIdentity').textContent = `${state.projectName} · ${state.projectId}`;
+        
+        const ident = el('projectIdentity');
+        if (ident) {
+          const textSpan = ident.querySelector('.identity-text');
+          if (textSpan) textSpan.textContent = `${state.projectName} · ${state.projectId}`;
+        }
       }
 
-      showToast('Launching agentic run...');
+      showToast('Launching agentic mission...');
+      const goalText = el('runGoal').value.trim();
       const body = await api('/api/v1/runs', {
         method: 'POST',
         body: JSON.stringify({
           project_id: state.projectId,
           repository_id: state.repositoryId,
-          goal: el('runGoal').value.trim(),
+          goal: goalText,
           baseline_commit: el('baselineCommit').value.trim().toLowerCase(),
         }),
       });
       state.runId = body.run_id;
       sessionStorage.setItem('autoswe.runId', state.runId);
       el('runLookup').value = state.runId;
-      showToast('Run launched. Architect agent is synthesizing the execution DAG.');
+      saveRecentRun(state.runId, goalText);
+      showToast('Run launched. Architect agent is synthesizing the DAG.');
       await loadRun(state.runId);
     } catch (error) {
       showToast(error.message, true);
@@ -331,6 +401,7 @@
       state.artifacts = artifacts || [];
       state.events = events || [];
 
+      saveRecentRun(candidate, run.goal);
       renderRun(run);
       setupWebSocket(run.project_id, candidate);
 
@@ -352,7 +423,6 @@
     }
     window.clearTimeout(state.wsReconnectTimer);
 
-    // If there's an active running task, stream from task WebSocket endpoint
     const runningTask = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED');
     if (!runningTask) {
       el('streamStatusText').textContent = 'POLLING ACTIVE';
@@ -394,6 +464,7 @@
 
   // Render Dashboard
   function renderRun(run) {
+    el('onboardingSection').classList.add('hidden');
     el('dashboard').classList.remove('hidden');
     el('runGoalTitle').textContent = run.goal;
     el('runIdText').textContent = run.run_id;
@@ -402,13 +473,21 @@
     // Status Badge
     const statusBadge = el('runStatusBadge');
     statusBadge.textContent = run.state;
-    statusBadge.className = `status-pill ${run.state.toLowerCase()}`;
+    statusBadge.className = `status-badge ${run.state.toLowerCase()}`;
 
     // Metrics
     el('runState').textContent = run.state;
     el('stateDuration').textContent = `${formatDuration(run.state_duration_seconds)} in current state`;
     el('planRevision').textContent = run.active_plan_revision === null ? 'Planning' : `r${run.active_plan_revision}`;
     el('taskSummary').textContent = summarizeCounts(run.task_counts);
+
+    // Calculate Task Progress Fill
+    const taskCounts = run.task_counts || {};
+    const totalTasks = Object.values(taskCounts).reduce((a, b) => a + b, 0);
+    const completedTasks = taskCounts.COMPLETED || 0;
+    const pct = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    const progressFill = el('dagProgressBar');
+    if (progressFill) progressFill.style.width = `${pct}%`;
 
     const totalTokens = (run.model_input_tokens || 0) + (run.model_output_tokens || 0);
     el('tokenTotal').textContent = totalTokens.toLocaleString();
@@ -421,7 +500,7 @@
     renderEvents(state.events);
   }
 
-  // Topological DAG Layout & Column Grouping Engine
+  // Topological DAG Layout & Stage Grouping Engine
   function renderDAG(tasks) {
     const root = el('taskDag');
     const svg = el('dagSvgConnections');
@@ -429,11 +508,11 @@
     svg.replaceChildren();
 
     if (!tasks || !tasks.length) {
-      root.innerHTML = '<div class="empty-state">Waiting for the Architect agent to synthesize execution DAG...</div>';
+      root.innerHTML = '<div class="empty-state"><div class="empty-spinner"></div><p>Architect agent is synthesizing the execution DAG...</p></div>';
       return;
     }
 
-    // Compute topological ranks / levels for each task
+    // Compute topological ranks for each task
     const taskMap = new Map(tasks.map(t => [t.id, t]));
     const ranks = new Map();
 
@@ -459,7 +538,7 @@
 
     tasks.forEach(t => getRank(t.id));
 
-    // Group tasks by calculated level
+    // Group tasks by rank
     const maxRank = Math.max(...Array.from(ranks.values()), 0);
     const columns = Array.from({ length: maxRank + 1 }, () => []);
 
@@ -468,16 +547,31 @@
       columns[rank].push(t);
     });
 
-    const levelNames = ['Stage 1: Discovery & Research', 'Stage 2: Implementation', 'Stage 3: Verification & Test', 'Stage 4: Validation & Review', 'Stage 5: Finalization'];
+    const levelNames = [
+      'Stage 1: Discovery & Research',
+      'Stage 2: Architecture & Plan',
+      'Stage 3: Implementation',
+      'Stage 4: Verification & Test',
+      'Stage 5: Review & Finalization'
+    ];
 
-    // Render Columns & Nodes
+    // Render Columns & Task Cards
     columns.forEach((columnTasks, levelIdx) => {
       const colEl = document.createElement('div');
       colEl.className = 'dag-column';
 
       const colHeader = document.createElement('div');
       colHeader.className = 'dag-column-header';
-      colHeader.textContent = levelNames[levelIdx] || `Stage ${levelIdx + 1}`;
+      
+      const titleSpan = document.createElement('span');
+      titleSpan.textContent = levelNames[levelIdx] || `Stage ${levelIdx + 1}`;
+      
+      const countBadge = document.createElement('span');
+      countBadge.className = 'brand-version-pill';
+      const completedCount = columnTasks.filter(t => t.state === 'COMPLETED').length;
+      countBadge.textContent = `${completedCount}/${columnTasks.length}`;
+
+      colHeader.append(titleSpan, countBadge);
       colEl.append(colHeader);
 
       columnTasks.forEach(task => {
@@ -494,7 +588,7 @@
         typeTag.textContent = task.task_type;
 
         const statusPill = document.createElement('span');
-        statusPill.className = `status-pill ${task.state.toLowerCase()}`;
+        statusPill.className = `status-badge ${task.state.toLowerCase()}`;
         statusPill.textContent = task.state;
         header.append(typeTag, statusPill);
 
@@ -504,8 +598,8 @@
 
         const meta = document.createElement('div');
         meta.className = 'task-node-meta';
-        const depsCount = task.dependencies.length;
-        meta.innerHTML = `<span>${task.assigned_capability}</span><span>${depsCount ? `${depsCount} dep${depsCount > 1 ? 's' : ''}` : 'Root task'}</span>`;
+        const depsCount = task.dependencies ? task.dependencies.length : 0;
+        meta.innerHTML = `<span>${task.assigned_capability}</span><span>${depsCount ? `${depsCount} dep${depsCount > 1 ? 's' : ''}` : 'Root'}</span>`;
 
         node.append(header, title, meta);
         node.addEventListener('click', () => openTaskDrawer(task));
@@ -515,17 +609,27 @@
       root.append(colEl);
     });
 
-    // Draw SVG dependency curves after layout rendering
     window.requestAnimationFrame(() => drawDAGConnectors(tasks));
   }
 
-  // Draw Smooth Bezier Connections between Dependency Nodes
+  // Draw Smooth Bezier Curves between DAG Nodes
   function drawDAGConnectors(tasks) {
     const svg = el('dagSvgConnections');
     const viewport = el('dagViewport');
     if (!svg || !viewport) return;
 
     svg.replaceChildren();
+
+    // Re-insert defs gradient
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = `
+      <linearGradient id="activeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#06b6d4" />
+        <stop offset="100%" stop-color="#38bdf8" />
+      </linearGradient>
+    `;
+    svg.appendChild(defs);
+
     const viewportRect = viewport.getBoundingClientRect();
     svg.setAttribute('width', viewport.scrollWidth);
     svg.setAttribute('height', viewport.scrollHeight);
@@ -540,7 +644,6 @@
         if (!parentNode) return;
         const parentRect = parentNode.getBoundingClientRect();
 
-        // Calculate connection coordinates relative to scrollable viewport
         const startX = parentRect.right - viewportRect.left + viewport.scrollLeft;
         const startY = parentRect.top + (parentRect.height / 2) - viewportRect.top + viewport.scrollTop;
         const endX = childRect.left - viewportRect.left + viewport.scrollLeft;
@@ -549,18 +652,20 @@
         const dx = Math.max(Math.abs(endX - startX) * 0.5, 30);
         const pathData = `M ${startX} ${startY} C ${startX + dx} ${startY}, ${endX - dx} ${endY}, ${endX} ${endY}`;
 
+        const isRunning = task.state === 'RUNNING' || task.state === 'LEASED';
+
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', pathData);
         path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', '#2a3e56');
-        path.setAttribute('stroke-width', '1.8');
-        path.setAttribute('stroke-dasharray', '4 2');
+        path.setAttribute('stroke', isRunning ? 'url(#activeGrad)' : 'rgba(255, 255, 255, 0.15)');
+        path.setAttribute('stroke-width', isRunning ? '2.4' : '1.6');
+        path.setAttribute('stroke-dasharray', isRunning ? '6 3' : '4 2');
         svg.append(path);
       });
     });
   }
 
-  // Task Detail Drawer
+  // Slide-Over Task Detail Drawer
   function openTaskDrawer(task) {
     state.selectedTask = task;
     el('drawerTaskType').textContent = task.task_type;
@@ -573,18 +678,18 @@
 
     el('drawerTaskCapability').textContent = task.assigned_capability;
     el('drawerTaskPriority').textContent = `Priority ${task.priority}`;
-    el('drawerTaskDeps').textContent = task.dependencies.length ? task.dependencies.join(', ') : 'None (Root)';
+    el('drawerTaskDeps').textContent = task.dependencies && task.dependencies.length ? task.dependencies.join(', ') : 'None (Root)';
     el('drawerTaskRevision').textContent = `r${task.plan_revision}`;
 
     el('drawerTaskGoal').textContent = task.goal || task.title;
 
-    // Filter events associated with this task
+    // Filter events for this task
     const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.id);
     const eventsContainer = el('drawerTaskEvents');
     eventsContainer.replaceChildren();
 
     if (!taskEvents.length) {
-      eventsContainer.innerHTML = '<p class="empty-text">No direct events recorded for this task yet.</p>';
+      eventsContainer.innerHTML = '<p class="empty-text">No direct activity recorded for this task yet.</p>';
     } else {
       taskEvents.forEach(evt => {
         const item = document.createElement('div');
@@ -732,7 +837,7 @@
     });
   }
 
-  // Artifact Preview & Download
+  // Artifact Preview & Diff Formatting
   async function previewArtifact(projectId, artifact) {
     el('modalArtifactType').textContent = artifact.media_type;
     el('modalArtifactTitle').textContent = `Artifact ${artifact.artifact_id.slice(0, 8)}`;
@@ -747,10 +852,29 @@
       });
       if (!response.ok) throw new Error(`Fetch failed (${response.status})`);
       const text = await response.text();
-      el('artifactPreviewCode').textContent = text || '(Empty content)';
+      
+      // Syntax-highlight diff additions / deletions
+      if (artifact.media_type === 'DIFF' || text.startsWith('diff --git') || text.includes('@@ -')) {
+        const lines = text.split('\n');
+        const formatted = lines.map(line => {
+          if (line.startsWith('+') && !line.startsWith('+++')) {
+            return `<span class="diff-line-add">${escapeHtml(line)}</span>`;
+          } else if (line.startsWith('-') && !line.startsWith('---')) {
+            return `<span class="diff-line-del">${escapeHtml(line)}</span>`;
+          }
+          return escapeHtml(line);
+        }).join('\n');
+        el('artifactPreviewCode').innerHTML = formatted || '(Empty content)';
+      } else {
+        el('artifactPreviewCode').textContent = text || '(Empty content)';
+      }
     } catch (err) {
       el('artifactPreviewCode').textContent = `Failed to preview artifact: ${err.message}`;
     }
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   async function downloadArtifact(projectId, artifact) {
@@ -771,21 +895,31 @@
     }
   }
 
-  // Render Immutable Audit Events Timeline
+  // Render Immutable Audit Events Timeline with Live Search
   function renderEvents(events) {
     const root = el('eventList');
     root.replaceChildren();
 
+    const query = (state.searchQuery || '').toLowerCase().trim();
+
     const filtered = (events || []).filter(e => {
-      if (state.currentFilter === 'ALL') return true;
-      if (state.currentFilter === 'TASK') return e.event_type.startsWith('task.');
-      if (state.currentFilter === 'TOOL') return e.event_type.startsWith('tool.');
-      if (state.currentFilter === 'APPROVAL') return e.event_type.startsWith('approval.');
+      // Category filter
+      if (state.currentFilter === 'TASK' && !e.event_type.startsWith('task.')) return false;
+      if (state.currentFilter === 'TOOL' && !e.event_type.startsWith('tool.')) return false;
+      if (state.currentFilter === 'APPROVAL' && !e.event_type.startsWith('approval.')) return false;
+
+      // Text search query filter
+      if (query) {
+        const payloadStr = JSON.stringify(e.payload || {}).toLowerCase();
+        const typeStr = e.event_type.toLowerCase();
+        if (!typeStr.includes(query) && !payloadStr.includes(query)) return false;
+      }
+
       return true;
     });
 
     if (!filtered.length) {
-      root.innerHTML = '<li class="empty-state">No matching events in audit timeline.</li>';
+      root.innerHTML = '<li class="timeline-empty">No matching events found in audit trail.</li>';
       return;
     }
 
@@ -847,7 +981,7 @@
     state.token = el('adminToken').value.trim();
     sessionStorage.setItem('autoswe.adminToken', state.token);
     el('authBtnText').textContent = 'Admin Connected';
-    showToast('Admin token saved for this browser session.');
+    showToast('Admin token saved for this session.');
     closeAuth();
     if (state.runId) void loadRun(state.runId);
   });
@@ -856,17 +990,86 @@
   el('dirPickerFallback').addEventListener('change', handleFallbackDirPicker);
   el('projectForm').addEventListener('submit', registerProject);
   el('runForm').addEventListener('submit', startRun);
+  
   el('lookupForm').addEventListener('submit', (e) => {
     e.preventDefault();
     void loadRun(el('runLookup').value);
   });
 
   el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
+  
   el('copyRunId').addEventListener('click', async () => {
     if (!state.runId) return;
     await navigator.clipboard.writeText(state.runId);
     showToast('Run ID copied to clipboard.');
   });
+
+  // Switch to New Mission Launchpad
+  const newRunBtn = el('newRunBtn');
+  if (newRunBtn) {
+    newRunBtn.addEventListener('click', () => {
+      window.clearTimeout(state.pollTimer);
+      if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+      }
+      el('dashboard').classList.add('hidden');
+      el('onboardingSection').classList.remove('hidden');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  // Brand Logo Click: Return to Launchpad
+  const brandLogo = el('brandLogo');
+  if (brandLogo) {
+    brandLogo.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (!el('dashboard').classList.contains('hidden')) {
+        el('dashboard').classList.add('hidden');
+        el('onboardingSection').classList.remove('hidden');
+      }
+    });
+  }
+
+  // Prompt Preset Chips Click Binding
+  document.querySelectorAll('.preset-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const goal = chip.dataset.goal;
+      if (goal) {
+        el('runGoal').value = goal;
+        showToast(`Preset loaded: ${chip.dataset.title || 'Goal'}`);
+        el('runGoal').focus();
+      }
+    });
+  });
+
+  // Fill Sample SHA Helper Button
+  const fillSampleShaBtn = el('fillSampleSha');
+  if (fillSampleShaBtn) {
+    fillSampleShaBtn.addEventListener('click', () => {
+      el('baselineCommit').value = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+      showToast('Filled sample commit SHA.');
+    });
+  }
+
+  // Clear Recent Runs Button
+  const clearRecentBtn = el('clearRecentRuns');
+  if (clearRecentBtn) {
+    clearRecentBtn.addEventListener('click', () => {
+      localStorage.removeItem(RECENT_RUNS_KEY);
+      renderRecentRuns();
+      showToast('Recent runs cleared.');
+    });
+  }
+
+  // Event Search Input
+  const eventSearchInput = el('eventSearchInput');
+  if (eventSearchInput) {
+    eventSearchInput.addEventListener('input', (e) => {
+      state.searchQuery = e.target.value;
+      renderEvents(state.events);
+    });
+  }
 
   // Modal Closers
   el('closeDrawer').addEventListener('click', () => el('taskDrawer').close());
@@ -884,14 +1087,29 @@
 
   // Global Keyboard Shortcuts
   window.addEventListener('keydown', (e) => {
-    if (e.key === '/' && document.activeElement !== el('runLookup') && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    const isInputActive = document.activeElement && 
+      (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA');
+
+    if ((e.key === '/' || (e.key === 'k' && (e.metaKey || e.ctrlKey))) && document.activeElement !== el('runLookup')) {
       e.preventDefault();
       el('runLookup').focus();
+      el('runLookup').select();
     }
     if (e.key === 'Escape') {
       if (el('taskDrawer').open) el('taskDrawer').close();
       if (el('artifactDialog').open) el('artifactDialog').close();
       if (el('authDialog').open) el('authDialog').close();
+    }
+    if (!isInputActive) {
+      if (e.key === '1') {
+        document.querySelectorAll('#timelineFilters .pill')[0]?.click();
+      } else if (e.key === '2') {
+        document.querySelectorAll('#timelineFilters .pill')[1]?.click();
+      } else if (e.key === '3') {
+        document.querySelectorAll('#timelineFilters .pill')[2]?.click();
+      } else if (e.key === '4') {
+        document.querySelectorAll('#timelineFilters .pill')[3]?.click();
+      }
     }
   });
 
