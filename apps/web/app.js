@@ -107,11 +107,17 @@
     if (!state.token) {
       window.setTimeout(openAuth, 300);
     }
+  }
+
   // Handle File / Directory Picker for Local Repository Selection
-  async function selectDirectory() {
+  async function selectDirectory(event) {
+    if (event) {
+      event.preventDefault();
+    }
     if (window.showDirectoryPicker) {
       try {
         const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+        if (!dirHandle) return;
         const dirName = dirHandle.name;
         el('projectName').value = dirName;
         el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
@@ -149,13 +155,17 @@
           }
         } catch (_) {}
         showToast(`Selected repository directory: ${dirName}`);
+        return;
       } catch (err) {
-        if (err.name !== 'AbortError') {
-          showToast(`Directory picker: ${err.message}`, true);
-        }
+        if (err.name === 'AbortError') return;
+        console.warn('showDirectoryPicker unavailable, falling back to input:', err);
       }
-    } else {
-      el('dirPickerFallback').click();
+    }
+
+    const fallbackInput = el('dirPickerFallback');
+    if (fallbackInput) {
+      fallbackInput.value = '';
+      fallbackInput.click();
     }
   }
 
@@ -168,7 +178,47 @@
       const dirName = pathParts[0];
       el('projectName').value = dirName;
       el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
-      showToast(`Selected folder: ${dirName}`);
+      
+      let headFile = null;
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].webkitRelativePath === `${dirName}/.git/HEAD`) {
+          headFile = files[i];
+          break;
+        }
+      }
+
+      if (headFile) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = (e.target.result || '').trim();
+          if (text.startsWith('ref: refs/heads/')) {
+            const branch = text.replace('ref: refs/heads/', '').trim();
+            el('defaultBranch').value = branch;
+
+            for (let j = 0; j < files.length; j++) {
+              if (files[j].webkitRelativePath === `${dirName}/.git/refs/heads/${branch}`) {
+                const refReader = new FileReader();
+                refReader.onload = (re) => {
+                  const commit = (re.target.result || '').trim();
+                  if (commit && commit.length >= 40) {
+                    el('baselineCommit').value = commit;
+                    showToast(`Selected "${dirName}" (${branch} · ${commit.slice(0, 8)})`);
+                  }
+                };
+                refReader.readAsText(files[j]);
+                return;
+              }
+            }
+            showToast(`Selected "${dirName}" (Branch: ${branch})`);
+          } else if (text.length >= 40) {
+            el('baselineCommit').value = text;
+            showToast(`Selected "${dirName}" (Commit: ${text.slice(0, 8)})`);
+          }
+        };
+        reader.readAsText(headFile);
+      } else {
+        showToast(`Selected folder: ${dirName}`);
+      }
     }
   }
 
