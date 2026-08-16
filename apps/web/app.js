@@ -78,13 +78,23 @@
       const response = await fetch('/health/ready');
       const body = await response.json();
       const ready = response.ok && body.ready;
-      el('healthDot').className = `status-dot ${ready ? 'ready' : 'failed'}`;
-      const unavailable = Object.entries(body.dependencies || {})
+      const deps = body.dependencies || {};
+      const unavailable = Object.entries(deps)
         .filter(([, val]) => !val)
         .map(([name]) => name);
-      el('healthText').textContent = ready
-        ? 'Platform Ready'
-        : `Degraded: ${unavailable.join(', ') || 'dependencies'}`;
+
+      const coreReady = Boolean(deps.postgres && deps.redis && deps.sandbox && deps.model);
+
+      if (ready) {
+        el('healthDot').className = 'status-dot ready';
+        el('healthText').textContent = 'Platform Ready';
+      } else if (coreReady && unavailable.length === 1 && unavailable[0] === 'uams') {
+        el('healthDot').className = 'status-dot ready';
+        el('healthText').textContent = 'Platform Ready (UAMS offline)';
+      } else {
+        el('healthDot').className = 'status-dot failed';
+        el('healthText').textContent = `Degraded: ${unavailable.join(', ') || 'dependencies'}`;
+      }
     } catch (_) {
       el('healthDot').className = 'status-dot failed';
       el('healthText').textContent = 'Control Plane Offline';
@@ -251,10 +261,32 @@
   // Start Autonomous Run Workflow
   async function startRun(event) {
     event.preventDefault();
-    if (!state.projectId || !state.repositoryId) {
-      return showToast('Please register a project repository first.', true);
-    }
+    const runBtn = el('startRun');
+    const originalText = runBtn.innerHTML;
+    runBtn.disabled = true;
+
     try {
+      // Auto-register project repository if not registered yet in this session
+      if (!state.projectId || !state.repositoryId) {
+        showToast('Registering repository...');
+        const projBody = await api('/api/v1/projects', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: el('projectName').value.trim(),
+            source_path: el('sourcePath').value.trim(),
+            default_branch: el('defaultBranch').value.trim(),
+          }),
+        });
+        state.projectId = projBody.project_id;
+        state.repositoryId = projBody.repository_id;
+        state.projectName = el('projectName').value.trim();
+        sessionStorage.setItem('autoswe.projectId', state.projectId);
+        sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
+        sessionStorage.setItem('autoswe.projectName', state.projectName);
+        el('projectIdentity').textContent = `${state.projectName} · ${state.projectId}`;
+      }
+
+      showToast('Launching agentic run...');
       const body = await api('/api/v1/runs', {
         method: 'POST',
         body: JSON.stringify({
@@ -271,6 +303,9 @@
       await loadRun(state.runId);
     } catch (error) {
       showToast(error.message, true);
+    } finally {
+      runBtn.disabled = false;
+      runBtn.innerHTML = originalText;
     }
   }
 
