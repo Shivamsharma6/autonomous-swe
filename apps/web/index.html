@@ -3,108 +3,372 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="AutoSWE production agentic workflow control plane">
+  <meta name="description" content="AutoSWE production agentic workflow and task DAG control plane">
   <title>AutoSWE Control Plane</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="app-shell">
+    <!-- Top Navigation Bar -->
     <header class="topbar">
-      <a class="brand" href="#" aria-label="AutoSWE home">
-        <span class="brand-mark">A</span>
-        <span><strong>AutoSWE</strong><small>Agentic engineering control plane</small></span>
-      </a>
-      <div class="connection">
-        <span id="healthDot" class="dot unknown"></span>
-        <span id="healthText">Checking platform</span>
-        <button id="openAuth" class="button ghost" type="button">Admin access</button>
+      <div class="brand-group">
+        <a class="brand" href="#" aria-label="AutoSWE Home">
+          <div class="brand-logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-title">AutoSWE</span>
+            <span class="brand-subtitle">Autonomous Engineering Plane</span>
+          </div>
+        </a>
+      </div>
+
+      <!-- Quick Run Search -->
+      <div class="topbar-search">
+        <form id="lookupForm" class="search-form">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+          </svg>
+          <input id="runLookup" type="text" autocomplete="off" placeholder="Jump to Run ID (press / to focus)" required>
+          <button class="button search-button" type="submit">Open</button>
+        </form>
+      </div>
+
+      <!-- System Status & Auth -->
+      <div class="topbar-actions">
+        <div class="status-indicator" id="healthStatus" title="Control plane health status">
+          <span id="healthDot" class="status-dot unknown"></span>
+          <span id="healthText" class="status-label">Checking system</span>
+        </div>
+        <button id="openAuth" class="button secondary auth-btn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          <span id="authBtnText">Admin Access</span>
+        </button>
       </div>
     </header>
 
-    <main>
-      <section class="hero panel">
-        <div>
-          <p class="eyebrow">Durable · governed · observable</p>
-          <h1>Build software through a dynamic, typed task DAG.</h1>
-          <p class="lede">PostgreSQL owns domain truth. LangGraph checkpoints own graph progress. UAMS stores only promoted, verified knowledge.</p>
-        </div>
-        <form id="lookupForm" class="lookup">
-          <label for="runLookup">Run ID</label>
-          <div class="input-row">
-            <input id="runLookup" autocomplete="off" placeholder="UUID" required>
-            <button class="button primary" type="submit">Open run</button>
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Workflow Initiation Section (Hero & Forms) -->
+      <section id="onboardingSection" class="section-container">
+        <div class="hero-card">
+          <div class="hero-content">
+            <div class="badge-pill">Durable · Governed · Observable</div>
+            <h1 class="hero-title">Orchestrate Autonomous Software Engineering</h1>
+            <p class="hero-description">
+              Execute complex software modifications through dynamic, typed task DAGs. 
+              PostgreSQL guarantees transactional state, LangGraph governs agent turns, and sandboxed Docker runners enforce strict isolation boundaries.
+            </p>
           </div>
-        </form>
-      </section>
-
-      <section class="launch-grid">
-        <form id="projectForm" class="panel form-card">
-          <div class="section-heading"><span>01</span><div><h2>Import repository</h2><p>Only paths inside the configured import root are accepted.</p></div></div>
-          <label>Project name<input id="projectName" value="SaaS showcase" required maxlength="300"></label>
-          <label>Repository path<input id="sourcePath" value="/var/lib/autoswe/imports/showcase" required></label>
-          <label>Default branch<input id="defaultBranch" value="main" required></label>
-          <button class="button secondary" type="submit">Register project</button>
-          <p id="projectIdentity" class="identity">No project registered in this session.</p>
-        </form>
-
-        <form id="runForm" class="panel form-card">
-          <div class="section-heading"><span>02</span><div><h2>Start workflow</h2><p>The architect generates the bounded execution DAG.</p></div></div>
-          <label>Engineering goal<textarea id="runGoal" required rows="4" placeholder="Build a production-ready billing portal with tests and documentation."></textarea></label>
-          <label>Immutable baseline commit<input id="baselineCommit" required minlength="40" maxlength="64" placeholder="40–64 character Git commit SHA"></label>
-          <button id="startRun" class="button primary" type="submit" disabled>Start agentic run</button>
-          <p class="identity">Commits and other high-risk effects require an exact, expiring approval.</p>
-        </form>
-      </section>
-
-      <section id="dashboard" class="dashboard hidden" aria-live="polite">
-        <div class="dashboard-title">
-          <div><p class="eyebrow">Authoritative run state</p><h2 id="runGoalTitle">Workflow</h2></div>
-          <div class="run-id"><span>Run</span><code id="runIdText"></code><button id="copyRunId" class="icon-button" title="Copy run ID" type="button">Copy</button></div>
         </div>
 
-        <div class="metrics">
-          <article class="metric"><span>Workflow state</span><strong id="runState">—</strong><small id="stateDuration">—</small></article>
-          <article class="metric"><span>Plan revision</span><strong id="planRevision">—</strong><small id="taskSummary">No tasks</small></article>
-          <article class="metric"><span>Model tokens</span><strong id="tokenTotal">0</strong><small id="tokenDetail">0 in · 0 out</small></article>
-          <article class="metric"><span>Model cost</span><strong id="modelCost">$0.00</strong><small>Durably accounted</small></article>
+        <div class="initiation-grid">
+          <!-- Step 1: Project Registration -->
+          <div class="card form-card">
+            <div class="card-header">
+              <div class="step-badge">1</div>
+              <div>
+                <h2 class="card-title">Register Repository</h2>
+                <p class="card-subtitle">Source paths within the governed import boundary.</p>
+              </div>
+            </div>
+            <form id="projectForm" class="styled-form">
+              <div class="form-group">
+                <label for="projectName">Project Name</label>
+                <input id="projectName" type="text" value="Production Showcase" required maxlength="300">
+              </div>
+              <div class="form-group">
+                <label for="sourcePath">Repository Source Path</label>
+                <input id="sourcePath" type="text" value="/var/lib/autoswe/imports/showcase" required>
+              </div>
+              <div class="form-group">
+                <label for="defaultBranch">Default Branch</label>
+                <input id="defaultBranch" type="text" value="main" required>
+              </div>
+              <button class="button secondary full-width" type="submit">
+                <span>Register Repository</span>
+              </button>
+              <div id="projectIdentity" class="identity-banner">No project registered in this session.</div>
+            </form>
+          </div>
+
+          <!-- Step 2: Start Workflow Run -->
+          <div class="card form-card">
+            <div class="card-header">
+              <div class="step-badge">2</div>
+              <div>
+                <h2 class="card-title">Launch Workflow Run</h2>
+                <p class="card-subtitle">The Architect agent decomposes goals into a typed DAG.</p>
+              </div>
+            </div>
+            <form id="runForm" class="styled-form">
+              <div class="form-group">
+                <label for="runGoal">Engineering Goal & Specifications</label>
+                <textarea id="runGoal" rows="4" required placeholder="e.g. Implement resilient webhook retry mechanism with exponential backoff, unit tests, and metrics."></textarea>
+              </div>
+              <div class="form-group">
+                <label for="baselineCommit">Baseline Git Commit SHA</label>
+                <input id="baselineCommit" type="text" required minlength="40" maxlength="64" placeholder="40–64 character SHA-1/SHA-256 commit hash">
+              </div>
+              <button id="startRun" class="button primary full-width" type="submit" disabled>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                <span>Start Agentic Run</span>
+              </button>
+              <p class="form-note">
+                High-risk operations and git commits require explicit operator approval.
+              </p>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active Run Dashboard Section -->
+      <section id="dashboard" class="dashboard-section hidden" aria-live="polite">
+        <!-- Run Header & Meta -->
+        <div class="dashboard-header card">
+          <div class="run-info">
+            <div class="run-title-row">
+              <span id="runStatusBadge" class="status-pill">RUNNING</span>
+              <h2 id="runGoalTitle" class="run-headline">Workflow Execution</h2>
+            </div>
+            <div class="run-meta-row">
+              <span class="meta-label">Run ID:</span>
+              <code id="runIdText" class="code-badge"></code>
+              <button id="copyRunId" class="button ghost icon-btn" title="Copy Run ID" type="button">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+              </button>
+              <span class="meta-divider">•</span>
+              <span class="meta-label">Project:</span>
+              <span id="runProjectName" class="meta-value">—</span>
+            </div>
+          </div>
+          <div class="run-actions">
+            <div id="liveStreamBadge" class="stream-pill live">
+              <span class="live-dot"></span>
+              <span id="streamStatusText">LIVE STREAM</span>
+            </div>
+            <button id="refreshRun" class="button ghost" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
 
-        <div class="content-grid">
-          <section class="panel span-two">
-            <div class="panel-heading"><div><h3>Dynamic task DAG</h3><p>Scheduler state is independent from each LangGraph checkpoint.</p></div><span id="pollStatus" class="live-chip">Live</span></div>
-            <div id="taskDag" class="task-dag empty">Waiting for the architect.</div>
-          </section>
+        <!-- Metrics Overview Grid -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-title">Workflow State</span>
+            <div class="metric-value-row">
+              <strong id="runState" class="metric-value">—</strong>
+            </div>
+            <span id="stateDuration" class="metric-subtext">—</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-title">Plan Revision</span>
+            <div class="metric-value-row">
+              <strong id="planRevision" class="metric-value">—</strong>
+            </div>
+            <span id="taskSummary" class="metric-subtext">No tasks</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-title">Model Tokens</span>
+            <div class="metric-value-row">
+              <strong id="tokenTotal" class="metric-value">0</strong>
+            </div>
+            <span id="tokenDetail" class="metric-subtext">0 in · 0 out</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-title">Model Cost</span>
+            <div class="metric-value-row">
+              <strong id="modelCost" class="metric-value">$0.0000</strong>
+            </div>
+            <span class="metric-subtext">Authoritatively Tracked</span>
+          </div>
+        </div>
 
-          <section class="panel">
-            <div class="panel-heading"><div><h3>Approval queue</h3><p>Decisions bind to the exact call hash.</p></div></div>
-            <div id="approvalList" class="stack empty">No approvals.</div>
-          </section>
+        <!-- Main Dashboard View: DAG & Panels -->
+        <div class="dashboard-layout">
+          <!-- Dynamic Task DAG Container -->
+          <div class="card dag-panel">
+            <div class="panel-header">
+              <div>
+                <h3 class="panel-title">Dynamic Task DAG</h3>
+                <p class="panel-subtitle">Topologically ranked execution graph with live task state telemetry.</p>
+              </div>
+              <div class="dag-legend">
+                <span class="legend-item"><span class="legend-dot pending"></span>Pending</span>
+                <span class="legend-item"><span class="legend-dot running"></span>Running</span>
+                <span class="legend-item"><span class="legend-dot completed"></span>Completed</span>
+                <span class="legend-item"><span class="legend-dot failed"></span>Failed</span>
+              </div>
+            </div>
+            
+            <div class="dag-viewport" id="dagViewport">
+              <svg id="dagSvgConnections" class="dag-svg"></svg>
+              <div id="taskDag" class="task-dag-container">
+                <div class="empty-state">Waiting for the Architect agent to synthesize execution DAG...</div>
+              </div>
+            </div>
+          </div>
 
-          <section class="panel">
-            <div class="panel-heading"><div><h3>Verified artifacts</h3><p>Downloads re-check object SHA-256.</p></div></div>
-            <div id="artifactList" class="stack empty">No evidence yet.</div>
-          </section>
+          <!-- Side Columns: Approvals & Artifacts -->
+          <div class="side-panel-stack">
+            <!-- Approval Queue -->
+            <div class="card approvals-panel">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Governed Approvals</h3>
+                  <p class="panel-subtitle">Expiring decisions for high-risk side effects.</p>
+                </div>
+                <span id="pendingApprovalsCount" class="count-badge hidden">0</span>
+              </div>
+              <div id="approvalList" class="stack-container empty-state">No pending approvals.</div>
+            </div>
 
-          <section class="panel span-two">
-            <div class="panel-heading"><div><h3>Immutable audit timeline</h3><p>Correlated state, planning, repair, release, and tool events.</p></div><button id="refreshRun" class="button ghost" type="button">Refresh</button></div>
-            <ol id="eventList" class="timeline empty"><li>No events yet.</li></ol>
-          </section>
+            <!-- Verified Artifacts -->
+            <div class="card artifacts-panel">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Verified Artifacts</h3>
+                  <p class="panel-subtitle">Content-addressed objects with SHA-256 verification.</p>
+                </div>
+              </div>
+              <div id="artifactList" class="stack-container empty-state">No artifacts generated yet.</div>
+            </div>
+          </div>
+
+          <!-- Immutable Audit Timeline Full Width -->
+          <div class="card timeline-panel">
+            <div class="panel-header">
+              <div>
+                <h3 class="panel-title">Immutable Audit Trail</h3>
+                <p class="panel-subtitle">Correlated domain state transitions, agent decisions, and tool executions.</p>
+              </div>
+              <div class="filter-pills" id="timelineFilters">
+                <button class="pill active" data-filter="ALL" type="button">All Events</button>
+                <button class="pill" data-filter="TASK" type="button">Tasks</button>
+                <button class="pill" data-filter="TOOL" type="button">Tools</button>
+                <button class="pill" data-filter="APPROVAL" type="button">Approvals</button>
+              </div>
+            </div>
+            <div class="timeline-container">
+              <ol id="eventList" class="timeline-list">
+                <li class="timeline-empty">No events recorded.</li>
+              </ol>
+            </div>
+          </div>
         </div>
       </section>
     </main>
 
-    <footer><span>Single-machine Docker Compose</span><span>External UAMS · A2A intentionally out of scope</span></footer>
+    <!-- Footer -->
+    <footer class="app-footer">
+      <div class="footer-meta">
+        <span>AutoSWE Control Plane</span>
+        <span class="meta-divider">•</span>
+        <span>PostgreSQL & Redis Streams Architecture</span>
+      </div>
+      <div class="footer-links">
+        <span>Single-Machine Sandbox Boundary</span>
+      </div>
+    </footer>
   </div>
 
-  <dialog id="authDialog">
-    <form id="authForm" method="dialog" class="auth-card">
-      <div><p class="eyebrow">Operator authentication</p><h2>Admin bearer token</h2><p>The token stays in session storage and is never written into platform state.</p></div>
-      <label>Token<input id="adminToken" type="password" minlength="32" autocomplete="current-password" required></label>
-      <div class="dialog-actions"><button id="clearToken" class="button ghost" type="button">Clear</button><button class="button primary" value="save" type="submit">Save for session</button></div>
+  <!-- Task Detail Drawer / Modal -->
+  <dialog id="taskDrawer" class="drawer-dialog">
+    <div class="drawer-content">
+      <div class="drawer-header">
+        <div>
+          <span id="drawerTaskType" class="type-tag">IMPLEMENTATION</span>
+          <h3 id="drawerTaskTitle" class="drawer-title">Task Details</h3>
+        </div>
+        <button id="closeDrawer" class="button ghost icon-btn" type="button" aria-label="Close details">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="drawer-body">
+        <div class="drawer-section">
+          <h4>Status & Assignment</h4>
+          <div class="detail-grid">
+            <div><span class="detail-label">Task ID</span><code id="drawerTaskId" class="code-text"></code></div>
+            <div><span class="detail-label">State</span><span id="drawerTaskState" class="state-pill"></span></div>
+            <div><span class="detail-label">Assigned Capability</span><span id="drawerTaskCapability" class="detail-value"></span></div>
+            <div><span class="detail-label">Priority</span><span id="drawerTaskPriority" class="detail-value"></span></div>
+            <div><span class="detail-label">Dependencies</span><span id="drawerTaskDeps" class="detail-value"></span></div>
+            <div><span class="detail-label">Plan Revision</span><span id="drawerTaskRevision" class="detail-value"></span></div>
+          </div>
+        </div>
+
+        <div class="drawer-section">
+          <h4>Goal & Specification</h4>
+          <div id="drawerTaskGoal" class="markdown-preview"></div>
+        </div>
+
+        <div class="drawer-section">
+          <h4>Recent Task Activity</h4>
+          <div id="drawerTaskEvents" class="task-events-list">
+            <p class="empty-text">No activity recorded for this task.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Artifact Preview Modal -->
+  <dialog id="artifactDialog" class="modal-dialog">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <span id="modalArtifactType" class="type-tag">DIFF</span>
+          <h3 id="modalArtifactTitle" class="modal-title">Artifact Preview</h3>
+          <p id="modalArtifactMeta" class="modal-subtitle"></p>
+        </div>
+        <button id="closeArtifactModal" class="button ghost icon-btn" type="button" aria-label="Close modal">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <pre id="artifactPreviewCode" class="code-preview"><code>Loading artifact preview...</code></pre>
+      </div>
+      <div class="modal-footer">
+        <button id="downloadArtifactBtn" class="button primary" type="button">Download Object</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Operator Authentication Dialog -->
+  <dialog id="authDialog" class="modal-dialog">
+    <form id="authForm" method="dialog" class="modal-card auth-dialog-card">
+      <div class="modal-header">
+        <div>
+          <div class="badge-pill">Operator Security</div>
+          <h3 class="modal-title">Admin Bearer Token</h3>
+          <p class="modal-subtitle">Stored securely in session storage for direct API and WebSocket authorization.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="adminToken">Admin Token (min 32 chars)</label>
+          <input id="adminToken" type="password" minlength="32" autocomplete="current-password" required placeholder="Enter AUTOSWE_ADMIN_TOKEN">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="clearToken" class="button ghost" type="button">Clear</button>
+        <button class="button primary" value="save" type="submit">Save Session Token</button>
+      </div>
     </form>
   </dialog>
 
-  <div id="toast" class="toast hidden" role="status"></div>
+  <!-- Toast Notification -->
+  <div id="toast" class="toast-notification hidden" role="status" aria-live="assertive"></div>
+
   <script src="app.js" defer></script>
 </body>
 </html>

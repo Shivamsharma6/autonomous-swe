@@ -1,80 +1,115 @@
 (() => {
   'use strict';
 
+  // Application Global State
   const state = {
     token: sessionStorage.getItem('autoswe.adminToken') || '',
     projectId: sessionStorage.getItem('autoswe.projectId') || '',
     repositoryId: sessionStorage.getItem('autoswe.repositoryId') || '',
     runId: sessionStorage.getItem('autoswe.runId') || '',
     projectName: sessionStorage.getItem('autoswe.projectName') || '',
+    tasks: [],
+    events: [],
+    approvals: [],
+    artifacts: [],
+    currentFilter: 'ALL',
     pollTimer: null,
+    ws: null,
+    wsReconnectTimer: null,
+    selectedTask: null,
   };
 
   const el = (id) => document.getElementById(id);
   const terminalStates = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
 
+  // Centralized Authenticated API Client
   async function api(path, options = {}) {
-    if (!state.token) throw new Error('Admin access is required.');
+    if (!state.token) {
+      openAuth();
+      throw new Error('Operator authentication is required.');
+    }
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${state.token}`);
-    if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    if (options.body && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
     const response = await fetch(path, { ...options, headers });
     if (response.status === 401) {
       openAuth();
-      throw new Error('Admin token was rejected.');
+      throw new Error('Admin token was rejected by server.');
     }
     if (!response.ok) {
       let message = `Request failed (${response.status})`;
       try {
         const body = await response.json();
-        if (body.detail) message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
-      } catch (_) { /* response did not contain JSON */ }
+        if (body.detail) {
+          message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+        }
+      } catch (_) { /* non-json response */ }
       throw new Error(message);
     }
     if (response.status === 204) return null;
     return response.json();
   }
 
-  function showToast(message, error = false) {
+  // Toast Notification Manager
+  function showToast(message, isError = false) {
     const toast = el('toast');
     toast.textContent = message;
-    toast.classList.toggle('error', error);
+    toast.classList.toggle('error', isError);
     toast.classList.remove('hidden');
     window.clearTimeout(showToast.timer);
-    showToast.timer = window.setTimeout(() => toast.classList.add('hidden'), 4200);
+    showToast.timer = window.setTimeout(() => toast.classList.add('hidden'), 4000);
   }
 
+  // Authentication Dialog Controls
   function openAuth() {
     el('adminToken').value = state.token;
     if (!el('authDialog').open) el('authDialog').showModal();
   }
 
+  function closeAuth() {
+    if (el('authDialog').open) el('authDialog').close();
+  }
+
+  // Platform Readiness Healthcheck
   async function checkHealth() {
     try {
       const response = await fetch('/health/ready');
       const body = await response.json();
       const ready = response.ok && body.ready;
-      el('healthDot').className = `dot ${ready ? 'ready' : 'failed'}`;
-      const unavailable = Object.entries(body.dependencies || {}).filter(([, value]) => !value).map(([name]) => name);
-      el('healthText').textContent = ready ? 'Platform ready' : `Degraded: ${unavailable.join(', ') || 'dependencies'}`;
+      el('healthDot').className = `status-dot ${ready ? 'ready' : 'failed'}`;
+      const unavailable = Object.entries(body.dependencies || {})
+        .filter(([, val]) => !val)
+        .map(([name]) => name);
+      el('healthText').textContent = ready
+        ? 'Platform Ready'
+        : `Degraded: ${unavailable.join(', ') || 'dependencies'}`;
     } catch (_) {
-      el('healthDot').className = 'dot failed';
-      el('healthText').textContent = 'Control plane unavailable';
+      el('healthDot').className = 'status-dot failed';
+      el('healthText').textContent = 'Control Plane Offline';
     }
   }
 
+  // Restore Session Storage State
   function restoreIdentity() {
+    if (state.token) {
+      el('authBtnText').textContent = 'Admin Connected';
+    }
     if (state.projectId && state.repositoryId) {
-      el('projectIdentity').textContent = `${state.projectName || 'Project'} · ${state.projectId} · repo ${state.repositoryId}`;
+      el('projectIdentity').textContent = `${state.projectName || 'Project'} · ${state.projectId}`;
       el('startRun').disabled = false;
     }
     if (state.runId) {
       el('runLookup').value = state.runId;
       void loadRun(state.runId);
     }
-    if (!state.token) window.setTimeout(openAuth, 250);
+    if (!state.token) {
+      window.setTimeout(openAuth, 300);
+    }
   }
 
+  // Register New Project Repository
   async function registerProject(event) {
     event.preventDefault();
     try {
@@ -92,17 +127,20 @@
       sessionStorage.setItem('autoswe.projectId', state.projectId);
       sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
       sessionStorage.setItem('autoswe.projectName', state.projectName);
-      el('projectIdentity').textContent = `${state.projectName} · ${state.projectId} · repo ${state.repositoryId}`;
+      el('projectIdentity').textContent = `${state.projectName} · ${state.projectId}`;
       el('startRun').disabled = false;
-      showToast('Repository registered inside the governed import boundary.');
+      showToast('Repository registered inside governed import boundary.');
     } catch (error) {
       showToast(error.message, true);
     }
   }
 
+  // Start Autonomous Run Workflow
   async function startRun(event) {
     event.preventDefault();
-    if (!state.projectId || !state.repositoryId) return showToast('Register a project first.', true);
+    if (!state.projectId || !state.repositoryId) {
+      return showToast('Please register a project repository first.', true);
+    }
     try {
       const body = await api('/api/v1/runs', {
         method: 'POST',
@@ -116,19 +154,21 @@
       state.runId = body.run_id;
       sessionStorage.setItem('autoswe.runId', state.runId);
       el('runLookup').value = state.runId;
-      showToast('Run accepted. The architect will produce the first plan revision.');
+      showToast('Run launched. Architect agent is synthesizing the execution DAG.');
       await loadRun(state.runId);
     } catch (error) {
       showToast(error.message, true);
     }
   }
 
+  // Main Load Run Controller
   async function loadRun(runId) {
     const candidate = String(runId || '').trim();
     if (!candidate) return;
     state.runId = candidate;
     sessionStorage.setItem('autoswe.runId', candidate);
     window.clearTimeout(state.pollTimer);
+
     try {
       const [run, tasks, approvals, artifacts, events] = await Promise.all([
         api(`/api/v1/runs/${encodeURIComponent(candidate)}`),
@@ -137,128 +177,431 @@
         api(`/api/v1/runs/${encodeURIComponent(candidate)}/artifacts`),
         api(`/api/v1/runs/${encodeURIComponent(candidate)}/events?limit=500`),
       ]);
-      renderRun(run, tasks, approvals, artifacts, events);
+
+      state.tasks = tasks || [];
+      state.approvals = approvals || [];
+      state.artifacts = artifacts || [];
+      state.events = events || [];
+
+      renderRun(run);
+      setupWebSocket(run.project_id, candidate);
+
       if (!terminalStates.has(run.state)) {
-        state.pollTimer = window.setTimeout(() => void loadRun(candidate), 2500);
+        state.pollTimer = window.setTimeout(() => void loadRun(candidate), 3000);
       }
     } catch (error) {
-      el('pollStatus').textContent = 'Paused';
+      el('streamStatusText').textContent = 'POLLING PAUSED';
+      el('liveStreamBadge').classList.remove('live');
       showToast(error.message, true);
     }
   }
 
-  function renderRun(run, tasks, approvals, artifacts, events) {
+  // WebSocket Live Event Streaming with Token Auth
+  function setupWebSocket(projectId, runId) {
+    if (state.ws) {
+      state.ws.close();
+      state.ws = null;
+    }
+    window.clearTimeout(state.wsReconnectTimer);
+
+    // If there's an active running task, stream from task WebSocket endpoint
+    const runningTask = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED');
+    if (!runningTask) {
+      el('streamStatusText').textContent = 'POLLING ACTIVE';
+      return;
+    }
+
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runningTask.id)}/events?token=${encodeURIComponent(state.token)}`;
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        el('liveStreamBadge').classList.add('live');
+        el('streamStatusText').textContent = 'LIVE WEBSOCKET';
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          state.events.unshift(payload);
+          renderEvents(state.events);
+        } catch (_) {}
+      };
+
+      ws.onerror = () => {
+        el('streamStatusText').textContent = 'POLLING FALLBACK';
+        el('liveStreamBadge').classList.remove('live');
+      };
+
+      ws.onclose = () => {
+        state.ws = null;
+      };
+
+      state.ws = ws;
+    } catch (_) {
+      el('streamStatusText').textContent = 'POLLING ACTIVE';
+    }
+  }
+
+  // Render Dashboard
+  function renderRun(run) {
     el('dashboard').classList.remove('hidden');
     el('runGoalTitle').textContent = run.goal;
     el('runIdText').textContent = run.run_id;
+    el('runProjectName').textContent = state.projectName || run.project_id.slice(0, 8);
+    
+    // Status Badge
+    const statusBadge = el('runStatusBadge');
+    statusBadge.textContent = run.state;
+    statusBadge.className = `status-pill ${run.state.toLowerCase()}`;
+
+    // Metrics
     el('runState').textContent = run.state;
     el('stateDuration').textContent = `${formatDuration(run.state_duration_seconds)} in current state`;
     el('planRevision').textContent = run.active_plan_revision === null ? 'Planning' : `r${run.active_plan_revision}`;
     el('taskSummary').textContent = summarizeCounts(run.task_counts);
-    const totalTokens = run.model_input_tokens + run.model_output_tokens;
+
+    const totalTokens = (run.model_input_tokens || 0) + (run.model_output_tokens || 0);
     el('tokenTotal').textContent = totalTokens.toLocaleString();
-    el('tokenDetail').textContent = `${run.model_input_tokens.toLocaleString()} in · ${run.model_output_tokens.toLocaleString()} out`;
-    el('modelCost').textContent = `$${Number(run.model_cost_usd).toFixed(4)}`;
-    el('pollStatus').textContent = terminalStates.has(run.state) ? 'Terminal' : 'Live';
-    renderTasks(tasks);
-    renderApprovals(approvals);
-    renderArtifacts(artifacts, run.project_id);
-    renderEvents(events);
+    el('tokenDetail').textContent = `${(run.model_input_tokens || 0).toLocaleString()} in · ${(run.model_output_tokens || 0).toLocaleString()} out`;
+    el('modelCost').textContent = `$${Number(run.model_cost_usd || 0).toFixed(4)}`;
+
+    renderDAG(state.tasks);
+    renderApprovals(state.approvals);
+    renderArtifacts(state.artifacts, run.project_id);
+    renderEvents(state.events);
   }
 
-  function renderTasks(tasks) {
+  // Topological DAG Layout & Column Grouping Engine
+  function renderDAG(tasks) {
     const root = el('taskDag');
+    const svg = el('dagSvgConnections');
     root.replaceChildren();
-    root.classList.toggle('empty', tasks.length === 0);
-    if (!tasks.length) {
-      root.textContent = 'Waiting for the architect to persist a plan.';
+    svg.replaceChildren();
+
+    if (!tasks || !tasks.length) {
+      root.innerHTML = '<div class="empty-state">Waiting for the Architect agent to synthesize execution DAG...</div>';
       return;
     }
-    for (const task of tasks) {
-      const card = document.createElement('article');
-      card.className = `task-card ${task.state.toLowerCase()}`;
-      const top = document.createElement('div');
-      top.className = 'task-top';
-      const title = document.createElement('strong');
-      title.textContent = task.title;
-      title.title = task.title;
-      const badge = document.createElement('span');
-      badge.className = 'state-badge';
-      badge.textContent = task.state;
-      top.append(title, badge);
-      const meta = document.createElement('p');
-      meta.className = 'task-meta';
-      const dependencies = task.dependencies.length ? task.dependencies.map((value) => value.slice(0, 8)).join(', ') : 'root';
-      meta.textContent = `${task.task_type} · ${task.assigned_capability} · r${task.plan_revision}\ndepends: ${dependencies}`;
-      meta.style.whiteSpace = 'pre-line';
-      card.append(top, meta);
-      root.append(card);
+
+    // Compute topological ranks / levels for each task
+    const taskMap = new Map(tasks.map(t => [t.id, t]));
+    const ranks = new Map();
+
+    function getRank(taskId, visited = new Set()) {
+      if (ranks.has(taskId)) return ranks.get(taskId);
+      if (visited.has(taskId)) return 0;
+      visited.add(taskId);
+
+      const task = taskMap.get(taskId);
+      if (!task || !task.dependencies || !task.dependencies.length) {
+        ranks.set(taskId, 0);
+        return 0;
+      }
+
+      let maxParentRank = -1;
+      for (const parentId of task.dependencies) {
+        maxParentRank = Math.max(maxParentRank, getRank(parentId, new Set(visited)));
+      }
+      const rank = maxParentRank + 1;
+      ranks.set(taskId, rank);
+      return rank;
     }
+
+    tasks.forEach(t => getRank(t.id));
+
+    // Group tasks by calculated level
+    const maxRank = Math.max(...Array.from(ranks.values()), 0);
+    const columns = Array.from({ length: maxRank + 1 }, () => []);
+
+    tasks.forEach(t => {
+      const rank = ranks.get(t.id) || 0;
+      columns[rank].push(t);
+    });
+
+    const levelNames = ['Stage 1: Discovery & Research', 'Stage 2: Implementation', 'Stage 3: Verification & Test', 'Stage 4: Validation & Review', 'Stage 5: Finalization'];
+
+    // Render Columns & Nodes
+    columns.forEach((columnTasks, levelIdx) => {
+      const colEl = document.createElement('div');
+      colEl.className = 'dag-column';
+
+      const colHeader = document.createElement('div');
+      colHeader.className = 'dag-column-header';
+      colHeader.textContent = levelNames[levelIdx] || `Stage ${levelIdx + 1}`;
+      colEl.append(colHeader);
+
+      columnTasks.forEach(task => {
+        const node = document.createElement('article');
+        node.className = `task-node ${task.state.toLowerCase()}`;
+        node.id = `node-${task.id}`;
+        node.dataset.taskId = task.id;
+
+        const header = document.createElement('div');
+        header.className = 'task-node-header';
+        
+        const typeTag = document.createElement('span');
+        typeTag.className = 'task-type-tag';
+        typeTag.textContent = task.task_type;
+
+        const statusPill = document.createElement('span');
+        statusPill.className = `status-pill ${task.state.toLowerCase()}`;
+        statusPill.textContent = task.state;
+        header.append(typeTag, statusPill);
+
+        const title = document.createElement('h4');
+        title.className = 'task-node-title';
+        title.textContent = task.title;
+
+        const meta = document.createElement('div');
+        meta.className = 'task-node-meta';
+        const depsCount = task.dependencies.length;
+        meta.innerHTML = `<span>${task.assigned_capability}</span><span>${depsCount ? `${depsCount} dep${depsCount > 1 ? 's' : ''}` : 'Root task'}</span>`;
+
+        node.append(header, title, meta);
+        node.addEventListener('click', () => openTaskDrawer(task));
+        colEl.append(node);
+      });
+
+      root.append(colEl);
+    });
+
+    // Draw SVG dependency curves after layout rendering
+    window.requestAnimationFrame(() => drawDAGConnectors(tasks));
   }
 
+  // Draw Smooth Bezier Connections between Dependency Nodes
+  function drawDAGConnectors(tasks) {
+    const svg = el('dagSvgConnections');
+    const viewport = el('dagViewport');
+    if (!svg || !viewport) return;
+
+    svg.replaceChildren();
+    const viewportRect = viewport.getBoundingClientRect();
+    svg.setAttribute('width', viewport.scrollWidth);
+    svg.setAttribute('height', viewport.scrollHeight);
+
+    tasks.forEach(task => {
+      const childNode = el(`node-${task.id}`);
+      if (!childNode) return;
+      const childRect = childNode.getBoundingClientRect();
+
+      (task.dependencies || []).forEach(parentId => {
+        const parentNode = el(`node-${parentId}`);
+        if (!parentNode) return;
+        const parentRect = parentNode.getBoundingClientRect();
+
+        // Calculate connection coordinates relative to scrollable viewport
+        const startX = parentRect.right - viewportRect.left + viewport.scrollLeft;
+        const startY = parentRect.top + (parentRect.height / 2) - viewportRect.top + viewport.scrollTop;
+        const endX = childRect.left - viewportRect.left + viewport.scrollLeft;
+        const endY = childRect.top + (childRect.height / 2) - viewportRect.top + viewport.scrollTop;
+
+        const dx = Math.max(Math.abs(endX - startX) * 0.5, 30);
+        const pathData = `M ${startX} ${startY} C ${startX + dx} ${startY}, ${endX - dx} ${endY}, ${endX} ${endY}`;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', pathData);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', '#2a3e56');
+        path.setAttribute('stroke-width', '1.8');
+        path.setAttribute('stroke-dasharray', '4 2');
+        svg.append(path);
+      });
+    });
+  }
+
+  // Task Detail Drawer
+  function openTaskDrawer(task) {
+    state.selectedTask = task;
+    el('drawerTaskType').textContent = task.task_type;
+    el('drawerTaskTitle').textContent = task.title;
+    el('drawerTaskId').textContent = task.id;
+    
+    const stateEl = el('drawerTaskState');
+    stateEl.textContent = task.state;
+    stateEl.className = `state-pill ${task.state.toLowerCase()}`;
+
+    el('drawerTaskCapability').textContent = task.assigned_capability;
+    el('drawerTaskPriority').textContent = `Priority ${task.priority}`;
+    el('drawerTaskDeps').textContent = task.dependencies.length ? task.dependencies.join(', ') : 'None (Root)';
+    el('drawerTaskRevision').textContent = `r${task.plan_revision}`;
+
+    el('drawerTaskGoal').textContent = task.goal || task.title;
+
+    // Filter events associated with this task
+    const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.id);
+    const eventsContainer = el('drawerTaskEvents');
+    eventsContainer.replaceChildren();
+
+    if (!taskEvents.length) {
+      eventsContainer.innerHTML = '<p class="empty-text">No direct events recorded for this task yet.</p>';
+    } else {
+      taskEvents.forEach(evt => {
+        const item = document.createElement('div');
+        item.className = 'timeline-item';
+        item.innerHTML = `
+          <span class="timeline-time">${new Date(evt.created_at).toLocaleTimeString()}</span>
+          <span class="timeline-event-name">${evt.event_type}</span>
+          <span class="timeline-data">${JSON.stringify(evt.payload)}</span>
+        `;
+        eventsContainer.append(item);
+      });
+    }
+
+    el('taskDrawer').showModal();
+  }
+
+  // Render Governed Approval Queue
   function renderApprovals(approvals) {
     const root = el('approvalList');
+    const badge = el('pendingApprovalsCount');
     root.replaceChildren();
-    root.classList.toggle('empty', approvals.length === 0);
-    if (!approvals.length) {
-      root.textContent = 'No approvals.';
+
+    const pending = (approvals || []).filter(a => a.status === 'PENDING');
+    if (pending.length > 0) {
+      badge.textContent = pending.length;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+
+    if (!approvals || !approvals.length) {
+      root.innerHTML = '<div class="empty-state">No pending approvals.</div>';
       return;
     }
-    for (const approval of approvals) {
-      const item = document.createElement('article');
-      item.className = 'stack-item';
-      const title = document.createElement('strong');
-      title.textContent = `${approval.tool_name} · ${approval.status}`;
-      const hash = document.createElement('code');
-      hash.textContent = `call ${approval.call_hash}`;
-      const expiry = document.createElement('small');
-      expiry.textContent = `expires ${new Date(approval.expires_at).toLocaleString()}`;
-      item.append(title, hash, expiry);
+
+    approvals.forEach(approval => {
+      const card = document.createElement('div');
+      card.className = 'approval-item';
+
+      const header = document.createElement('div');
+      header.className = 'approval-header';
+
+      const toolTitle = document.createElement('span');
+      toolTitle.className = 'approval-tool';
+      toolTitle.textContent = approval.tool_name;
+
+      const riskBadge = document.createElement('span');
+      const risk = (approval.risk_level || 'HIGH').toLowerCase();
+      riskBadge.className = `risk-badge ${risk}`;
+      riskBadge.textContent = `${approval.status} · ${risk}`;
+      header.append(toolTitle, riskBadge);
+
+      const hash = document.createElement('div');
+      hash.className = 'approval-hash';
+      hash.textContent = `Call Hash: ${approval.call_hash.slice(0, 16)}...`;
+
+      const expiry = document.createElement('div');
+      expiry.className = 'approval-hash';
+      expiry.textContent = `Expires: ${new Date(approval.expires_at).toLocaleTimeString()}`;
+
+      card.append(header, hash, expiry);
+
       if (approval.status === 'PENDING') {
         const actions = document.createElement('div');
-        actions.className = 'approval-actions';
-        const reject = button('Reject', 'button ghost', () => decideApproval(approval, false));
-        const approve = button('Approve exact call', 'button primary', () => decideApproval(approval, true));
-        actions.append(reject, approve);
-        item.append(actions);
+        actions.className = 'approval-actions-row';
+
+        const rejectBtn = document.createElement('button');
+        rejectBtn.className = 'button danger';
+        rejectBtn.textContent = 'Reject';
+        rejectBtn.onclick = () => decideApproval(approval, false);
+
+        const approveBtn = document.createElement('button');
+        approveBtn.className = 'button primary';
+        approveBtn.textContent = 'Approve Exact Call';
+        approveBtn.onclick = () => decideApproval(approval, true);
+
+        actions.append(rejectBtn, approveBtn);
+        card.append(actions);
       }
-      root.append(item);
-    }
+
+      root.append(card);
+    });
   }
 
+  // Operator Approval Decision
   async function decideApproval(approval, approved) {
-    const approver = window.prompt('Operator identity for the immutable audit record:');
+    const approver = window.prompt('Enter operator identity for the immutable audit log:');
     if (!approver || !approver.trim()) return;
+
     try {
       await api(`/api/v1/approvals/${encodeURIComponent(approval.approval_id)}/decision`, {
         method: 'POST',
-        body: JSON.stringify({ approved, approver: approver.trim(), expected_call_hash: approval.call_hash }),
+        body: JSON.stringify({
+          approved,
+          approver: approver.trim(),
+          expected_call_hash: approval.call_hash,
+        }),
       });
-      showToast(approved ? 'Exact tool call approved.' : 'Tool call rejected.');
+      showToast(approved ? 'Tool call approved.' : 'Tool call rejected.');
       await loadRun(state.runId);
     } catch (error) {
       showToast(error.message, true);
     }
   }
 
+  // Render Verified Artifacts
   function renderArtifacts(artifacts, projectId) {
     const root = el('artifactList');
     root.replaceChildren();
-    root.classList.toggle('empty', artifacts.length === 0);
-    if (!artifacts.length) {
-      root.textContent = 'No evidence yet.';
+
+    if (!artifacts || !artifacts.length) {
+      root.innerHTML = '<div class="empty-state">No artifacts generated yet.</div>';
       return;
     }
-    for (const artifact of artifacts) {
-      const item = document.createElement('article');
-      item.className = 'stack-item';
-      const link = button(artifact.media_type, 'artifact-link', () => downloadArtifact(projectId, artifact));
-      const hash = document.createElement('code');
-      hash.textContent = `sha256:${artifact.sha256}`;
-      const detail = document.createElement('small');
-      detail.textContent = `${artifact.state} · ${formatBytes(artifact.size_bytes)} · ${artifact.artifact_id}`;
-      item.append(link, hash, detail);
+
+    artifacts.forEach(art => {
+      const item = document.createElement('div');
+      item.className = 'artifact-item';
+
+      const meta = document.createElement('div');
+      meta.className = 'artifact-meta';
+
+      const name = document.createElement('span');
+      name.className = 'artifact-name';
+      name.textContent = art.media_type;
+
+      const details = document.createElement('span');
+      details.className = 'artifact-details';
+      details.textContent = `${formatBytes(art.size_bytes)} · sha256:${art.sha256.slice(0, 10)}...`;
+
+      meta.append(name, details);
+
+      const previewBtn = document.createElement('button');
+      previewBtn.className = 'button ghost icon-btn';
+      previewBtn.title = 'Preview Artifact';
+      previewBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+      previewBtn.onclick = (e) => {
+        e.stopPropagation();
+        previewArtifact(projectId, art);
+      };
+
+      item.append(meta, previewBtn);
+      item.onclick = () => previewArtifact(projectId, art);
       root.append(item);
+    });
+  }
+
+  // Artifact Preview & Download
+  async function previewArtifact(projectId, artifact) {
+    el('modalArtifactType').textContent = artifact.media_type;
+    el('modalArtifactTitle').textContent = `Artifact ${artifact.artifact_id.slice(0, 8)}`;
+    el('modalArtifactMeta').textContent = `SHA-256: ${artifact.sha256} • Size: ${formatBytes(artifact.size_bytes)}`;
+    el('artifactPreviewCode').textContent = 'Fetching and verifying object content...';
+    el('downloadArtifactBtn').onclick = () => downloadArtifact(projectId, artifact);
+    el('artifactDialog').showModal();
+
+    try {
+      const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
+        headers: { Authorization: `Bearer ${state.token}` },
+      });
+      if (!response.ok) throw new Error(`Fetch failed (${response.status})`);
+      const text = await response.text();
+      el('artifactPreviewCode').textContent = text || '(Empty content)';
+    } catch (err) {
+      el('artifactPreviewCode').textContent = `Failed to preview artifact: ${err.message}`;
     }
   }
 
@@ -267,52 +610,59 @@
       const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
         headers: { Authorization: `Bearer ${state.token}` },
       });
-      if (!response.ok) throw new Error(`Artifact verification failed (${response.status}).`);
-      const url = URL.createObjectURL(await response.blob());
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = artifact.artifact_id;
-      anchor.click();
+      if (!response.ok) throw new Error(`Download failed (${response.status})`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `artifact-${artifact.artifact_id.slice(0, 8)}.txt`;
+      a.click();
       URL.revokeObjectURL(url);
     } catch (error) {
       showToast(error.message, true);
     }
   }
 
+  // Render Immutable Audit Events Timeline
   function renderEvents(events) {
     const root = el('eventList');
     root.replaceChildren();
-    root.classList.toggle('empty', events.length === 0);
-    if (!events.length) {
-      const item = document.createElement('li');
-      item.textContent = 'No events yet.';
-      root.append(item);
+
+    const filtered = (events || []).filter(e => {
+      if (state.currentFilter === 'ALL') return true;
+      if (state.currentFilter === 'TASK') return e.event_type.startsWith('task.');
+      if (state.currentFilter === 'TOOL') return e.event_type.startsWith('tool.');
+      if (state.currentFilter === 'APPROVAL') return e.event_type.startsWith('approval.');
+      return true;
+    });
+
+    if (!filtered.length) {
+      root.innerHTML = '<li class="empty-state">No matching events in audit timeline.</li>';
       return;
     }
-    for (const event of [...events].reverse()) {
+
+    filtered.forEach(event => {
       const item = document.createElement('li');
+      item.className = 'timeline-item';
+
       const time = document.createElement('span');
-      time.textContent = new Date(event.created_at).toLocaleString();
+      time.className = 'timeline-time';
+      time.textContent = new Date(event.created_at).toLocaleTimeString();
+
       const name = document.createElement('span');
-      name.className = 'event-name';
+      name.className = 'timeline-event-name';
       name.textContent = event.event_type;
+
       const data = document.createElement('span');
-      data.className = 'event-data';
+      data.className = 'timeline-data';
       data.textContent = JSON.stringify(event.payload);
+
       item.append(time, name, data);
       root.append(item);
-    }
+    });
   }
 
-  function button(label, className, handler) {
-    const result = document.createElement('button');
-    result.type = 'button';
-    result.className = className;
-    result.textContent = label;
-    result.addEventListener('click', handler);
-    return result;
-  }
-
+  // Utility Formatters
   function summarizeCounts(counts) {
     const entries = Object.entries(counts || {});
     if (!entries.length) return 'No tasks';
@@ -333,31 +683,73 @@
     return `${(value / 1048576).toFixed(1)} MiB`;
   }
 
+  // Event Listeners & Binding
   el('openAuth').addEventListener('click', openAuth);
+  
   el('clearToken').addEventListener('click', () => {
     state.token = '';
     sessionStorage.removeItem('autoswe.adminToken');
     el('adminToken').value = '';
+    el('authBtnText').textContent = 'Admin Access';
     showToast('Session token cleared.');
+    closeAuth();
   });
+
   el('authForm').addEventListener('submit', () => {
     state.token = el('adminToken').value.trim();
     sessionStorage.setItem('autoswe.adminToken', state.token);
-    showToast('Admin access saved for this browser session.');
-    if (state.runId) window.setTimeout(() => void loadRun(state.runId), 0);
-  });
-  el('projectForm').addEventListener('submit', registerProject);
-  el('runForm').addEventListener('submit', startRun);
-  el('lookupForm').addEventListener('submit', (event) => {
-    event.preventDefault();
-    void loadRun(el('runLookup').value);
-  });
-  el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
-  el('copyRunId').addEventListener('click', async () => {
-    await navigator.clipboard.writeText(state.runId);
-    showToast('Run ID copied.');
+    el('authBtnText').textContent = 'Admin Connected';
+    showToast('Admin token saved for this browser session.');
+    closeAuth();
+    if (state.runId) void loadRun(state.runId);
   });
 
+  el('projectForm').addEventListener('submit', registerProject);
+  el('runForm').addEventListener('submit', startRun);
+  el('lookupForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    void loadRun(el('runLookup').value);
+  });
+
+  el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
+  el('copyRunId').addEventListener('click', async () => {
+    if (!state.runId) return;
+    await navigator.clipboard.writeText(state.runId);
+    showToast('Run ID copied to clipboard.');
+  });
+
+  // Modal Closers
+  el('closeDrawer').addEventListener('click', () => el('taskDrawer').close());
+  el('closeArtifactModal').addEventListener('click', () => el('artifactDialog').close());
+
+  // Timeline Filter Pills
+  el('timelineFilters').addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON') {
+      document.querySelectorAll('#timelineFilters .pill').forEach(p => p.classList.remove('active'));
+      e.target.classList.add('active');
+      state.currentFilter = e.target.dataset.filter || 'ALL';
+      renderEvents(state.events);
+    }
+  });
+
+  // Global Keyboard Shortcuts
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '/' && document.activeElement !== el('runLookup') && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+      e.preventDefault();
+      el('runLookup').focus();
+    }
+    if (e.key === 'Escape') {
+      if (el('taskDrawer').open) el('taskDrawer').close();
+      if (el('artifactDialog').open) el('artifactDialog').close();
+      if (el('authDialog').open) el('authDialog').close();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (state.tasks.length) drawDAGConnectors(state.tasks);
+  });
+
+  // Bootstrap
   void checkHealth();
   window.setInterval(checkHealth, 15000);
   restoreIdentity();
