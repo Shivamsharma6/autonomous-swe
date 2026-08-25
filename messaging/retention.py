@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import delete, exists, select
 
-from domain.enums import ApprovalStatus
+from domain.enums import RUN_TERMINAL_STATES, ApprovalStatus
 from messaging.redis_streams import RedisStreamsTransport
 from persistence.tables import (
     AgentMessageRow,
@@ -18,7 +18,7 @@ from persistence.tables import (
     ToolExecutionRow,
 )
 
-TERMINAL_RUN_STATES = ("COMPLETED", "FAILED", "CANCELLED")
+TERMINAL_RUN_STATES = tuple(status.value for status in RUN_TERMINAL_STATES)
 CURRENT_PROMOTION_STATES = ("PENDING", "PROMOTING", "WAITING_FOR_MEMORY")
 
 

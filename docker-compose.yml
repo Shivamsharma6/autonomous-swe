@@ -178,8 +178,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: platform
-    command: [uvicorn, "apps.api.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8000", --no-access-log]
-    environment: *platform-environment
+    command: [uvicorn, "apps.api.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8000", --no-access-log, --proxy-headers]
+    environment:
+      <<: *platform-environment
+      FORWARDED_ALLOW_IPS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
     volumes:
       - type: bind
         source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}

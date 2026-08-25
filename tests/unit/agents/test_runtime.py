@@ -131,9 +131,20 @@ async def test_bounded_schema_repair_records_invalid_and_valid_attempts() -> Non
 
 
 @pytest.mark.asyncio
-async def test_transient_primary_failure_uses_declared_fallback_model() -> None:
+@pytest.mark.asyncio
+async def test_transient_primary_failure_retries_same_model_then_fallback(monkeypatch) -> None:
+    _instant_sleep(monkeypatch)
     gateway = ScriptedGateway(
         responses=(
+            ScriptedResponse(
+                error=GatewayError("primary overloaded", failure_class=FailureClass.TRANSIENT)
+            ),
+            ScriptedResponse(
+                error=GatewayError("primary overloaded", failure_class=FailureClass.TRANSIENT)
+            ),
+            ScriptedResponse(
+                error=GatewayError("primary overloaded", failure_class=FailureClass.TIMEOUT)
+            ),
             ScriptedResponse(
                 error=GatewayError("primary overloaded", failure_class=FailureClass.TRANSIENT)
             ),
@@ -149,9 +160,52 @@ async def test_transient_primary_failure_uses_declared_fallback_model() -> None:
 
     result = await runtime.run(invocation())
 
+    assert [item.model for item in gateway.requests] == [
+        "primary-model",
+        "primary-model",
+        "primary-model",
+        "primary-model",
+        "fallback-model",
+    ]
+    assert [item.failure_class for item in result.attempts[:4]] == [
+        FailureClass.TRANSIENT,
+        FailureClass.TRANSIENT,
+        FailureClass.TIMEOUT,
+        FailureClass.TRANSIENT,
+    ]
+    assert result.attempts[-1].model == "fallback-model"
+    assert result.output.answer == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_falls_back_without_retries(monkeypatch) -> None:
+    _instant_sleep(monkeypatch)
+    gateway = ScriptedGateway(
+        responses=(
+            ScriptedResponse(
+                error=GatewayError("bad request shape", failure_class=FailureClass.PERMANENT)
+            ),
+            ScriptedResponse(response({"schema_version": "1.0", "answer": "fallback"})),
+        )
+    )
+    runtime = AgentRuntime(
+        spec(),
+        gateway,
+        input_type=AgentInvocation,
+        output_type=VerifiedResult,
+    )
+
+    result = await runtime.run(invocation())
+
     assert [item.model for item in gateway.requests] == ["primary-model", "fallback-model"]
-    assert result.attempts[0].failure_class is FailureClass.TRANSIENT
-    assert result.attempts[1].model == "fallback-model"
+    assert result.attempts[0].failure_class is FailureClass.PERMANENT
+
+
+def _instant_sleep(monkeypatch) -> None:
+    async def _no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("agents.base.asyncio.sleep", _no_delay)
 
 
 @pytest.mark.asyncio

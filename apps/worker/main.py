@@ -23,6 +23,7 @@ from observability.tracing import configure_telemetry
 from persistence.artifacts import ArtifactService, ArtifactStore
 from persistence.database import Database
 from persistence.repositories import DomainRepository
+from policies.risk.policy_engine import risk_exceeds
 from tools.production import ProductionToolSet, SandboxManagerClient
 from workflows.checkpoints import postgres_checkpointer
 
@@ -109,7 +110,12 @@ async def run_worker() -> None:
             repository_id=context.repository_id,
             baseline_commit=context.baseline_commit,
             allowed_tools=context.allowed_tools,
-            risk_ceiling=context.risk_ceiling,
+            assigned_capability=context.assigned_capability,
+            risk_ceiling=(
+                settings.max_risk_ceiling
+                if risk_exceeds(context.risk_ceiling, settings.max_risk_ceiling)
+                else context.risk_ceiling
+            ),
             primary_model=settings.model_primary,
             fallback_models=tuple(settings.model_fallbacks),
             artifacts=artifacts,

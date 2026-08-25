@@ -5,10 +5,9 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import httpx
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 from sqlalchemy import text
 
@@ -25,6 +24,7 @@ from execution.scheduler.service import ConcurrencyPolicy, SchedulerService
 from infrastructure.config import Settings
 from knowledge.memory.uams import UAMSMemoryAdapter
 from observability.logging import configure_logging
+from observability.metrics import start_metrics_endpoint
 from observability.tracing import configure_telemetry
 from persistence.artifacts import ArtifactService, ArtifactStore
 from persistence.database import Database
@@ -79,10 +79,6 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
             status_code=200 if ready else 503,
         )
 
-    @application.get("/metrics", include_in_schema=False)
-    async def metrics() -> Response:
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
     application.include_router(router)
     return application
 
@@ -90,6 +86,9 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
 def create_production_app() -> FastAPI:
     configure_logging()
     settings = Settings()
+    # Process metrics are served on the internal-only Prometheus port instead
+    # of an unauthenticated application route.
+    start_metrics_endpoint()
     database = Database(settings.database_url)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     memory = UAMSMemoryAdapter(

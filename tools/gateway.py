@@ -172,6 +172,41 @@ class ToolGateway:
             risk=risk,
         )
 
+    async def complete_approved(
+        self,
+        call: ToolCallRequest,
+        *,
+        output: dict[str, Any],
+        risk: RiskLevel = RiskLevel.HIGH,
+    ) -> ToolCallResult:
+        """Finalize an externally executed, human-approved tool call through the
+        same durable audit/outbox path as gateway-executed tools."""
+        async with self._database.transaction() as session:
+            row = await session.scalar(
+                select(ToolExecutionRow)
+                .where(ToolExecutionRow.idempotency_key == call.idempotency_key)
+                .with_for_update()
+            )
+            if row is None or row.id != call.call_id:
+                raise ToolGatewayError("approved tool execution is missing")
+            _validate_replay(row, call)
+            if ToolExecutionStatus(row.status) not in {
+                ToolExecutionStatus.CLAIMED,
+                ToolExecutionStatus.WAITING_FOR_APPROVAL,
+            }:
+                raise ToolGatewayError(
+                    f"approved tool call is not executable in status {row.status}"
+                )
+        redacted = cast(dict[str, Any], self._redactor.redact(dict(output)))
+        return await self._persist_terminal(
+            call,
+            status=ToolExecutionStatus.COMPLETED,
+            output=redacted,
+            error=None,
+            risk=risk,
+            attempts=1,
+        )
+
     async def _execute_owned(
         self,
         call: ToolCallRequest,

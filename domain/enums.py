@@ -144,3 +144,50 @@ GRAPH_EXECUTION_TRANSITIONS: dict[GraphExecutionState, frozenset[GraphExecutionS
         }
     ),
 }
+
+
+class RunStatus(StrEnum):
+    PENDING = "PENDING"
+    PLANNING = "PLANNING"
+    EXECUTING = "EXECUTING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    WAITING_FOR_MEMORY = "WAITING_FOR_MEMORY"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+RUN_TERMINAL_STATES: frozenset[RunStatus] = frozenset(
+    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+)
+
+
+RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
+    RunStatus.PENDING: frozenset({RunStatus.PLANNING, RunStatus.CANCELLED}),
+    RunStatus.PLANNING: frozenset(
+        {RunStatus.EXECUTING, RunStatus.FAILED, RunStatus.CANCELLED}
+    ),
+    RunStatus.EXECUTING: frozenset(
+        {
+            RunStatus.WAITING_FOR_APPROVAL,
+            RunStatus.WAITING_FOR_MEMORY,
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }
+    ),
+    RunStatus.WAITING_FOR_APPROVAL: frozenset(
+        {
+            RunStatus.WAITING_FOR_MEMORY,
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }
+    ),
+    RunStatus.WAITING_FOR_MEMORY: frozenset(
+        {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+    ),
+    RunStatus.COMPLETED: frozenset(),
+    RunStatus.FAILED: frozenset(),
+    RunStatus.CANCELLED: frozenset(),
+}

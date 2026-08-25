@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from uuid import UUID
 
-from domain.enums import TaskType
+from domain.enums import RiskLevel, TaskType
 from domain.models import TaskPlan, TaskPlanMutation, TaskSpec
+from policies.risk.policy_engine import risk_exceeds
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +40,11 @@ class TaskPlanValidator:
         *,
         allowed_tools: set[str] | frozenset[str],
         require_final_validation_sink: bool = False,
+        max_risk_ceiling: RiskLevel = RiskLevel.HIGH,
     ) -> None:
         self.allowed_tools = frozenset(allowed_tools)
         self.require_final_validation_sink = require_final_validation_sink
+        self.max_risk_ceiling = max_risk_ceiling
 
     def validate(self, plan: TaskPlan) -> PlanValidationResult:
         issues: list[ValidationIssue] = []
@@ -252,6 +255,17 @@ class TaskPlanValidator:
                 ValidationIssue(
                     code="UNSUPPORTED_TOOL",
                     message=f"tool {tool!r} is not registered for planning",
+                    task_id=task.id,
+                )
+            )
+        if risk_exceeds(task.risk_ceiling, self.max_risk_ceiling):
+            issues.append(
+                ValidationIssue(
+                    code="RISK_CEILING_EXCEEDS_POLICY",
+                    message=(
+                        f"task risk ceiling {task.risk_ceiling.value} exceeds the "
+                        f"platform maximum {self.max_risk_ceiling.value}"
+                    ),
                     task_id=task.id,
                 )
             )

@@ -1,5 +1,0 @@
-from agents.specs import AgentRole
-
-ROLE = AgentRole.TESTER
-
-__all__ = ["ROLE"]

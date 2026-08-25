@@ -7,6 +7,8 @@ from typing import Literal, Self
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from domain.enums import RiskLevel
+
 _DIGEST_PINNED_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _TEST_SCHEMES = ("memory://", "scripted://", "test://")
 
@@ -67,6 +69,7 @@ class Settings(BaseSettings):
     max_plan_depth: int = Field(default=12, ge=1, le=100)
     max_total_budget_usd: float = Field(default=25.0, gt=0)
     max_total_execution_seconds: int = Field(default=7_200, ge=1, le=604_800)
+    max_risk_ceiling: RiskLevel = RiskLevel.MEDIUM
     request_max_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
     api_rate_limit_per_minute: int = Field(default=120, ge=1, le=100_000)
     host_uid: int = Field(
@@ -141,10 +144,11 @@ class Settings(BaseSettings):
             raise ValueError("max_model_concurrency cannot exceed max_parallel_tasks")
         if self.max_sandbox_concurrency > self.max_parallel_tasks:
             raise ValueError("max_sandbox_concurrency cannot exceed max_parallel_tasks")
+        # The runtime uses complete() only; streaming is an optional gateway
+        # surface and must not be a production declaration requirement.
         required_model_capabilities = {
             "structured_outputs",
             "native_tool_calls",
-            "streaming",
             "usage_accounting",
         }
         if self.model_capability_mode == "declared" and not required_model_capabilities.issubset(

@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, insert, literal, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.enums import GraphExecutionState, RetryCategory, RiskLevel, TaskStatus, TaskType
@@ -96,6 +98,7 @@ class TaskExecutionLease:
     task_type: TaskType
     goal: str
     allowed_tools: tuple[str, ...]
+    assigned_capability: str
     risk_ceiling: RiskLevel
     dependencies: tuple[UUID, ...]
     already_terminal: bool = False
@@ -150,7 +153,12 @@ def evaluate_retry(
 
 
 class SchedulerService:
-    _ADMISSION_LOCK_KEY = 4_283_057_995_119_945_555
+    # int4 namespace for per-project admission locks: pg_advisory_xact_lock(int, int).
+    _ADMISSION_LOCK_NAMESPACE = 0x41555357 & 0x7FFFFFFF
+
+    @staticmethod
+    def _project_lock_key(project_id: UUID) -> int:
+        return (project_id.int >> 32) & 0x7FFFFFFF
 
     def __init__(
         self,
@@ -210,10 +218,6 @@ class SchedulerService:
         current_time = now or datetime.now(UTC)
         claims: list[TaskClaim] = []
         async with self.database.transaction() as session:
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": self._ADMISSION_LOCK_KEY},
-            )
             candidates = tuple(
                 (
                     await session.scalars(
@@ -225,60 +229,118 @@ class SchedulerService:
                     )
                 ).all()
             )
+            by_project: dict[UUID, list[TaskRow]] = {}
             for task in candidates:
-                request = self._resource_request(task)
-                snapshot = await self._admission_snapshot(session, task.project_id)
-                if not evaluate_admission(self.policy, snapshot, request).admitted:
-                    continue
-                expires_at = current_time + self.lease_ttl
-                token = uuid4()
-                await self.repository.transition_task(
-                    session,
-                    project_id=task.project_id,
-                    task_id=task.id,
-                    expected_version=task.version,
-                    target=TaskStatus.LEASED,
+                by_project.setdefault(task.project_id, []).append(task)
+            for project_id in sorted(by_project):
+                # Per-project admission lock: independent projects admit
+                # concurrently; global ceilings stay exact through atomic
+                # conditional reservation inserts below.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:namespace, :project_key)"),
+                    {
+                        "namespace": self._ADMISSION_LOCK_NAMESPACE,
+                        "project_key": self._project_lock_key(project_id),
+                    },
                 )
-                await self.repository.create_lease(
-                    session,
-                    task_id=task.id,
-                    owner=owner,
-                    token=token,
-                    expires_at=expires_at,
-                )
-                await self.repository.create_reservation(
-                    session,
-                    task_id=task.id,
-                    project_id=task.project_id,
-                    resource="task",
-                    units=1,
-                )
-                if request.model_slots:
-                    await self.repository.create_reservation(
+                for task in by_project[project_id]:
+                    request = self._resource_request(task)
+                    snapshot = await self._admission_snapshot(session, task.project_id)
+                    if not evaluate_admission(self.policy, snapshot, request).admitted:
+                        continue
+                    expires_at = current_time + self.lease_ttl
+                    token = uuid4()
+                    if not await self._reserve_with_global_cap(
+                        session,
+                        task_id=task.id,
+                        project_id=task.project_id,
+                        resource="task",
+                        units=1,
+                        cap=self.policy.max_parallel_tasks,
+                    ):
+                        continue
+                    if request.model_slots and not await self._reserve_with_global_cap(
                         session,
                         task_id=task.id,
                         project_id=task.project_id,
                         resource="model",
                         units=request.model_slots,
-                    )
-                if request.sandbox_slots:
-                    await self.repository.create_reservation(
+                        cap=self.policy.max_model_concurrency,
+                    ):
+                        await self._release_reservations(session, task.id, current_time)
+                        continue
+                    if request.sandbox_slots and not await self._reserve_with_global_cap(
                         session,
                         task_id=task.id,
                         project_id=task.project_id,
                         resource="sandbox",
                         units=request.sandbox_slots,
-                    )
-                claims.append(
-                    TaskClaim(
-                        task_id=task.id,
+                        cap=self.policy.max_sandbox_concurrency,
+                    ):
+                        await self._release_reservations(session, task.id, current_time)
+                        continue
+                    await self.repository.transition_task(
+                        session,
                         project_id=task.project_id,
+                        task_id=task.id,
+                        expected_version=task.version,
+                        target=TaskStatus.LEASED,
+                    )
+                    await self.repository.create_lease(
+                        session,
+                        task_id=task.id,
                         owner=owner,
                         token=token,
                         expires_at=expires_at,
                     )
-                )
+                    claims.append(
+                        TaskClaim(
+                            task_id=task.id,
+                            project_id=task.project_id,
+                            owner=owner,
+                            token=token,
+                            expires_at=expires_at,
+                        )
+                    )
         return tuple(claims)
+
+    async def _reserve_with_global_cap(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: UUID,
+        project_id: UUID,
+        resource: str,
+        units: int,
+        cap: int,
+    ) -> bool:
+        """Insert a reservation only when the global ceiling still has room.
+        The aggregate predicate is evaluated atomically with the insert, so the
+        global cap holds even under sharded per-project admission locks."""
+        guard = (
+            select(func.coalesce(func.sum(ReservationRow.units), 0))
+            .where(
+                ReservationRow.released_at.is_(None),
+                ReservationRow.resource == resource,
+            )
+            .scalar_subquery()
+        )
+        statement = (
+            insert(ReservationRow)
+            .from_select(
+                ["task_id", "project_id", "resource", "units", "created_at"],
+                select(
+                    literal(task_id),
+                    literal(project_id),
+                    literal(resource),
+                    literal(units),
+                    func.now(),
+                ).where(guard + units <= cap),
+            )
+            .returning(ReservationRow.task_id)
+        )
+        inserted = await session.scalar(statement)
+        return inserted is not None
 
     async def promote_dependency_ready(self, *, limit: int = 500) -> int:
         """Promote PENDING tasks only after every durable dependency is COMPLETED."""
@@ -499,6 +561,7 @@ class SchedulerService:
             task_type=task.task_type,
             goal=task.description,
             allowed_tools=tuple(str(value) for value in task.allowed_tools),
+            assigned_capability=str(task.assigned_capability),
             risk_ceiling=RiskLevel(task.risk_ceiling),
             dependencies=tuple(UUID(value) for value in task.dependencies),
             already_terminal=already_terminal,
@@ -574,53 +637,62 @@ class SchedulerService:
         task_type: TaskType,
         observation: ResourceObservation,
     ) -> None:
+        # Row identity (project, task_type) is unique; the row lock plus a
+        # savepoint-protected insert make concurrent recordings safe without
+        # any global admission lock.
         async with self.database.transaction() as session:
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": self._ADMISSION_LOCK_KEY},
-            )
-            row = await session.scalar(
-                select(ProjectTaskResourceEstimateRow)
-                .where(
-                    ProjectTaskResourceEstimateRow.project_id == project_id,
-                    ProjectTaskResourceEstimateRow.task_type == task_type,
-                )
-                .with_for_update()
-            )
-            if row is None:
-                session.add(
-                    ProjectTaskResourceEstimateRow(
-                        project_id=project_id,
-                        task_type=task_type,
-                        sample_count=1,
-                        average_cpu_time_ms=observation.cpu_time_ms,
-                        peak_memory_bytes=observation.peak_memory_bytes,
-                        average_duration_ms=observation.duration_ms,
-                        average_output_bytes=observation.output_bytes,
-                        average_network_requests=observation.network_requests,
-                        average_model_tokens=observation.model_tokens,
-                        average_cost_usd=observation.cost_usd,
+            for _ in range(2):
+                row = await session.scalar(
+                    select(ProjectTaskResourceEstimateRow)
+                    .where(
+                        ProjectTaskResourceEstimateRow.project_id == project_id,
+                        ProjectTaskResourceEstimateRow.task_type == task_type,
                     )
+                    .with_for_update()
                 )
-                return
+                if row is not None:
+                    self._merge_observation(row, observation)
+                    return
+                try:
+                    async with session.begin_nested():
+                        session.add(
+                            ProjectTaskResourceEstimateRow(
+                                project_id=project_id,
+                                task_type=task_type,
+                                sample_count=1,
+                                average_cpu_time_ms=observation.cpu_time_ms,
+                                peak_memory_bytes=observation.peak_memory_bytes,
+                                average_duration_ms=observation.duration_ms,
+                                average_output_bytes=observation.output_bytes,
+                                average_network_requests=observation.network_requests,
+                                average_model_tokens=observation.model_tokens,
+                                average_cost_usd=observation.cost_usd,
+                            )
+                        )
+                    return
+                except IntegrityError:
+                    continue
+            raise RuntimeError("resource estimate row could not be recorded")
 
-            count = row.sample_count
-            next_count = count + 1
+    @staticmethod
+    def _merge_observation(row: Any, observation: ResourceObservation) -> None:
+        count = row.sample_count
+        next_count = count + 1
 
-            def average(previous: float, observed: int | float) -> float:
-                return ((previous * count) + observed) / next_count
+        def average(previous: float, observed: int | float) -> float:
+            return float(((previous * count) + observed) / next_count)
 
-            row.sample_count = next_count
-            row.average_cpu_time_ms = average(row.average_cpu_time_ms, observation.cpu_time_ms)
-            row.peak_memory_bytes = max(row.peak_memory_bytes, observation.peak_memory_bytes)
-            row.average_duration_ms = average(row.average_duration_ms, observation.duration_ms)
-            row.average_output_bytes = average(row.average_output_bytes, observation.output_bytes)
-            row.average_network_requests = average(
-                row.average_network_requests, observation.network_requests
-            )
-            row.average_model_tokens = average(row.average_model_tokens, observation.model_tokens)
-            row.average_cost_usd = average(row.average_cost_usd, observation.cost_usd)
-            row.updated_at = datetime.now(UTC)
+        row.sample_count = next_count
+        row.average_cpu_time_ms = average(row.average_cpu_time_ms, observation.cpu_time_ms)
+        row.peak_memory_bytes = max(row.peak_memory_bytes, observation.peak_memory_bytes)
+        row.average_duration_ms = average(row.average_duration_ms, observation.duration_ms)
+        row.average_output_bytes = average(row.average_output_bytes, observation.output_bytes)
+        row.average_network_requests = average(
+            row.average_network_requests, observation.network_requests
+        )
+        row.average_model_tokens = average(row.average_model_tokens, observation.model_tokens)
+        row.average_cost_usd = average(row.average_cost_usd, observation.cost_usd)
+        row.updated_at = datetime.now(UTC)
 
     @staticmethod
     def _resource_request(task: TaskRow) -> ResourceRequest:

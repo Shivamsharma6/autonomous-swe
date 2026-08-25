@@ -734,7 +734,13 @@ async def replay_dead_letter(
 async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> None:
     try:
         await require_websocket_admin(websocket)
-    except Exception:
+    except Exception as error:
+        logger.warning(
+            "websocket_event_stream_rejected",
+            error_type=type(error).__name__,
+            project_id=str(project_id),
+            task_id=str(task_id),
+        )
         return
     services: ControlPlaneServices = websocket.app.state.services
     async with services.database.sessions() as session:

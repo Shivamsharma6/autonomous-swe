@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -11,7 +10,8 @@ from sqlalchemy import func, select
 from agents.base import AgentInvocation, AgentRuntime
 from agents.gateway import ModelGateway
 from agents.specs import AgentRole, build_agent_specs
-from domain.enums import ApprovalStatus, ArtifactState, RiskLevel, TaskStatus
+from domain.enums import ApprovalStatus, ArtifactState, RiskLevel, RunStatus, TaskStatus
+from domain.events import require_run_transition
 from domain.models import (
     AgentSpec,
     MemoryCandidate,
@@ -46,13 +46,19 @@ from persistence.tables import (
     RunStageAttemptRow,
     TaskAttemptRow,
     TaskRow,
-    ToolExecutionRow,
     utc_now,
 )
 from planning.service import RunStageUsageRecorder
 from planning.validator import TaskPlanValidator
 from tools.approval import ApprovalService
-from tools.registry import ToolExecutionContext
+from tools.gateway import ToolGateway
+from tools.registry import ToolExecutionContext, ToolRegistry
+from workflows.finalization.evidence import (
+    integration_sink,
+    require_integration_plan,
+    verification_evidence,
+)
+from workflows.finalization.promotion import build_memory_candidate, promotion_review
 from workflows.repair import DurableRepairController, RepairAction, VerificationOutcome
 from workflows.review import ReleaseReviewer, ReleaseReviewRequest
 
@@ -85,6 +91,12 @@ class RunFinalizationService:
         self._limits = limits
         self._repository = repository or DomainRepository()
         self._approvals = ApprovalService(database=database, repository=self._repository)
+        self._tool_gateway = ToolGateway(
+            database=database,
+            registry=ToolRegistry(),
+            approvals=self._approvals,
+            repository=self._repository,
+        )
         self._promotion = PromotionService(
             database,
             memory,
@@ -108,7 +120,11 @@ class RunFinalizationService:
                 select(RunRow)
                 .where(
                     RunRow.state.in_(
-                        ("EXECUTING", "WAITING_FOR_APPROVAL", "WAITING_FOR_MEMORY")
+                        (
+                            RunStatus.EXECUTING.value,
+                            RunStatus.WAITING_FOR_APPROVAL.value,
+                            RunStatus.WAITING_FOR_MEMORY.value,
+                        )
                     )
                 )
                 .order_by(RunRow.created_at, RunRow.id)
@@ -118,9 +134,9 @@ class RunFinalizationService:
                 return None
             run_id = run.id
             state = run.state
-        if state == "EXECUTING":
+        if state == RunStatus.EXECUTING.value:
             return await self._advance_executing(run_id)
-        if state == "WAITING_FOR_APPROVAL":
+        if state == RunStatus.WAITING_FOR_APPROVAL.value:
             return await self._advance_approval(run_id)
         return await self._advance_memory(run_id)
 
@@ -148,14 +164,14 @@ class RunFinalizationService:
         ):
             return None
         if any(task.state in {TaskStatus.FAILED, TaskStatus.CANCELLED} for task in tasks):
-            await self._transition_run(run_id, "FAILED")
+            await self._transition_run(run_id, RunStatus.FAILED)
             return "FAILED"
         latest_revision = max(task.plan_revision for task in tasks)
         latest = tuple(task for task in tasks if task.plan_revision == latest_revision)
         failures, evidence_ids = await self._verification_evidence(latest)
         if failures:
             if not evidence_ids:
-                await self._transition_run(run_id, "FAILED")
+                await self._transition_run(run_id, RunStatus.FAILED)
                 return "FAILED"
             await self._request_repair(
                 run_id,
@@ -364,48 +380,7 @@ class RunFinalizationService:
     async def _verification_evidence(
         self, tasks: tuple[TaskRow, ...]
     ) -> tuple[tuple[str, ...], tuple[UUID, ...]]:
-        failures: list[str] = []
-        evidence: list[UUID] = []
-        verified_tasks: set[UUID] = set()
-        if not tasks:
-            return ("latest plan revision has no tasks",), ()
-        project_id = tasks[0].project_id
-        async with self._database.transaction() as session:
-            rows = tuple(
-                (
-                    await session.scalars(
-                        select(ArtifactRow)
-                        .where(ArtifactRow.task_id.in_([task.id for task in tasks]))
-                        .order_by(ArtifactRow.created_at, ArtifactRow.id)
-                    )
-                ).all()
-            )
-            for row in rows:
-                try:
-                    content = await self._artifacts.get_verified(
-                        session,
-                        project_id=project_id,
-                        artifact_id=row.id,
-                    )
-                except Exception:
-                    failures.append(f"artifact {row.id} failed integrity verification")
-                    continue
-                evidence.append(row.id)
-                try:
-                    document = json.loads(content)
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                output = document.get("output") if isinstance(document, dict) else None
-                if isinstance(output, dict) and output.get("verification_passed") is False:
-                    failures.append(str(output.get("summary") or "verification failed"))
-                if isinstance(output, dict) and output.get("verification_passed") is True:
-                    verified_tasks.add(row.task_id)
-        if not evidence:
-            failures.append("latest plan revision produced no verified evidence")
-        sink = self._integration_sink(tasks)
-        if sink.id not in verified_tasks:
-            failures.append("final validation sink produced no passing verification evidence")
-        return tuple(failures), tuple(evidence)
+        return await verification_evidence(self._database, self._artifacts, tasks)
 
     async def _request_repair(
         self,
@@ -525,7 +500,7 @@ class RunFinalizationService:
                 )
                 attempt.ended_at = utc_now()
         if decision.action is not RepairAction.APPLY_MUTATION:
-            await self._transition_run(run_id, "FAILED")
+            await self._transition_run(run_id, RunStatus.FAILED)
             raise RuntimeError(f"bounded repair terminated: {decision.reason_codes}")
         if decision.plan is None:
             raise RuntimeError("accepted repair is missing its durable plan revision")
@@ -551,7 +526,7 @@ class RunFinalizationService:
             call,
             context=self._approval_context(run, sink, attempt, worktree),
         )
-        await self._transition_run(run_id, "WAITING_FOR_APPROVAL")
+        await self._transition_run(run_id, RunStatus.WAITING_FOR_APPROVAL)
 
     async def _advance_approval(self, run_id: UUID) -> str | None:
         run, sink, attempt, worktree, call = await self._approval_identity(run_id)
@@ -562,7 +537,7 @@ class RunFinalizationService:
         if approval is None or approval.status is ApprovalStatus.PENDING:
             return None
         if approval.status is not ApprovalStatus.APPROVED:
-            await self._transition_run(run_id, "FAILED")
+            await self._transition_run(run_id, RunStatus.FAILED)
             return "FAILED"
         await self._approvals.authorize(
             approval.id,
@@ -574,23 +549,20 @@ class RunFinalizationService:
             worktree,
             message=f"AutoSWE run {run.id}: {run.goal}",
         )
-        async with self._database.transaction() as session:
-            execution = await session.get(ToolExecutionRow, call.call_id)
-            if execution is None:
-                raise RuntimeError("approved Git execution disappeared")
-            execution.status = "COMPLETED"
-            execution.result = {
-                "output": {"commit": commit},
-                "risk": RiskLevel.HIGH.value,
-                "attempts": 1,
-            }
-            execution.completed_at = utc_now()
+        # Finalize the consequential call through the gateway so the durable
+        # audit record and outbox event are produced by the same authority
+        # that governs every other tool side effect.
+        await self._tool_gateway.complete_approved(
+            call,
+            output={"commit": commit},
+            risk=RiskLevel.HIGH,
+        )
         outcome = await self._promote_run_memory(run, sink, attempt, commit)
         if outcome is PromotionOutcome.PROMOTED:
-            await self._transition_run(run_id, "COMPLETED")
+            await self._transition_run(run_id, RunStatus.COMPLETED)
             await self._cleanup_run(run)
             return "COMPLETED"
-        await self._transition_run(run_id, "WAITING_FOR_MEMORY")
+        await self._transition_run(run_id, RunStatus.WAITING_FOR_MEMORY)
         return "WAITING_FOR_MEMORY"
 
     async def _advance_memory(self, run_id: UUID) -> str | None:
@@ -605,10 +577,18 @@ class RunFinalizationService:
         if run is None or row is None:
             raise RuntimeError("memory-waiting run has no candidate")
         candidate = MemoryCandidate.model_validate(row.candidate)
-        outcome = await self._promotion.promote(candidate, self._promotion_review())
+        _, sink, attempt = await self._final_stage_identity(run.id)
+        outcome = await self._promotion.promote(
+            candidate,
+            await self._promotion_review(
+                run_id=run.id,
+                sink_id=sink.id,
+                attempt_status=attempt.status,
+            ),
+        )
         if outcome.outcome is not PromotionOutcome.PROMOTED:
             return None
-        await self._transition_run(run_id, "COMPLETED")
+        await self._transition_run(run_id, RunStatus.COMPLETED)
         await self._cleanup_run(run)
         return "COMPLETED"
 
@@ -637,43 +617,67 @@ class RunFinalizationService:
                     )
                 ).all()
             )
-            candidate = MemoryCandidate(
-                candidate_id=uuid5(NAMESPACE_URL, f"memory-candidate:{run.id}:{commit}"),
-                project_id=run.project_id,
-                source_run_id=run.id,
-                source_task_id=sink.id,
-                source_attempt_id=attempt.id,
-                source_agent="final-reviewer",
-                classification="procedural",
-                content=(
-                    f"Run completed successfully at commit {commit}. The recorded verification "
-                    "artifacts are authoritative for this outcome."
-                ),
-                observed_at=utc_now(),
-                verified_at=utc_now(),
-                repository_id=run.repository_id,
-                baseline_commit=commit,
-                originating_message_ids=tuple(message.id for message in messages)[:1_000],
-                artifact_hashes=tuple(artifact.sha256 for artifact in artifacts)[:1_000],
-                verification_commands=(("git", "rev-parse", commit),),
-                confidence=0.95,
+            candidate = build_memory_candidate(
+                run=run,
+                sink=sink,
+                attempt=attempt,
+                commit=commit,
+                artifacts=artifacts,
+                messages=messages,
             )
             existing = await session.get(MemoryCandidateRow, candidate.candidate_id)
             if existing is None:
                 await self._repository.create_memory_candidate(session, candidate)
-        result = await self._promotion.promote(candidate, self._promotion_review())
+        review = await self._promotion_review(
+            run_id=run.id,
+            sink_id=sink.id,
+            attempt_status=attempt.status,
+        )
+        result = await self._promotion.promote(candidate, review)
         return result.outcome
 
-    @staticmethod
-    def _promotion_review() -> PromotionReview:
-        return PromotionReview(
-            outcome_verified=True,
-            artifact_evidence_verified=True,
-            verification_passed=True,
-            structural_quality=0.95,
-            evidence_quality=0.95,
-            source_kind="distilled",
+    async def _promotion_review(
+        self,
+        *,
+        run_id: UUID,
+        sink_id: UUID,
+        attempt_status: str,
+    ) -> PromotionReview:
+        return await promotion_review(
+            self._database,
+            run_id=run_id,
+            sink_id=sink_id,
+            attempt_status=attempt_status,
         )
+
+    async def _final_stage_identity(self, run_id: UUID) -> tuple[RunRow, TaskRow, TaskAttemptRow]:
+        async with self._database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} does not exist")
+            revision = await session.scalar(
+                select(func.max(TaskRow.plan_revision)).where(TaskRow.run_id == run_id)
+            )
+            tasks = tuple(
+                (
+                    await session.scalars(
+                        select(TaskRow).where(
+                            TaskRow.run_id == run_id,
+                            TaskRow.plan_revision == revision,
+                        )
+                    )
+                ).all()
+            )
+            sink = self._integration_sink(tasks)
+            attempt = await session.scalar(
+                select(TaskAttemptRow)
+                .where(TaskAttemptRow.task_id == sink.id)
+                .order_by(TaskAttemptRow.started_at.desc())
+                .limit(1)
+            )
+        if attempt is None:
+            raise RuntimeError("integration attempt is missing")
+        return run, sink, attempt
 
     async def _approval_identity(
         self, run_id: UUID
@@ -709,12 +713,7 @@ class RunFinalizationService:
 
     @staticmethod
     def _integration_sink(tasks: tuple[TaskRow, ...]) -> TaskRow:
-        depended_on = {UUID(value) for task in tasks for value in task.dependencies}
-        sinks = tuple(task for task in tasks if task.id not in depended_on)
-        validations = tuple(task for task in sinks if task.task_type.value == "VALIDATION")
-        if len(validations) != 1:
-            raise RuntimeError("latest plan revision must have one final validation sink")
-        return validations[0]
+        return integration_sink(tasks)
 
     async def _current_plan(self, run_id: UUID) -> TaskPlan:
         async with self._database.sessions() as session:
@@ -730,33 +729,7 @@ class RunFinalizationService:
 
     @staticmethod
     def _require_integration_plan(plan: TaskPlan) -> None:
-        tasks = {task.id: task for task in plan.tasks}
-        depended_on = {
-            dependency for task in plan.tasks for dependency in task.dependencies
-        }
-        sinks = tuple(task for task in plan.tasks if task.id not in depended_on)
-
-        def ancestors(task_id: UUID) -> set[UUID]:
-            found: set[UUID] = set()
-            pending = list(tasks[task_id].dependencies)
-            while pending:
-                dependency = pending.pop()
-                if dependency in found:
-                    continue
-                found.add(dependency)
-                pending.extend(tasks[dependency].dependencies)
-            return found
-
-        valid = tuple(
-            task
-            for task in sinks
-            if task.task_type.value == "VALIDATION"
-            and ancestors(task.id) | {task.id} == set(tasks)
-        )
-        if len(valid) != 1:
-            raise RuntimeError(
-                "current plan requires exactly one final VALIDATION sink covering every task"
-            )
+        require_integration_plan(plan)
 
     @staticmethod
     def _commit_call(
@@ -795,7 +768,7 @@ class RunFinalizationService:
             worktree_root=worktree,
         )
 
-    async def _transition_run(self, run_id: UUID, target: str) -> None:
+    async def _transition_run(self, run_id: UUID, target: RunStatus) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
             run = await session.scalar(
@@ -803,8 +776,10 @@ class RunFinalizationService:
             )
             if run is None:
                 raise LookupError(f"run {run_id} does not exist")
-            if run.state == target:
+            current = RunStatus(run.state)
+            if current is target:
                 return
+            require_run_transition(current, target)
             await self._repository.record_state_duration(
                 session,
                 aggregate_type="workflow",
@@ -813,7 +788,7 @@ class RunFinalizationService:
                 entered_at=run.state_entered_at,
                 exited_at=now,
             )
-            run.state = target
+            run.state = target.value
             run.state_entered_at = now
 
     async def _cleanup_run(self, run: RunRow) -> None:

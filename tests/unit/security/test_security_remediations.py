@@ -134,27 +134,20 @@ async def test_require_websocket_admin_query_param_token() -> None:
     token_value = "secret-admin-token-1234567890-abcdef123456"  # noqa: S105
     authenticator = AdminAuthenticator(token_value)
 
-    # Test valid query parameter token
+    # Query-parameter tokens are rejected: URLs are logged by proxies and
+    # access logs, so they must never carry credentials.
     app = FastAPI()
     app.state.authenticator = authenticator
     ws = MagicMock(spec=WebSocket)
     ws.app = app
     ws.headers = {}
     ws.query_params = {"token": token_value}
-
-    principal = await require_websocket_admin(ws)
-    assert principal.subject == "single-machine-admin"
-
-    # Test invalid query parameter token
-    ws_invalid = MagicMock(spec=WebSocket)
-    ws_invalid.app = app
-    ws_invalid.headers = {}
-    ws_invalid.query_params = {"token": "wrong-token-1234567890-abcdef123456"}  # noqa: S105
-    ws_invalid.close = AsyncMock()
+    ws.url.path = "/api/v1/ws"
+    ws.close = AsyncMock()
 
     with pytest.raises(AuthenticationError):
-        await require_websocket_admin(ws_invalid)
-    ws_invalid.close.assert_awaited_once_with(
+        await require_websocket_admin(ws)
+    ws.close.assert_awaited_once_with(
         code=1008, reason="invalid administrator credentials"
     )
 

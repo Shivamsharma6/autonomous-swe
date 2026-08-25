@@ -12,7 +12,8 @@ from sqlalchemy.dialects.postgresql import insert
 from agents.base import AgentAttemptRecord, AgentInvocation, AgentRuntime, UsageRecorder
 from agents.gateway import ModelGateway
 from agents.specs import AgentRole, build_agent_specs
-from domain.enums import TaskStatus, TaskType
+from domain.enums import RiskLevel, RunStatus, TaskStatus, TaskType
+from domain.events import require_run_transition
 from domain.models import PlanLimits, TaskPlan
 from execution.repositories import RepositoryAdapterRegistry
 from knowledge.memory.port import MemoryPort
@@ -73,6 +74,7 @@ class RunPlanningService:
         primary_model: str,
         fallback_models: tuple[str, ...],
         limits: PlanLimits,
+        max_risk_ceiling: RiskLevel = RiskLevel.HIGH,
         repository_context: RepositoryContextProvider | None = None,
         repository: DomainRepository | None = None,
         stale_after: timedelta = timedelta(seconds=30),
@@ -91,6 +93,7 @@ class RunPlanningService:
         self._validator = TaskPlanValidator(
             allowed_tools={"read_file", "search_code", "apply_patch", "run_tests"},
             require_final_validation_sink=True,
+            max_risk_ceiling=max_risk_ceiling,
         )
 
     async def plan_next(self) -> TaskPlan | None:
@@ -178,8 +181,11 @@ class RunPlanningService:
             run = await session.scalar(
                 select(RunRow)
                 .where(
-                    (RunRow.state == "PENDING")
-                    | ((RunRow.state == "PLANNING") & (RunRow.state_entered_at < stale_before))
+                    (RunRow.state == RunStatus.PENDING.value)
+                    | (
+                        (RunRow.state == RunStatus.PLANNING.value)
+                        & (RunRow.state_entered_at < stale_before)
+                    )
                 )
                 .order_by(RunRow.created_at, RunRow.id)
                 .limit(1)
@@ -190,9 +196,10 @@ class RunPlanningService:
             repository = await session.get(RepositoryRow, run.repository_id)
             if repository is None:
                 raise RuntimeError("run repository is missing")
-            if run.state != "PLANNING":
+            if run.state != RunStatus.PLANNING.value:
+                require_run_transition(RunStatus(run.state), RunStatus.PLANNING)
                 await self._record_run_duration(session, run, exited_at=now)
-                run.state = "PLANNING"
+                run.state = RunStatus.PLANNING.value
                 run.state_entered_at = now
             attempt_id = uuid5(NAMESPACE_URL, f"run-stage:{run.id}:architect")
             await session.execute(
@@ -218,7 +225,7 @@ class RunPlanningService:
             run = await session.scalar(
                 select(RunRow).where(RunRow.id == plan.run_id).with_for_update()
             )
-            if run is None or run.state != "PLANNING":
+            if run is None or run.state != RunStatus.PLANNING.value:
                 raise RuntimeError("run is no longer owned by the planning stage")
             existing = await session.scalar(
                 select(RunStageAttemptRow).where(RunStageAttemptRow.id == stage_attempt_id)
@@ -246,7 +253,8 @@ class RunPlanningService:
                         target=TaskStatus.READY,
                     )
             await self._record_run_duration(session, run, exited_at=now)
-            run.state = "EXECUTING"
+            require_run_transition(RunStatus(run.state), RunStatus.EXECUTING)
+            run.state = RunStatus.EXECUTING.value
             run.state_entered_at = now
             existing.status = "COMPLETED"
             existing.ended_at = now
@@ -280,9 +288,10 @@ class RunPlanningService:
                 select(RunRow).where(RunRow.id == run_id).with_for_update()
             )
             attempt = await session.get(RunStageAttemptRow, stage_attempt_id)
-            if run is not None and run.state == "PLANNING":
+            if run is not None and run.state == RunStatus.PLANNING.value:
+                require_run_transition(RunStatus(run.state), RunStatus.FAILED)
                 await self._record_run_duration(session, run, exited_at=now)
-                run.state = "FAILED"
+                run.state = RunStatus.FAILED.value
                 run.state_entered_at = now
             if attempt is not None:
                 attempt.status = "FAILED"

@@ -8,8 +8,10 @@ from pydantic import AwareDatetime, Field
 
 from domain.enums import (
     GRAPH_EXECUTION_TRANSITIONS,
+    RUN_TRANSITIONS,
     TASK_TRANSITIONS,
     GraphExecutionState,
+    RunStatus,
     TaskStatus,
 )
 from domain.models import ContractModel, canonical_sha256
@@ -27,6 +29,11 @@ def require_task_transition(current: TaskStatus, target: TaskStatus) -> None:
 def require_graph_transition(current: GraphExecutionState, target: GraphExecutionState) -> None:
     if target not in GRAPH_EXECUTION_TRANSITIONS[current]:
         raise InvalidStateTransition(f"illegal graph transition: {current} -> {target}")
+
+
+def require_run_transition(current: RunStatus, target: RunStatus) -> None:
+    if target not in RUN_TRANSITIONS[current]:
+        raise InvalidStateTransition(f"illegal run transition: {current} -> {target}")
 
 
 class DomainEvent(ContractModel):

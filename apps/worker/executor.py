@@ -37,6 +37,7 @@ class TaskExecutionContext:
     task_type: TaskType
     goal: str
     allowed_tools: tuple[str, ...]
+    assigned_capability: str
     risk_ceiling: RiskLevel
     dependencies: tuple[UUID, ...]
 
@@ -53,6 +54,7 @@ class TaskExecutionContext:
             task_type=lease.task_type,
             goal=lease.goal,
             allowed_tools=lease.allowed_tools,
+            assigned_capability=lease.assigned_capability,
             risk_ceiling=lease.risk_ceiling,
             dependencies=lease.dependencies,
         )

@@ -26,7 +26,12 @@ from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import ModelCallRow, TaskRow, WorkflowNodeExecutionRow, utc_now
 from tools.approval import ApprovalService
-from tools.gateway import ToolCallResult, ToolExecutionStatus, ToolGateway
+from tools.gateway import (
+    ApprovalRequired,
+    ToolCallResult,
+    ToolExecutionStatus,
+    ToolGateway,
+)
 from tools.production import ProductionToolSet
 from tools.registry import ToolExecutionContext, ToolRegistry
 from workflows.state import NodeExecutionRequest, NodeExecutionResult
@@ -124,6 +129,7 @@ class GatewayToolDispatcher(ToolDispatcher):
         repository_id: UUID,
         baseline_commit: str,
         worktree: Path,
+        agent_capabilities: frozenset[str],
         risk_ceiling: RiskLevel,
     ) -> None:
         self._gateway = gateway
@@ -132,11 +138,11 @@ class GatewayToolDispatcher(ToolDispatcher):
         self._repository_id = repository_id
         self._baseline_commit = baseline_commit
         self._worktree = worktree
+        self._agent_capabilities = agent_capabilities
         self._risk_ceiling = risk_ceiling
         self.results: list[ToolCallResult] = []
 
     async def dispatch(self, call: ToolCall, *, invocation: AgentInvocation) -> dict[str, Any]:
-        registered = self._registry.resolve(call.name, "1.0")
         request = ToolCallRequest(
             call_id=uuid5(
                 NAMESPACE_URL,
@@ -152,21 +158,41 @@ class GatewayToolDispatcher(ToolDispatcher):
                 f"agent-tool:{invocation.attempt_id}:{invocation.trace_id}:{call.call_id}"
             ),
         )
-        result = await self._gateway.execute(
-            request,
-            context=ToolExecutionContext(
-                project_id=self._project_id,
-                repository_id=self._repository_id,
-                run_id=invocation.run_id,
-                task_id=invocation.task_id,
-                attempt_id=invocation.attempt_id,
-                baseline_commit=self._baseline_commit,
-                agent_role=self._role(invocation),
-                agent_capabilities=frozenset({registered.spec.owning_capability}),
-                risk_ceiling=self._risk_ceiling,
-                worktree_root=self._worktree,
-            ),
-        )
+        try:
+            result = await self._gateway.execute(
+                request,
+                context=ToolExecutionContext(
+                    project_id=self._project_id,
+                    repository_id=self._repository_id,
+                    run_id=invocation.run_id,
+                    task_id=invocation.task_id,
+                    attempt_id=invocation.attempt_id,
+                    baseline_commit=self._baseline_commit,
+                    agent_role=self._role(invocation),
+                    # Declared task capability from the persisted TaskSpec, never
+                    # derived from the tool being authorized.
+                    agent_capabilities=self._agent_capabilities,
+                    risk_ceiling=self._risk_ceiling,
+                    worktree_root=self._worktree,
+                ),
+            )
+        except ApprovalRequired:
+            # Approval-gated tools are consequential by definition; an agent
+            # loop cannot pause for a human, so the call is denied visibly
+            # instead of crashing the node into a retry loop.
+            result = ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                tool_version=request.tool_version,
+                status=ToolExecutionStatus.FAILED,
+                output={},
+                error=(
+                    "tool requires exact-call human approval and is not "
+                    "executable inside an agent loop"
+                ),
+                risk=self._risk_ceiling,
+                attempts=0,
+            )
         self.results.append(result)
         return result.model_dump(mode="json")
 
@@ -190,6 +216,7 @@ class ProductionNodeExecutor:
         repository_id: UUID,
         baseline_commit: str,
         allowed_tools: tuple[str, ...],
+        assigned_capability: str,
         risk_ceiling: RiskLevel,
         primary_model: str,
         fallback_models: tuple[str, ...],
@@ -210,6 +237,9 @@ class ProductionNodeExecutor:
         self._repository_id = repository_id
         self._baseline_commit = baseline_commit
         self._allowed_tools = frozenset(allowed_tools)
+        if not assigned_capability.strip():
+            raise ValueError("task assigned capability must be declared")
+        self._assigned_capability = assigned_capability
         self._risk_ceiling = risk_ceiling
         self._primary_model = primary_model
         self._fallback_models = fallback_models
@@ -309,6 +339,7 @@ class ProductionNodeExecutor:
             repository_id=self._repository_id,
             baseline_commit=self._baseline_commit,
             worktree=self._tool_set.worktree,
+            agent_capabilities=frozenset({self._assigned_capability}),
             risk_ceiling=self._risk_ceiling,
         )
         runtime = AgentRuntime(

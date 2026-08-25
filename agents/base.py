@@ -22,6 +22,9 @@ from agents.gateway import (
 from domain.models import AgentSpec, CommitSha, ContractModel
 from knowledge.memory.port import ContextRequest, MemoryPort
 
+_MAX_SAME_MODEL_RETRIES = 3
+_RETRY_BACKOFF_BASE = 0.5
+
 
 class AgentInvocation(ContractModel):
     schema_version: str = "1.0"
@@ -176,8 +179,10 @@ class AgentRuntime[OutputT: BaseModel]:
         schema_failures = 0
         models = (self.spec.primary_model, *self.spec.fallback_models)
         model_index = 0
+        transient_failures = 0
 
-        for turn in range(1, self.spec.turn_budget + 1):
+        turn = 1
+        while turn <= self.spec.turn_budget:
             model = models[min(model_index, len(models) - 1)]
             request = ModelRequest(
                 trace_id=invocation.trace_id,
@@ -207,8 +212,25 @@ class AgentRuntime[OutputT: BaseModel]:
                 if error.failure_class in {
                     FailureClass.TRANSIENT,
                     FailureClass.TIMEOUT,
+                }:
+                    if transient_failures < _MAX_SAME_MODEL_RETRIES:
+                        # Retry the same model with backoff; retries do not
+                        # consume the turn budget.
+                        transient_failures += 1
+                        delay = min(_RETRY_BACKOFF_BASE * (2**transient_failures), 8.0)
+                        await asyncio.sleep(delay)
+                        continue
+                    if model_index + 1 < len(models):
+                        model_index += 1
+                        transient_failures = 0
+                        continue
+                    raise
+                if error.failure_class in {
+                    FailureClass.PERMANENT,
+                    FailureClass.CAPABILITY,
                 } and model_index + 1 < len(models):
                     model_index += 1
+                    transient_failures = 0
                     continue
                 raise
 
@@ -225,6 +247,7 @@ class AgentRuntime[OutputT: BaseModel]:
                 await self._dispatch_tools(
                     invocation, response, messages=messages, all_calls=all_calls
                 )
+                turn += 1
                 continue
 
             try:
@@ -253,6 +276,7 @@ class AgentRuntime[OutputT: BaseModel]:
                         ),
                     )
                 )
+                turn += 1
                 continue
 
             attempt = self._attempt(invocation, turn, response)

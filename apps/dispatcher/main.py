@@ -256,6 +256,7 @@ async def run_dispatcher() -> None:
                 max_total_budget_usd=settings.max_total_budget_usd,
                 max_total_execution_seconds=settings.max_total_execution_seconds,
             ),
+            max_risk_ceiling=settings.max_risk_ceiling,
             repository=repository,
         ),
         finalizer=RunFinalizationService(
