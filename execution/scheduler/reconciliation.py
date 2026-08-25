@@ -8,6 +8,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.enums import GraphExecutionState, TaskStatus
+from observability.logging import get_structured_logger
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import (
@@ -26,6 +27,9 @@ class ReconciliationAction(StrEnum):
     REQUEUE_MISSING_CHECKPOINT = "REQUEUE_MISSING_CHECKPOINT"
     DOMAIN_TERMINAL_WINS = "DOMAIN_TERMINAL_WINS"
     QUARANTINE = "QUARANTINE"
+
+
+logger = get_structured_logger("autoswe.reconciliation")
 
 
 class ReconciliationService:
@@ -114,6 +118,44 @@ class ReconciliationService:
             )
             await session.flush()
             return action
+
+    async def reconcile_due(
+        self,
+        *,
+        limit: int = 32,
+        now: datetime | None = None,
+    ) -> dict[UUID, ReconciliationAction]:
+        current_time = now or datetime.now(UTC)
+        async with self.database.sessions() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(TaskRow.project_id, TaskRow.id)
+                        .join(LeaseRow, LeaseRow.task_id == TaskRow.id)
+                        .where(
+                            TaskRow.state == TaskStatus.RUNNING,
+                            LeaseRow.expires_at <= current_time,
+                        )
+                        .order_by(LeaseRow.expires_at.asc())
+                        .limit(limit)
+                    )
+                )
+                .all()
+            )
+        results: dict[UUID, ReconciliationAction] = {}
+        for project_id, task_id in rows:
+            try:
+                results[task_id] = await self.reconcile(
+                    project_id=project_id, task_id=task_id, now=current_time
+                )
+            except Exception as error:
+                logger.error(
+                    "reconciliation_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    task_id=str(task_id),
+                )
+        return results
 
     @staticmethod
     def _decide(

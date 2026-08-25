@@ -155,6 +155,22 @@ class DispatchedTaskExecutor:
                 )
                 return WorkerOutcome.COMPLETED
             return WorkerOutcome.WAITING
+        except asyncio.CancelledError:
+            if not heartbeat_stop.is_set():
+                heartbeat_stop.set()
+                heartbeat.cancel()
+            try:
+                await self._scheduler.finish_claim(
+                    task_id=context.task_id,
+                    project_id=context.project_id,
+                    owner=message.owner,
+                    token=message.lease_token,
+                    attempt_id=context.attempt_id,
+                    target=TaskStatus.FAILED,
+                )
+            except (PermissionError, LookupError):
+                pass
+            raise
         except Exception:
             await self._scheduler.finish_claim(
                 task_id=context.task_id,

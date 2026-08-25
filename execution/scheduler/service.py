@@ -330,6 +330,15 @@ class SchedulerService:
     ) -> bool:
         current_time = now or datetime.now(UTC)
         async with self.database.transaction() as session:
+            task_state = await session.scalar(
+                select(TaskRow.state).where(TaskRow.id == task_id)
+            )
+            if task_state in {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return False
             result = await session.execute(
                 update(LeaseRow)
                 .where(
@@ -426,11 +435,20 @@ class SchedulerService:
             )
             if task is None:
                 raise LookupError(f"task {task_id} does not exist in project {project_id}")
-            if task.state is target:
-                return
             lease = await session.scalar(
                 select(LeaseRow).where(LeaseRow.task_id == task_id).with_for_update()
             )
+            if task.state is target:
+                # Idempotent replay must not skip ownership validation or leak
+                # reservations: clean up any surviving lease state before returning.
+                if lease is not None:
+                    if lease.owner != owner or lease.token != token:
+                        raise PermissionError(
+                            "worker cannot finish a claim owned by another dispatcher"
+                        )
+                    await self._release_reservations(session, task_id, current_time)
+                    await session.delete(lease)
+                return
             if lease is None or lease.owner != owner or lease.token != token:
                 raise PermissionError("worker cannot finish a claim owned by another dispatcher")
             graph = await session.scalar(

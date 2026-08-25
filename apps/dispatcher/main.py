@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 import signal
 import socket
-from collections.abc import Callable
-from datetime import timedelta
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from redis.asyncio import Redis
 
 from agents.gateway import OpenAICompatibleGateway, ProviderCapabilities
+from apps.dispatcher.background import CONSUMER_GROUP, EventConsumptionLoop, RetentionLoop
 from domain.models import ContractModel, PlanLimits
 from execution.sandbox.worktrees import GitWorktreeManager
+from execution.scheduler.reconciliation import ReconciliationService
 from execution.scheduler.service import ConcurrencyPolicy, SchedulerService, TaskClaim
 from infrastructure.config import Settings
 from knowledge.memory.uams import UAMSMemoryAdapter
@@ -70,6 +72,15 @@ class RunFinalizerPort(Protocol):
     async def advance_next(self) -> object | None: ...
 
 
+class ReconcilerPort(Protocol):
+    async def reconcile_due(
+        self,
+        *,
+        limit: int = 32,
+        now: datetime | None = None,
+    ) -> Mapping[UUID, object]: ...
+
+
 class RedisDispatchPublisher:
     def __init__(self, transport: RedisStreamsTransport) -> None:
         self._transport = transport
@@ -93,6 +104,7 @@ class DispatcherService:
         poll_seconds: float = 0.25,
         planner: RunPlannerPort | None = None,
         finalizer: RunFinalizerPort | None = None,
+        reconciler: ReconcilerPort | None = None,
     ) -> None:
         if not owner.strip() or batch_size < 1 or poll_seconds <= 0:
             raise ValueError("dispatcher owner, batch size, and poll interval must be valid")
@@ -103,6 +115,7 @@ class DispatcherService:
         self._poll_seconds = poll_seconds
         self._planner = planner
         self._finalizer = finalizer
+        self._reconciler = reconciler
         self._dispatch_graph = build_scheduler_publish_graph(self._publish_payload)
 
     async def _publish_payload(self, payload: dict[str, object]) -> None:
@@ -113,12 +126,22 @@ class DispatcherService:
             try:
                 await self._planner.plan_next()
             except Exception as error:
-                logger.error("run_planning_failed", error_type=type(error).__name__)
+                logger.error(
+                    "run_planning_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                )
         if self._finalizer is not None:
             try:
                 await self._finalizer.advance_next()
             except Exception as error:
-                logger.error("run_finalization_failed", error_type=type(error).__name__)
+                logger.error(
+                    "run_finalization_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                )
+        if self._reconciler is not None:
+            await self._reconciler.reconcile_due()
         await self._scheduler.reclaim_expired()
         promote = getattr(self._scheduler, "promote_dependency_ready", None)
         if promote is not None:
@@ -143,12 +166,27 @@ class DispatcherService:
         return len(claims)
 
     async def run(self, stop: asyncio.Event) -> None:
+        failures = 0
         while not stop.is_set():
-            dispatched = await self.dispatch_once()
+            try:
+                dispatched = await self.dispatch_once()
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                failures += 1
+                dispatched = 0
+                logger.error(
+                    "dispatch_cycle_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    consecutive_failures=failures,
+                )
             if dispatched:
                 continue
+            delay = self._poll_seconds * (2**min(failures, 4))
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self._poll_seconds)
+                await asyncio.wait_for(stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
 
@@ -237,8 +275,16 @@ async def run_dispatcher() -> None:
             ),
             repository=repository,
         ),
+        reconciler=ReconciliationService(database=database, repository=repository),
     )
     outbox = OutboxPublisher(database, transport, publisher_id=owner)
+    events = EventConsumptionLoop(
+        database=database,
+        transport=transport,
+        consumer_name=f"events:{owner}",
+        streams=("task-state", "workflow-state", "artifact-integrity", "reconciliation"),
+    )
+    retention = RetentionLoop(database=database, transport=transport)
     stop = asyncio.Event()
     _install_signal_handlers(stop.set)
 
@@ -251,8 +297,50 @@ async def run_dispatcher() -> None:
                 except TimeoutError:
                     pass
 
+    async def publish_task_dispatch() -> None:
+        # Re-dispatch after crashes is owned by Postgres lease expiry plus
+        # reconciliation; this loop only reclaims stale pending entries so the
+        # consumer PEL does not grow forever.
+        await transport.ensure_group("task-dispatch", CONSUMER_GROUP)
+        while not stop.is_set():
+            try:
+                stale = await transport.reclaim(
+                    "task-dispatch",
+                    CONSUMER_GROUP,
+                    f"dispatch-reaper:{owner}",
+                    min_idle=timedelta(minutes=5),
+                    count=32,
+                )
+                for record in stale:
+                    await transport.acknowledge(
+                        "task-dispatch", CONSUMER_GROUP, record.stream_id
+                    )
+                if stale:
+                    logger.info(
+                        "stale_dispatch_entries_reclaimed",
+                        count=len(stale),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.error(
+                    "dispatch_reclaim_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                )
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=30.0)
+            except TimeoutError:
+                pass
+
     try:
-        await asyncio.gather(service.run(stop), publish_outbox())
+        await asyncio.gather(
+            service.run(stop),
+            publish_outbox(),
+            events.run(stop),
+            retention.run(stop),
+            publish_task_dispatch(),
+        )
     finally:
         await model.close()
         await memory.close()
