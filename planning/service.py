@@ -139,7 +139,26 @@ class RunPlanningService:
                     },
                 )
             )
-            plan = result.output.model_copy(update={"limits": self._limits})
+            plan = result.output.model_copy(
+                update={
+                    "run_id": run.id,
+                    "project_id": run.project_id,
+                    "repository_id": run.repository_id,
+                    "baseline_commit": run.baseline_commit,
+                    "revision": 1,
+                    "limits": self._limits,
+                    "tasks": tuple(
+                        task.model_copy(
+                            update={
+                                "project_id": run.project_id,
+                                "repository_id": run.repository_id,
+                                "plan_revision": 1,
+                            }
+                        )
+                        for task in result.output.tasks
+                    ),
+                }
+            )
             self._validate_scope(plan, run)
             validation = self._validator.validate(plan)
             if not validation.valid:

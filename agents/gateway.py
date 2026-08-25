@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from enum import StrEnum
@@ -268,6 +269,7 @@ class OpenAICompatibleGateway:
                 | current_correlation().to_headers()
                 | {"x-trace-id": request.trace_id},
                 json=self._payload(request, stream=False),
+                timeout=request.timeout_seconds,
             )
         except httpx.TimeoutException as error:
             raise GatewayError(
@@ -297,6 +299,7 @@ class OpenAICompatibleGateway:
                         | current_correlation().to_headers()
                         | {"x-trace-id": request.trace_id},
                             json=self._payload(request, stream=True),
+                            timeout=request.timeout_seconds,
                         ) as response:
                             self._raise_for_status(response)
                             async for line in response.aiter_lines():
@@ -374,12 +377,7 @@ class OpenAICompatibleGateway:
         raw_text = message.get("content")
         structured: dict[str, Any] | None = None
         if isinstance(raw_text, str) and raw_text.strip():
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                structured = cast(dict[str, Any], parsed)
+            structured = _extract_json(raw_text)
         calls = tuple(_tool_call(value) for value in message.get("tool_calls") or ())
         raw_usage: dict[str, Any] = (
             cast(dict[str, Any], body["usage"]) if isinstance(body.get("usage"), dict) else {}
@@ -473,6 +471,37 @@ def strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
             result["required"] = list(properties)
         result["additionalProperties"] = False
     return result
+
+
+def _extract_json(raw_text: str) -> dict[str, Any] | None:
+    text = raw_text.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if match:
+        try:
+            parsed = json.loads(match.group(1).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            parsed = json.loads(text[first_brace : last_brace + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _object_json(response: httpx.Response) -> dict[str, Any]:
