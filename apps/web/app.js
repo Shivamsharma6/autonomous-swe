@@ -18,6 +18,7 @@
     ws: null,
     wsReconnectTimer: null,
     selectedTask: null,
+    modelConfig: null,
   };
 
   const el = (id) => document.getElementById(id);
@@ -180,6 +181,62 @@
     }
   }
 
+  async function readDirectoryFiles(dirHandle, pathPrefix = '', maxFiles = 300) {
+    const files = [];
+    const skipDirs = new Set(['.git', 'node_modules', '.venv', 'venv', 'dist', 'build', '__pycache__', '.pytest_cache', '.idea', '.vscode']);
+    async function scan(handle, currentPath) {
+      if (files.length >= maxFiles) return;
+      for await (const entry of handle.values()) {
+        if (files.length >= maxFiles) break;
+        if (entry.kind === 'directory') {
+          if (!skipDirs.has(entry.name)) {
+            await scan(entry, `${currentPath}${entry.name}/`);
+          }
+        } else if (entry.kind === 'file') {
+          try {
+            const file = await entry.getFile();
+            if (file.size <= 500_000) {
+              const text = await file.text();
+              files.push({ path: `${currentPath}${entry.name}`, content: text });
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    await scan(dirHandle, pathPrefix);
+    return files;
+  }
+
+  async function onboardRepository(payload) {
+    const body = await api('/api/v1/projects/onboard', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    state.projectId = body.project_id;
+    state.repositoryId = body.repository_id;
+    state.projectName = body.name;
+    sessionStorage.setItem('autoswe.projectId', state.projectId);
+    sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
+    sessionStorage.setItem('autoswe.projectName', state.projectName);
+
+    el('projectName').value = body.name;
+    el('sourcePath').value = body.source_path;
+    el('defaultBranch').value = body.default_branch;
+    if (body.baseline_commit) {
+      el('baselineCommit').value = body.baseline_commit;
+    }
+
+    const ident = el('projectIdentity');
+    if (ident) {
+      const textSpan = ident.querySelector('.identity-text');
+      if (textSpan) {
+        textSpan.innerHTML = `<strong>✓ Ready</strong> · ${body.name} (${body.default_branch} · <code>${body.baseline_commit ? body.baseline_commit.slice(0, 8) : 'HEAD'}</code>)`;
+      }
+    }
+    el('startRun').disabled = false;
+    return body;
+  }
+
   // Directory Picker Fallback & Local Git Inspection
   async function selectDirectory(event) {
     if (event) event.preventDefault();
@@ -189,45 +246,35 @@
         if (!dirHandle) return;
         const dirName = dirHandle.name;
         el('projectName').value = dirName;
-        el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
+        showToast(`Reading repository files from ${dirName}...`);
 
+        let branch = 'main';
         try {
           const gitHandle = await dirHandle.getDirectoryHandle('.git');
           if (gitHandle) {
             const headHandle = await gitHandle.getFileHandle('HEAD');
             const headFile = await headHandle.getFile();
             const headText = (await headFile.text()).trim();
-
             if (headText.startsWith('ref: refs/heads/')) {
-              const branch = headText.replace('ref: refs/heads/', '').trim();
-              el('defaultBranch').value = branch;
-
-              try {
-                const refsHandle = await gitHandle.getDirectoryHandle('refs');
-                const headsHandle = await refsHandle.getDirectoryHandle('heads');
-                const branchHandle = await headsHandle.getFileHandle(branch);
-                const branchFile = await branchHandle.getFile();
-                const commitSha = (await branchFile.text()).trim();
-                if (commitSha && commitSha.length >= 40) {
-                  el('baselineCommit').value = commitSha;
-                  showToast(`Selected "${dirName}" (${branch} · ${commitSha.slice(0, 8)})`);
-                  return;
-                }
-              } catch (_) {}
-              showToast(`Selected "${dirName}" (Branch: ${branch})`);
-              return;
-            } else if (headText.length >= 40) {
-              el('baselineCommit').value = headText;
-              showToast(`Selected "${dirName}" (Commit: ${headText.slice(0, 8)})`);
-              return;
+              branch = headText.replace('ref: refs/heads/', '').trim();
             }
           }
         } catch (_) {}
-        showToast(`Selected repository directory: ${dirName}`);
+
+        const files = await readDirectoryFiles(dirHandle);
+        showToast(`Auto-provisioning "${dirName}"...`);
+        const onboardRes = await onboardRepository({
+          name: dirName,
+          folder_name: dirName,
+          default_branch: branch,
+          files: files,
+        });
+
+        showToast(`✓ "${dirName}" ready (${onboardRes.default_branch} · ${onboardRes.baseline_commit.slice(0, 8)})`);
         return;
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn('showDirectoryPicker unavailable, falling back to input:', err);
+        console.warn('showDirectoryPicker error, falling back to input:', err);
       }
     }
 
@@ -238,7 +285,7 @@
     }
   }
 
-  function handleFallbackDirPicker(event) {
+  async function handleFallbackDirPicker(event) {
     const files = event.target.files;
     if (!files || !files.length) return;
     const firstFile = files[0];
@@ -246,47 +293,33 @@
     if (pathParts.length > 1) {
       const dirName = pathParts[0];
       el('projectName').value = dirName;
-      el('sourcePath').value = `/var/lib/autoswe/imports/${dirName}`;
-      
-      let headFile = null;
-      for (let i = 0; i < files.length; i++) {
-        if (files[i].webkitRelativePath === `${dirName}/.git/HEAD`) {
-          headFile = files[i];
-          break;
+      showToast(`Uploading ${files.length} files from ${dirName}...`);
+
+      const filePayloads = [];
+      const skipDirs = new Set(['.git', 'node_modules', '.venv', 'venv', 'dist', 'build', '__pycache__', '.pytest_cache']);
+      for (let i = 0; i < files.length && filePayloads.length < 300; i++) {
+        const file = files[i];
+        const rel = file.webkitRelativePath.replace(`${dirName}/`, '');
+        const topDir = rel.split('/')[0];
+        if (skipDirs.has(topDir)) continue;
+        if (file.size <= 500_000) {
+          try {
+            const text = await file.text();
+            filePayloads.push({ path: rel, content: text });
+          } catch (_) {}
         }
       }
 
-      if (headFile) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const text = (e.target.result || '').trim();
-          if (text.startsWith('ref: refs/heads/')) {
-            const branch = text.replace('ref: refs/heads/', '').trim();
-            el('defaultBranch').value = branch;
-
-            for (let j = 0; j < files.length; j++) {
-              if (files[j].webkitRelativePath === `${dirName}/.git/refs/heads/${branch}`) {
-                const refReader = new FileReader();
-                refReader.onload = (re) => {
-                  const commit = (re.target.result || '').trim();
-                  if (commit && commit.length >= 40) {
-                    el('baselineCommit').value = commit;
-                    showToast(`Selected "${dirName}" (${branch} · ${commit.slice(0, 8)})`);
-                  }
-                };
-                refReader.readAsText(files[j]);
-                return;
-              }
-            }
-            showToast(`Selected "${dirName}" (Branch: ${branch})`);
-          } else if (text.length >= 40) {
-            el('baselineCommit').value = text;
-            showToast(`Selected "${dirName}" (Commit: ${text.slice(0, 8)})`);
-          }
-        };
-        reader.readAsText(headFile);
-      } else {
-        showToast(`Selected folder: ${dirName}`);
+      try {
+        const onboardRes = await onboardRepository({
+          name: dirName,
+          folder_name: dirName,
+          default_branch: 'main',
+          files: filePayloads,
+        });
+        showToast(`✓ "${dirName}" ready (${onboardRes.default_branch} · ${onboardRes.baseline_commit.slice(0, 8)})`);
+      } catch (err) {
+        showToast(err.message, true);
       }
     }
   }
@@ -295,28 +328,14 @@
   async function registerProject(event) {
     event.preventDefault();
     try {
-      const body = await api('/api/v1/projects', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: el('projectName').value.trim(),
-          source_path: el('sourcePath').value.trim(),
-          default_branch: el('defaultBranch').value.trim(),
-        }),
+      showToast('Registering repository...');
+      const body = await onboardRepository({
+        name: el('projectName').value.trim(),
+        source_path: el('sourcePath').value.trim(),
+        folder_name: el('sourcePath').value.trim(),
+        default_branch: el('defaultBranch').value.trim(),
       });
-      state.projectId = body.project_id;
-      state.repositoryId = body.repository_id;
-      state.projectName = el('projectName').value.trim();
-      sessionStorage.setItem('autoswe.projectId', state.projectId);
-      sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
-      sessionStorage.setItem('autoswe.projectName', state.projectName);
-      
-      const ident = el('projectIdentity');
-      if (ident) {
-        const textSpan = ident.querySelector('.identity-text');
-        if (textSpan) textSpan.textContent = `${state.projectName} · ${state.projectId}`;
-      }
-      el('startRun').disabled = false;
-      showToast('Repository registered in governed boundary.');
+      showToast(`Repository "${body.name}" registered and ready.`);
     } catch (error) {
       showToast(error.message, true);
     }
@@ -331,27 +350,23 @@
 
     try {
       if (!state.projectId || !state.repositoryId) {
-        showToast('Registering repository...');
-        const projBody = await api('/api/v1/projects', {
-          method: 'POST',
-          body: JSON.stringify({
-            name: el('projectName').value.trim(),
-            source_path: el('sourcePath').value.trim(),
-            default_branch: el('defaultBranch').value.trim(),
-          }),
+        showToast('Auto-provisioning repository...');
+        const onboardRes = await onboardRepository({
+          name: el('projectName').value.trim(),
+          source_path: el('sourcePath').value.trim(),
+          folder_name: el('sourcePath').value.trim(),
+          default_branch: el('defaultBranch').value.trim(),
         });
-        state.projectId = projBody.project_id;
-        state.repositoryId = projBody.repository_id;
-        state.projectName = el('projectName').value.trim();
-        sessionStorage.setItem('autoswe.projectId', state.projectId);
-        sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
-        sessionStorage.setItem('autoswe.projectName', state.projectName);
-        
-        const ident = el('projectIdentity');
-        if (ident) {
-          const textSpan = ident.querySelector('.identity-text');
-          if (textSpan) textSpan.textContent = `${state.projectName} · ${state.projectId}`;
+        if (!el('baselineCommit').value.trim()) {
+          el('baselineCommit').value = onboardRes.baseline_commit;
         }
+      }
+
+      const commitSha = el('baselineCommit').value.trim().toLowerCase();
+      if (!commitSha || commitSha.length < 40) {
+        showToast('Baseline commit SHA must be a 40–64 char hex string.', true);
+        runBtn.disabled = false;
+        return;
       }
 
       showToast('Launching agentic mission...');
@@ -362,7 +377,7 @@
           project_id: state.projectId,
           repository_id: state.repositoryId,
           goal: goalText,
-          baseline_commit: el('baselineCommit').value.trim().toLowerCase(),
+          baseline_commit: commitSha,
         }),
       });
       state.runId = body.run_id;
@@ -1062,6 +1077,413 @@
     });
   }
 
+  // --------------------------------------------------------------------------
+  // LLM Model & Provider Studio
+  // --------------------------------------------------------------------------
+  const DEFAULT_MODELS = [
+    'gemma4:12b-mlx',
+    'qwen3.6:35b-a3b-coding-nvfp4',
+    'qwen3.8:27b-mlx',
+    'nemotron-3.5-lightning:30b-mlx',
+    'gpt-4o',
+    'gpt-4o-mini',
+    'o3-mini',
+    'o1',
+    'anthropic/claude-3.7-sonnet',
+    'anthropic/claude-3.5-sonnet',
+    'deepseek-chat',
+    'deepseek-reasoner',
+    'llama-3.3-70b-versatile',
+  ];
+
+  function openModelStudio() {
+    if (state.modelConfig) {
+      if (el('modelBaseUrl')) el('modelBaseUrl').value = state.modelConfig.base_url || '';
+      if (el('primaryModelInput')) el('primaryModelInput').value = state.modelConfig.primary_model || '';
+      if (el('fallbackModelsInput')) el('fallbackModelsInput').value = (state.modelConfig.fallback_models || []).join(', ');
+      if (el('modelTimeoutInput')) el('modelTimeoutInput').value = state.modelConfig.timeout_seconds || 300;
+      if (el('modelTemperatureInput')) el('modelTemperatureInput').value = state.modelConfig.temperature || 0.0;
+      if (state.modelConfig.has_api_key && el('apiKeyStatusHint')) {
+        el('apiKeyStatusHint').textContent = `Active Key: ${state.modelConfig.api_key_preview || 'Configured (Masked)'}`;
+      }
+      populateModelDropdowns(state.modelConfig.fallback_models || [], state.modelConfig.primary_model);
+    }
+    if (el('modelTestCard')) el('modelTestCard').classList.add('hidden');
+    if (!el('modelStudioDialog').open) el('modelStudioDialog').showModal();
+    void probeModels(false);
+  }
+
+  function closeModelStudio() {
+    if (el('modelStudioDialog').open) el('modelStudioDialog').close();
+  }
+
+  function updateModelBadge(config) {
+    if (!config) return;
+    const model = config.primary_model || 'Unknown';
+    const provider = config.provider_name || 'LLM';
+    
+    let icon = '⚡';
+    if (provider.includes('OpenAI')) icon = '✨';
+    else if (provider.includes('OpenRouter') || provider.includes('Anthropic')) icon = '🧠';
+    else if (provider.includes('Ollama')) icon = '🦙';
+    else if (provider.includes('DeepSeek')) icon = '🐋';
+
+    const topbarText = el('topbarModelName');
+    if (topbarText) {
+      topbarText.textContent = `${icon} ${model}`;
+    }
+
+    const providerLabel = el('launchpadProviderLabel');
+    if (providerLabel) {
+      providerLabel.textContent = `${provider} (${config.base_url})`;
+    }
+  }
+
+  function populateModelDropdowns(models, selected) {
+    const cleanModels = Array.isArray(models) ? models : [];
+    const all = Array.from(new Set([selected, ...cleanModels, ...DEFAULT_MODELS].filter(Boolean)));
+
+    // 1. Launchpad select
+    const launchpadSelect = el('launchpadModelSelect');
+    if (launchpadSelect) {
+      launchpadSelect.innerHTML = '';
+      if (cleanModels.length) {
+        const groupDiscovered = document.createElement('optgroup');
+        groupDiscovered.label = 'Discovered / Available Models';
+        cleanModels.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = `⚡ ${m}`;
+          if (m === selected) opt.selected = true;
+          groupDiscovered.appendChild(opt);
+        });
+        launchpadSelect.appendChild(groupDiscovered);
+      }
+      const groupStandard = document.createElement('optgroup');
+      groupStandard.label = 'Standard & Frontier Models';
+      DEFAULT_MODELS.forEach(m => {
+        if (!cleanModels.includes(m)) {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          if (m === selected) opt.selected = true;
+          groupStandard.appendChild(opt);
+        }
+      });
+      launchpadSelect.appendChild(groupStandard);
+      if (selected) launchpadSelect.value = selected;
+    }
+
+    // 2. Modal Primary Model select
+    const primarySelect = el('primaryModelSelect');
+    if (primarySelect) {
+      primarySelect.innerHTML = '';
+      all.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === selected) opt.selected = true;
+        primarySelect.appendChild(opt);
+      });
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = '✏️ Custom Model Name...';
+      primarySelect.appendChild(customOpt);
+      if (selected) primarySelect.value = selected;
+    }
+
+    // 3. Modal Primary Model input text box
+    const primaryInput = el('primaryModelInput');
+    if (primaryInput && selected) {
+      primaryInput.value = selected;
+    }
+
+    // 4. Discovered chips container
+    const chipsContainer = el('discoveredModelsChips');
+    if (chipsContainer) {
+      chipsContainer.innerHTML = '';
+      if (cleanModels.length) {
+        cleanModels.forEach(m => {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'preset-chip mini-chip';
+          chip.style.cssText = 'padding: 2px 8px; font-size: 0.72rem; cursor: pointer; border-radius: 12px;';
+          chip.textContent = m;
+          chip.addEventListener('click', () => {
+            if (primaryInput) primaryInput.value = m;
+            if (primarySelect) primarySelect.value = m;
+            if (launchpadSelect) launchpadSelect.value = m;
+            showToast(`Selected model: ${m}`);
+          });
+          chipsContainer.appendChild(chip);
+        });
+      } else {
+        chipsContainer.innerHTML = '<span style="font-size: 0.72rem; color: var(--text-muted);">Click "Discover Models" above to list models</span>';
+      }
+    }
+  }
+
+  async function loadModelConfig() {
+    try {
+      const config = await api('/api/v1/models/config');
+      state.modelConfig = config;
+      updateModelBadge(config);
+      populateModelDropdowns(config.fallback_models || [], config.primary_model);
+      void probeModels(false);
+    } catch (_) {
+      const topbarText = el('topbarModelName');
+      if (topbarText) topbarText.textContent = '⚡ Configure Models';
+      populateModelDropdowns([], 'gemma4:12b-mlx');
+    }
+  }
+
+  async function saveModelConfig(event) {
+    event.preventDefault();
+    const payload = {
+      base_url: el('modelBaseUrl').value.trim(),
+      api_key: el('modelApiKey').value.trim(),
+      primary_model: el('primaryModelInput').value.trim(),
+      fallback_models: el('fallbackModelsInput').value
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean),
+      timeout_seconds: parseFloat(el('modelTimeoutInput').value) || 300,
+      temperature: parseFloat(el('modelTemperatureInput').value) || 0.0,
+    };
+
+    try {
+      showToast('Saving model configuration...');
+      const updated = await api('/api/v1/models/config', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      state.modelConfig = updated;
+      updateModelBadge(updated);
+      populateModelDropdowns(updated.fallback_models || [], updated.primary_model);
+      closeModelStudio();
+      showToast(`✓ Active Model: ${updated.primary_model} (${updated.provider_name})`);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  async function probeModels(notify = true) {
+    const baseUrl = el('modelBaseUrl') ? el('modelBaseUrl').value.trim() : (state.modelConfig ? state.modelConfig.base_url : '');
+    if (!baseUrl) {
+      if (notify) showToast('Please enter an endpoint Base URL to probe.', true);
+      return;
+    }
+    const apiKey = el('modelApiKey') ? el('modelApiKey').value.trim() : '';
+    const probeBtn = el('probeModelsBtn');
+    let originalText = '';
+    if (probeBtn) {
+      originalText = probeBtn.innerHTML;
+      probeBtn.disabled = true;
+      probeBtn.innerHTML = '<span>Probing...</span>';
+    }
+
+    try {
+      if (notify) showToast(`Probing models at ${baseUrl}...`);
+      const res = await api('/api/v1/models/probe', {
+        method: 'POST',
+        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
+      });
+      if (res.reachable && res.models && res.models.length) {
+        const cur = el('primaryModelInput') ? el('primaryModelInput').value.trim() : (state.modelConfig ? state.modelConfig.primary_model : '');
+        populateModelDropdowns(res.models, cur || res.models[0]);
+        if (el('primaryModelInput') && !el('primaryModelInput').value.trim()) {
+          el('primaryModelInput').value = res.models[0];
+        }
+        if (notify) showToast(`✓ Discovered ${res.models.length} models (${res.latency_ms}ms)`);
+      } else {
+        if (notify) showToast(`Probe result: ${res.error || 'No models returned, check URL and key.'}`, true);
+      }
+    } catch (err) {
+      if (notify) showToast(err.message, true);
+    } finally {
+      if (probeBtn) {
+        probeBtn.disabled = false;
+        probeBtn.innerHTML = originalText;
+      }
+    }
+  }
+
+  async function testModelConnection() {
+    const baseUrl = el('modelBaseUrl').value.trim();
+    const model = el('primaryModelInput').value.trim();
+    if (!baseUrl || !model) {
+      showToast('Please specify both Base URL and Primary Model.', true);
+      return;
+    }
+    const apiKey = el('modelApiKey').value.trim();
+    const testBtn = el('testModelBtn');
+    const originalText = testBtn.innerHTML;
+    testBtn.disabled = true;
+    testBtn.innerHTML = '<span>Testing...</span>';
+
+    const testCard = el('modelTestCard');
+    const statusBadge = el('testStatusBadge');
+    const latencyEl = el('testLatency');
+    const snippetEl = el('testOutputSnippet');
+
+    testCard.classList.remove('hidden');
+    statusBadge.className = 'badge';
+    statusBadge.textContent = 'RUNNING TEST...';
+    latencyEl.textContent = '...';
+    snippetEl.textContent = 'Sending test JSON completion probe...';
+
+    try {
+      const res = await api('/api/v1/models/test', {
+        method: 'POST',
+        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model: model }),
+      });
+
+      latencyEl.textContent = `${res.latency_ms}ms`;
+      if (res.success) {
+        statusBadge.className = 'badge badge-green';
+        statusBadge.textContent = res.structured_output ? 'VERIFIED · JSON READY' : 'SUCCESS · RAW TEXT';
+        snippetEl.textContent = `Response: ${res.response_snippet || 'OK'}`;
+        showToast(`✓ ${model} verified successfully (${res.latency_ms}ms)`);
+      } else {
+        statusBadge.className = 'badge badge-red';
+        statusBadge.textContent = 'FAILED';
+        snippetEl.textContent = `Error: ${res.error || 'Connection failed'}`;
+        showToast(`Model test failed: ${res.error}`, true);
+      }
+    } catch (err) {
+      statusBadge.className = 'badge badge-red';
+      statusBadge.textContent = 'ERROR';
+      snippetEl.textContent = err.message;
+      showToast(err.message, true);
+    } finally {
+      testBtn.disabled = false;
+      testBtn.innerHTML = originalText;
+    }
+  }
+
+  function handleProviderChipClick(chip) {
+    document.querySelectorAll('.provider-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+
+    const url = chip.dataset.url;
+    const model = chip.dataset.model;
+    const fallbacks = chip.dataset.fallbacks;
+
+    if (url) el('modelBaseUrl').value = url;
+    if (model) {
+      el('primaryModelInput').value = model;
+      if (el('primaryModelSelect')) el('primaryModelSelect').value = model;
+    }
+    if (fallbacks) el('fallbackModelsInput').value = fallbacks;
+
+    if (chip.dataset.provider === 'ollama') {
+      el('modelApiKey').value = '';
+      el('apiKeyStatusHint').textContent = 'Ollama local models do not require an API key.';
+    } else if (chip.dataset.provider === 'openai') {
+      el('apiKeyStatusHint').textContent = 'Enter your OpenAI API key (sk-...).';
+    } else if (chip.dataset.provider === 'openrouter') {
+      el('apiKeyStatusHint').textContent = 'Enter your OpenRouter API key (sk-or-...).';
+    } else if (chip.dataset.provider === 'deepseek') {
+      el('apiKeyStatusHint').textContent = 'Enter your DeepSeek API key (sk-...).';
+    } else if (chip.dataset.provider === 'groq') {
+      el('apiKeyStatusHint').textContent = 'Enter your Groq API key (gsk_...).';
+    }
+
+    void probeModels(false);
+  }
+
+  // Model Studio Event Listeners
+  const modelStudioBtn = el('modelStudioBtn');
+  if (modelStudioBtn) modelStudioBtn.addEventListener('click', openModelStudio);
+
+  const quickConfigBtn = el('quickConfigModelBtn');
+  if (quickConfigBtn) quickConfigBtn.addEventListener('click', openModelStudio);
+
+  const closeModelStudioBtn = el('closeModelStudio');
+  if (closeModelStudioBtn) closeModelStudioBtn.addEventListener('click', closeModelStudio);
+
+  const modelStudioForm = el('modelStudioForm');
+  if (modelStudioForm) modelStudioForm.addEventListener('submit', saveModelConfig);
+
+  const probeModelsBtn = el('probeModelsBtn');
+  if (probeModelsBtn) probeModelsBtn.addEventListener('click', () => probeModels(true));
+
+  const testModelBtn = el('testModelBtn');
+  if (testModelBtn) testModelBtn.addEventListener('click', testModelConnection);
+
+  const primaryModelSelect = el('primaryModelSelect');
+  if (primaryModelSelect) {
+    primaryModelSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      const input = el('primaryModelInput');
+      if (val === '__custom__') {
+        if (input) {
+          input.value = '';
+          input.focus();
+        }
+      } else if (val && input) {
+        input.value = val;
+      }
+    });
+  }
+
+  const primaryModelInput = el('primaryModelInput');
+  if (primaryModelInput) {
+    primaryModelInput.addEventListener('input', (e) => {
+      const val = e.target.value;
+      if (primaryModelSelect) {
+        const optionExists = Array.from(primaryModelSelect.options).some(opt => opt.value === val);
+        if (optionExists) {
+          primaryModelSelect.value = val;
+        } else {
+          primaryModelSelect.value = '__custom__';
+        }
+      }
+    });
+  }
+
+  const toggleEye = el('toggleApiKeyVisibility');
+  if (toggleEye) {
+    toggleEye.addEventListener('click', () => {
+      const input = el('modelApiKey');
+      if (input.type === 'password') {
+        input.type = 'text';
+        toggleEye.textContent = '🔒';
+      } else {
+        input.type = 'password';
+        toggleEye.textContent = '👁️';
+      }
+    });
+  }
+
+  document.querySelectorAll('.provider-chip').forEach(chip => {
+    chip.addEventListener('click', () => handleProviderChipClick(chip));
+  });
+
+  const launchpadModelSelect = el('launchpadModelSelect');
+  if (launchpadModelSelect) {
+    launchpadModelSelect.addEventListener('change', async (e) => {
+      const selectedModel = e.target.value;
+      if (!selectedModel || !state.modelConfig) return;
+      try {
+        const payload = {
+          ...state.modelConfig,
+          primary_model: selectedModel,
+          api_key: '', // Retain existing secret
+        };
+        const updated = await api('/api/v1/models/config', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        state.modelConfig = updated;
+        updateModelBadge(updated);
+        showToast(`✓ Active Model switched to: ${selectedModel}`);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  }
+
   // Event Search Input
   const eventSearchInput = el('eventSearchInput');
   if (eventSearchInput) {
@@ -1099,6 +1521,7 @@
       if (el('taskDrawer').open) el('taskDrawer').close();
       if (el('artifactDialog').open) el('artifactDialog').close();
       if (el('authDialog').open) el('authDialog').close();
+      if (el('modelStudioDialog').open) el('modelStudioDialog').close();
     }
     if (!isInputActive) {
       if (e.key === '1') {
@@ -1121,4 +1544,5 @@
   void checkHealth();
   window.setInterval(checkHealth, 15000);
   restoreIdentity();
+  void loadModelConfig();
 })();

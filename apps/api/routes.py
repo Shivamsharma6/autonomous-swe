@@ -1,10 +1,17 @@
 import contextlib
+import json
+import re
+import shutil
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,14 +28,23 @@ from apps.api.schemas import (
     ArtifactMetadataResponse,
     AuditEventResponse,
     DeadLetterResponse,
+    ModelConfigRequest,
+    ModelConfigResponse,
+    ModelProbeRequest,
+    ModelProbeResponse,
+    ModelTestRequest,
+    ModelTestResponse,
     ProjectCreated,
     ProjectCreateRequest,
+    ProjectOnboardRequest,
+    ProjectOnboardResponse,
     RunCreated,
     RunCreateRequest,
     RunResponse,
     TaskResponse,
 )
 from apps.api.websocket import EventCursor, PostgresTaskEventSource
+from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
 from persistence.tables import (
     ApprovalRow,
@@ -52,10 +68,291 @@ Services = Annotated[ControlPlaneServices, Depends(get_services)]
 DeadLetterLimit = Annotated[int, Query(ge=1, le=500)]
 RunEventLimit = Annotated[int, Query(ge=1, le=1_000)]
 
+logger = get_structured_logger("autoswe.api")
+_GIT_EXECUTABLE = shutil.which("git")
+
+
+def _api_key_preview(value: str) -> str:
+    if len(value) >= 8:
+        return f"{value[:4]}...{value[-4:]}"
+    return "***" if value else ""
+
+
+def _parses_as_json(value: str) -> bool:
+    try:
+        json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _run_git(
+    target_dir: Path, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    if _GIT_EXECUTABLE is None:
+        raise RuntimeError("the git executable is not available")
+    return subprocess.run(  # noqa: S603 - all values are policy-generated
+        (_GIT_EXECUTABLE, *arguments),
+        cwd=target_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
 
 @router.get("/status")
 async def status() -> dict[str, str]:
     return {"service": "autoswe-control-plane", "status": "ok"}
+
+
+def _detect_provider(url: str) -> str:
+    low = url.lower()
+    if "openai.com" in low:
+        return "OpenAI"
+    if "openrouter.ai" in low:
+        return "OpenRouter"
+    if "anthropic.com" in low:
+        return "Anthropic"
+    if "deepseek.com" in low:
+        return "DeepSeek"
+    if "groq.com" in low:
+        return "Groq"
+    if "11434" in low or "ollama" in low:
+        return "Ollama"
+    if "together.xyz" in low or "together.ai" in low:
+        return "Together AI"
+    if "127.0.0.1" in low or "localhost" in low or "host.docker.internal" in low:
+        return "Local Endpoint"
+    return "Custom OpenAI"
+
+
+def _normalize_backend_url(url: str) -> str:
+    cleaned = url.strip().rstrip("/")
+    if cleaned.startswith("http://localhost:"):
+        return cleaned.replace("http://localhost:", "http://host.docker.internal:")
+    if cleaned.startswith("http://127.0.0.1:"):
+        return cleaned.replace("http://127.0.0.1:", "http://host.docker.internal:")
+    return cleaned
+
+
+@router.get("/models/config", response_model=ModelConfigResponse)
+async def get_model_config(services: Services) -> ModelConfigResponse:
+    provider = _detect_provider(services.settings.model_base_url)
+    api_key_str = services.settings.model_api_key.get_secret_value()
+    return ModelConfigResponse(
+        base_url=services.settings.model_base_url,
+        primary_model=services.settings.model_primary,
+        fallback_models=services.settings.model_fallbacks,
+        timeout_seconds=services.settings.model_timeout_seconds,
+        temperature=0.0,
+        has_api_key=bool(api_key_str),
+        api_key_preview=_api_key_preview(api_key_str),
+        provider_name=provider,
+    )
+
+
+@router.post("/models/config", response_model=ModelConfigResponse)
+async def update_model_config(
+    request: ModelConfigRequest,
+    services: Services,
+) -> ModelConfigResponse:
+    services.settings.model_base_url = _normalize_backend_url(request.base_url)
+    services.settings.model_primary = request.primary_model
+    services.settings.model_fallbacks = request.fallback_models
+    services.settings.model_timeout_seconds = request.timeout_seconds
+    if request.api_key:
+        services.settings.model_api_key = SecretStr(request.api_key)
+    provider = _detect_provider(services.settings.model_base_url)
+    api_key_str = services.settings.model_api_key.get_secret_value()
+    return ModelConfigResponse(
+        base_url=services.settings.model_base_url,
+        primary_model=services.settings.model_primary,
+        fallback_models=services.settings.model_fallbacks,
+        timeout_seconds=services.settings.model_timeout_seconds,
+        temperature=request.temperature,
+        has_api_key=bool(api_key_str),
+        api_key_preview=_api_key_preview(api_key_str),
+        provider_name=provider,
+    )
+
+
+@router.post("/models/probe", response_model=ModelProbeResponse)
+async def probe_models(request: ModelProbeRequest) -> ModelProbeResponse:
+    base_url = _normalize_backend_url(request.base_url)
+    headers = {"Authorization": f"Bearer {request.api_key}"} if request.api_key else {}
+    start_t = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            endpoints_to_try = [
+                f"{base_url}/models",
+                f"{base_url.removesuffix('/v1')}/api/tags",
+            ]
+            resp = None
+            for ep in endpoints_to_try:
+                try:
+                    r = await client.get(ep, headers=headers)
+                except Exception as error:
+                    logger.debug(
+                        "model_probe_endpoint_failed",
+                        endpoint=ep,
+                        error_type=type(error).__name__,
+                    )
+                    continue
+                if r.status_code < 400:
+                    resp = r
+                    break
+
+            latency = (time.perf_counter() - start_t) * 1000.0
+            if resp is not None and resp.status_code < 400:
+                body = resp.json()
+                data = body.get("data") if isinstance(body, dict) else None
+                model_ids: list[str] = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "id" in item:
+                            model_ids.append(str(item["id"]))
+                elif (
+                    isinstance(body, dict)
+                    and "models" in body
+                    and isinstance(body["models"], list)
+                ):
+                    for item in body["models"]:
+                        if isinstance(item, dict) and "name" in item:
+                            model_ids.append(str(item["name"]))
+                        elif isinstance(item, str):
+                            model_ids.append(item)
+                return ModelProbeResponse(
+                    reachable=True,
+                    models=model_ids or ["default"],
+                    latency_ms=round(latency, 1),
+                    error=None,
+                )
+            else:
+                detail = resp.status_code if resp else "Connection Failed"
+                return ModelProbeResponse(
+                    reachable=False,
+                    models=[],
+                    latency_ms=round(latency, 1),
+                    error=f"Endpoint returned HTTP {detail}",
+                )
+    except Exception as exc:
+        latency = (time.perf_counter() - start_t) * 1000.0
+        return ModelProbeResponse(
+            reachable=False,
+            models=[],
+            latency_ms=round(latency, 1),
+            error=str(exc),
+        )
+
+
+@router.post("/models/test", response_model=ModelTestResponse)
+async def test_model(request: ModelTestRequest) -> ModelTestResponse:
+    base_url = _normalize_backend_url(request.base_url)
+    headers = {"Authorization": f"Bearer {request.api_key}"} if request.api_key else {}
+    start_t = time.perf_counter()
+    payload = {
+        "model": request.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    'You are a test probe. Respond with strictly valid JSON only: '
+                    '{"status": "ok", "verified": true}'
+                ),
+            },
+            {"role": "user", "content": "Verify system connectivity and JSON generation."},
+        ],
+        "temperature": 0.0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+            latency = (time.perf_counter() - start_t) * 1000.0
+            if resp.status_code < 400:
+                body = resp.json()
+                choices = body.get("choices", [])
+                content = choices[0]["message"]["content"] if choices else ""
+                is_json = _parses_as_json(content)
+                return ModelTestResponse(
+                    success=True,
+                    model=request.model,
+                    latency_ms=round(latency, 1),
+                    structured_output=is_json,
+                    response_snippet=content[:300],
+                    error=None,
+                )
+            else:
+                return ModelTestResponse(
+                    success=False,
+                    model=request.model,
+                    latency_ms=round(latency, 1),
+                    structured_output=False,
+                    response_snippet="",
+                    error=f"HTTP {resp.status_code}: {resp.text[:300]}",
+                )
+    except Exception as exc:
+        latency = (time.perf_counter() - start_t) * 1000.0
+        return ModelTestResponse(
+            success=False,
+            model=request.model,
+            latency_ms=round(latency, 1),
+            structured_output=False,
+            response_snippet="",
+            error=str(exc),
+        )
+
+
+@router.post("/projects/onboard", response_model=ProjectOnboardResponse, status_code=201)
+async def onboard_project(
+    request: ProjectOnboardRequest,
+    services: Services,
+) -> ProjectOnboardResponse:
+    import_root = services.settings.repository_import_root.resolve(strict=False)
+    import_root.mkdir(parents=True, exist_ok=True)
+
+    folder_candidate = (request.folder_name or request.source_path or request.name).strip()
+    safe_folder = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", folder_candidate.split("/")[-1]) or "project"
+    target_dir = (import_root / safe_folder).resolve()
+
+    if not str(target_dir).startswith(str(import_root)):
+        target_dir = import_root / safe_folder
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    for file_info in request.files:
+        clean_rel = re.sub(r"^[/\\]+", "", file_info.path)
+        if ".." in clean_rel.split("/"):
+            continue
+        dest_path = (target_dir / clean_rel).resolve()
+        if not str(dest_path).startswith(str(target_dir)):
+            continue
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text(file_info.content, encoding="utf-8", errors="replace")
+
+    baseline_sha = _ensure_git_repository(target_dir, request.default_branch)
+
+    async with services.database.transaction() as session:
+        await services.database_repository.create_project(
+            session,
+            project_id=request.project_id,
+            name=request.name,
+        )
+        await services.database_repository.create_repository(
+            session,
+            repository_id=request.repository_id,
+            project_id=request.project_id,
+            source_path=str(target_dir),
+            default_branch=request.default_branch,
+        )
+
+    return ProjectOnboardResponse(
+        project_id=request.project_id,
+        repository_id=request.repository_id,
+        name=request.name,
+        source_path=str(target_dir),
+        default_branch=request.default_branch,
+        baseline_commit=baseline_sha,
+    )
 
 
 @router.post("/projects", response_model=ProjectCreated, status_code=201)
@@ -493,10 +790,59 @@ async def _require_run(session: AsyncSession, run_id: UUID) -> RunRow:
     return row
 
 
+def _ensure_git_repository(target_dir: Path, default_branch: str = "main") -> str:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    git_dir = target_dir / ".git"
+    if not git_dir.exists():
+        _run_git(target_dir, "init", "-b", default_branch)
+        _run_git(target_dir, "config", "user.name", "AutoSWE System")
+        _run_git(target_dir, "config", "user.email", "autoswe@local")
+
+    pyproject = target_dir / "pyproject.toml"
+    package_json = target_dir / "package.json"
+    if not pyproject.exists() and not package_json.exists():
+        pyproject.write_text(
+            '[project]\nname = "service"\nversion = "0.1.0"\n'
+            'dependencies = []\n\n'
+            '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+            encoding="utf-8",
+        )
+        (target_dir / "requirements.txt").write_text("# requirements\n", encoding="utf-8")
+        src_dir = target_dir / "src"
+        src_dir.mkdir(exist_ok=True)
+        (src_dir / "__init__.py").write_text("", encoding="utf-8")
+        (src_dir / "service.py").write_text(
+            'def handle_request(payload: dict) -> dict:\n'
+            '    return {"status": "ok", "payload": payload}\n',
+            encoding="utf-8",
+        )
+        tests_dir = target_dir / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+        (tests_dir / "test_service.py").write_text(
+            "from src.service import handle_request\n\n"
+            "def test_handle_request():\n"
+            '    assert handle_request({})["status"] == "ok"\n',
+            encoding="utf-8",
+        )
+
+    res = _run_git(target_dir, "rev-parse", "HEAD")
+    rev = res.stdout.strip()
+    if not rev or res.returncode != 0:
+        _run_git(target_dir, "add", ".")
+        _run_git(target_dir, "commit", "-m", "Initial baseline commit", "--allow-empty")
+        res = _run_git(target_dir, "rev-parse", "HEAD")
+        rev = res.stdout.strip()
+    return rev
+
+
 def _validated_repository_source(import_root: Path, requested: str) -> Path:
     try:
         root = import_root.resolve(strict=True)
-        candidate = Path(requested).resolve(strict=True)
+        req_path = Path(requested)
+        candidate = (
+            root / req_path if not req_path.is_absolute() else req_path
+        ).resolve(strict=True)
         candidate.relative_to(root)
     except (OSError, ValueError) as exc:
         raise HTTPException(

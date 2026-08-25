@@ -16,9 +16,80 @@ class ProjectCreateRequest(ContractModel):
     default_branch: Annotated[str, Field(min_length=1, max_length=255)] = "main"
 
 
+class ProjectFilePayload(ContractModel):
+    path: str = Field(min_length=1, max_length=1_000)
+    content: str
+
+
+class ProjectOnboardRequest(ContractModel):
+    project_id: UUID = Field(default_factory=uuid4)
+    repository_id: UUID = Field(default_factory=uuid4)
+    name: Annotated[str, Field(min_length=1, max_length=300)]
+    folder_name: Annotated[str, Field(default="", max_length=300)] = ""
+    source_path: Annotated[str, Field(default="", max_length=2_000)] = ""
+    default_branch: Annotated[str, Field(min_length=1, max_length=255)] = "main"
+    files: list[ProjectFilePayload] = Field(default_factory=list)
+
+
+class ProjectOnboardResponse(ContractModel):
+    project_id: UUID
+    repository_id: UUID
+    name: str
+    source_path: str
+    default_branch: str
+    baseline_commit: str
+
+
 class ProjectCreated(ContractModel):
     project_id: UUID
     repository_id: UUID
+
+
+class ModelConfigRequest(ContractModel):
+    base_url: str = Field(min_length=1, max_length=2_000)
+    api_key: str = Field(default="", max_length=1_000)
+    primary_model: str = Field(min_length=1, max_length=200)
+    fallback_models: list[str] = Field(default_factory=list, max_length=10)
+    timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+
+
+class ModelConfigResponse(ContractModel):
+    base_url: str
+    primary_model: str
+    fallback_models: list[str]
+    timeout_seconds: float
+    temperature: float
+    has_api_key: bool
+    api_key_preview: str
+    provider_name: str
+
+
+class ModelProbeRequest(ContractModel):
+    base_url: str = Field(min_length=1, max_length=2_000)
+    api_key: str = Field(default="", max_length=1_000)
+
+
+class ModelProbeResponse(ContractModel):
+    reachable: bool
+    models: list[str]
+    latency_ms: float
+    error: str | None = None
+
+
+class ModelTestRequest(ContractModel):
+    base_url: str = Field(min_length=1, max_length=2_000)
+    api_key: str = Field(default="", max_length=1_000)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class ModelTestResponse(ContractModel):
+    success: bool
+    model: str
+    latency_ms: float
+    structured_output: bool
+    response_snippet: str
+    error: str | None = None
 
 
 class RunCreateRequest(ContractModel):

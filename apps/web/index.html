@@ -53,6 +53,13 @@
 
       <!-- System Telemetry & Operator Controls -->
       <div class="topbar-right">
+        <button id="modelStudioBtn" class="button ghost model-button" type="button" aria-haspopup="dialog" title="Configure LLM Models & Providers">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+          </svg>
+          <span id="topbarModelName">Model: Loading...</span>
+        </button>
+
         <div class="health-pill" id="healthStatus" title="Control plane health status & active services">
           <span id="healthDot" class="status-dot unknown"></span>
           <span id="healthText" class="health-label">Checking health</span>
@@ -145,8 +152,9 @@
                   <input type="file" id="dirPickerFallback" webkitdirectory directory multiple style="position: fixed; top: -9999px; left: -9999px; opacity: 0; width: 1px; height: 1px; pointer-events: none;">
                 </div>
                 <div class="input-wrapper">
-                  <input id="sourcePath" type="text" value="/var/lib/autoswe/imports/showcase" required placeholder="/var/lib/autoswe/imports/repo">
+                  <input id="sourcePath" type="text" value="/Users/shivamsharma/projects/autonomous-swe/runtime/imports/showcase" required placeholder="showcase or /Users/.../runtime/imports/repo">
                 </div>
+                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Must be a folder located inside <code>runtime/imports/</code></span>
               </div>
 
               <div class="form-group">
@@ -215,8 +223,25 @@
                   <button id="fillSampleSha" class="button ghost mini-btn" type="button" title="Fill sample 40-char SHA">Fill Sample SHA</button>
                 </div>
                 <div class="input-wrapper">
-                  <input id="baselineCommit" type="text" required minlength="40" maxlength="64" placeholder="40–64 character SHA-1/SHA-256 commit hash">
+                  <input id="baselineCommit" type="text" required minlength="40" maxlength="64" value="29195d2730a8a28c632ef1f426fcfbc5e0753d58" placeholder="40–64 character SHA-1/SHA-256 commit hash">
                 </div>
+                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Git commit SHA from which the agent branches (auto-detected via Browse Folder or <code>git rev-parse HEAD</code>)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="label-row">
+                  <label for="launchpadModelSelect">Intelligence Engine (LLM Model)</label>
+                  <button id="quickConfigModelBtn" class="button outline mini-btn" type="button" title="Configure endpoints, API keys, and models">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    <span>Custom LLM / Keys...</span>
+                  </button>
+                </div>
+                <div class="input-wrapper">
+                  <select id="launchpadModelSelect" class="styled-select">
+                    <option value="">Detecting model...</option>
+                  </select>
+                </div>
+                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Provider: <span id="launchpadProviderLabel" style="color: var(--accent-cyan);">Detecting...</span></span>
               </div>
 
               <button id="startRun" class="button primary full-width launch-btn" type="submit">
@@ -537,6 +562,132 @@
         <button class="button primary" value="save" type="submit">Save Session Token</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- LLM Provider & Model Studio Dialog -->
+  <dialog id="modelStudioDialog" class="modal-dialog" aria-labelledby="modelStudioTitle">
+    <div class="modal-card model-studio-card">
+      <div class="modal-header">
+        <div>
+          <div class="type-badge">INTELLIGENCE CONFIGURATION</div>
+          <h3 id="modelStudioTitle" class="modal-title">LLM Model & Provider Studio</h3>
+          <p class="modal-subtitle">Connect Local Ollama, Frontier APIs (OpenAI, Claude, DeepSeek, Groq), or any custom OpenAI-compatible endpoint.</p>
+        </div>
+        <button id="closeModelStudio" class="button ghost icon-btn" type="button" aria-label="Close modal">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="modal-body model-studio-body">
+        <!-- Quick Provider Presets -->
+        <div class="form-group">
+          <label class="section-sublabel">Provider Presets:</label>
+          <div class="provider-preset-chips">
+            <button type="button" class="preset-chip provider-chip active" data-provider="ollama" data-url="http://host.docker.internal:11434/v1" data-model="gemma4:12b-mlx" data-fallbacks="qwen3.6:35b-a3b-coding-nvfp4">
+              🦙 Local Ollama
+            </button>
+            <button type="button" class="preset-chip provider-chip" data-provider="openai" data-url="https://api.openai.com/v1" data-model="gpt-4o" data-fallbacks="gpt-4o-mini,o3-mini">
+              ✨ OpenAI Official
+            </button>
+            <button type="button" class="preset-chip provider-chip" data-provider="openrouter" data-url="https://openrouter.ai/api/v1" data-model="anthropic/claude-3.7-sonnet" data-fallbacks="openai/gpt-4o,deepseek/deepseek-r1">
+              🌐 OpenRouter (Claude / Gemini)
+            </button>
+            <button type="button" class="preset-chip provider-chip" data-provider="deepseek" data-url="https://api.deepseek.com/v1" data-model="deepseek-chat" data-fallbacks="deepseek-reasoner">
+              🐋 DeepSeek Official
+            </button>
+            <button type="button" class="preset-chip provider-chip" data-provider="groq" data-url="https://api.groq.com/openai/v1" data-model="llama-3.3-70b-versatile" data-fallbacks="qwen-2.5-coder-32b">
+              ⚡ Groq High-Speed
+            </button>
+            <button type="button" class="preset-chip provider-chip" data-provider="custom" data-url="" data-model="" data-fallbacks="">
+              🛠️ Custom Endpoint
+            </button>
+          </div>
+        </div>
+
+        <form id="modelStudioForm" class="model-form">
+          <div class="form-group">
+            <label for="modelBaseUrl">OpenAI-Compatible Base URL Endpoint</label>
+            <div class="input-wrapper">
+              <input id="modelBaseUrl" type="url" required placeholder="e.g. http://host.docker.internal:11434/v1 or https://api.openai.com/v1">
+            </div>
+            <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">For local host services from Docker, use <code>http://host.docker.internal:11434/v1</code>.</span>
+          </div>
+
+          <div class="form-group">
+            <label for="modelApiKey">Provider API Key</label>
+            <div class="input-wrapper password-input-wrapper">
+              <input id="modelApiKey" type="password" autocomplete="off" placeholder="Leave empty for local Ollama / enter sk-... for cloud providers">
+              <button id="toggleApiKeyVisibility" class="button ghost mini-btn toggle-eye" type="button" title="Toggle visibility">👁️</button>
+            </div>
+            <span id="apiKeyStatusHint" class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">API key is securely stored in memory.</span>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <div class="label-row">
+                <label for="primaryModelSelect">Primary Agent Model</label>
+                <button id="probeModelsBtn" class="button outline mini-btn" type="button" title="Probe endpoint for available models">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  <span>Discover Models</span>
+                </button>
+              </div>
+              <div class="input-wrapper">
+                <select id="primaryModelSelect" class="styled-select">
+                  <option value="">Discovering models...</option>
+                </select>
+              </div>
+              <div class="input-wrapper" style="margin-top: 6px;">
+                <input id="primaryModelInput" type="text" required placeholder="Or type custom model name (e.g. gemma4:12b-mlx)">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="fallbackModelsInput">Fallback Models (comma-separated)</label>
+              <div class="input-wrapper">
+                <input id="fallbackModelsInput" type="text" placeholder="e.g. qwen3.6:35b-a3b-coding-nvfp4, gpt-4o-mini">
+              </div>
+              <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Discovered Models (click to select):</span>
+              <div id="discoveredModelsChips" class="discovered-chips-container" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; max-height: 80px; overflow-y: auto;"></div>
+            </div>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="modelTimeoutInput">Inference Timeout (seconds)</label>
+              <div class="input-wrapper">
+                <input id="modelTimeoutInput" type="number" min="10" max="3600" value="300" required>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="modelTemperatureInput">Temperature (0.0 = Deterministic)</label>
+              <div class="input-wrapper">
+                <input id="modelTemperatureInput" type="number" min="0" max="2" step="0.1" value="0.0" required>
+              </div>
+            </div>
+          </div>
+
+          <!-- Connection Test Output Container -->
+          <div id="modelTestCard" class="model-test-card hidden">
+            <div class="test-header">
+              <span id="testStatusBadge" class="badge">TESTING...</span>
+              <span id="testLatency" class="test-latency-text">0ms</span>
+            </div>
+            <div id="testOutputSnippet" class="test-snippet"></div>
+          </div>
+
+          <div class="modal-footer">
+            <button id="testModelBtn" class="button secondary" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              <span>Test Connection</span>
+            </button>
+            <button class="button primary" type="submit">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Save & Apply Model</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   </dialog>
 
   <!-- Toast Notification -->
