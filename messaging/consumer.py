@@ -76,7 +76,7 @@ class DeliveryConsumer:
             async with self._database.transaction() as session:
                 claimed = await DomainRepository().claim_consumer_receipt(
                     session,
-                    consumer=self._consumer,
+                    consumer=self._group,
                     event_id=record.event_id,
                 )
                 if not claimed:
@@ -98,7 +98,7 @@ class DeliveryConsumer:
         async with self._database.transaction() as session:
             delivery = await session.scalar(
                 select(ConsumerDeliveryRow).where(
-                    ConsumerDeliveryRow.consumer == self._consumer,
+                    ConsumerDeliveryRow.consumer == self._group,
                     ConsumerDeliveryRow.event_id == event_id,
                 )
             )
@@ -115,14 +115,14 @@ class DeliveryConsumer:
             delivery = await session.scalar(
                 select(ConsumerDeliveryRow)
                 .where(
-                    ConsumerDeliveryRow.consumer == self._consumer,
+                    ConsumerDeliveryRow.consumer == self._group,
                     ConsumerDeliveryRow.event_id == record.event_id,
                 )
                 .with_for_update()
             )
             if delivery is None:
                 delivery = ConsumerDeliveryRow(
-                    consumer=self._consumer,
+                    consumer=self._group,
                     event_id=record.event_id,
                     topic=record.topic,
                 )

@@ -8,6 +8,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from sqlalchemy import select
 
 from apps.dispatcher.main import DispatchMessage
 from apps.worker.runner import WorkerOutcome
@@ -15,6 +16,7 @@ from domain.enums import GraphExecutionState, RiskLevel, TaskStatus, TaskType
 from execution.scheduler.service import SchedulerService, TaskExecutionLease
 from observability.tracing import CorrelationContext, bind_correlation, reset_correlation
 from persistence.database import Database
+from persistence.tables import AgentMessageRow
 from workflows.runtime import CheckpointedWorkflowRuntime
 from workflows.state import CheckpointIdentity, TaskExecutionInput
 from workflows.task_subgraphs import TaskNodeExecutor, build_task_subgraph
@@ -102,7 +104,7 @@ class DispatchedTaskExecutor:
                 trace_id=f"task:{context.task_id}:attempt:{context.attempt_id}",
                 run_id=context.run_id,
                 task_id=context.task_id,
-                graph_thread_id=f"run:{context.run_id}:task:{context.task_id}",
+                graph_thread_id=f"run:{context.run_id}:task:{context.task_id}:attempt:{context.attempt_id}",
             )
         )
         current_execution_task = asyncio.current_task()
@@ -143,6 +145,9 @@ class DispatchedTaskExecutor:
                             baseline_commit=context.baseline_commit,
                             task_type=context.task_type,
                             goal=context.goal,
+                            input_refs=await self._dependency_context(
+                                context.dependencies
+                            ),
                         ).to_state(),
                     ),
                 )
@@ -191,6 +196,35 @@ class DispatchedTaskExecutor:
             except (asyncio.CancelledError, PermissionError):
                 pass
             reset_correlation(correlation_token)
+
+    async def _dependency_context(
+        self, dependencies: tuple[UUID, ...]
+    ) -> dict[str, str]:
+        """Resolve the newest handoff summary per dependency task so downstream
+        execution inherits real upstream context instead of opaque IDs."""
+        if not dependencies:
+            return {}
+        async with self._database.sessions() as session:
+            rows = (
+                (
+                    await session.scalars(
+                        select(AgentMessageRow)
+                        .where(AgentMessageRow.task_id.in_(dependencies))
+                        .order_by(AgentMessageRow.created_at.desc())
+                        .limit(64)
+                    )
+                ).all()
+            )
+        refs: dict[str, str] = {}
+        for row in rows:
+            key = str(row.task_id)
+            if key in refs or row.task_id not in dependencies:
+                continue
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            summary = str(payload.get("summary", ""))[:2_000]
+            if summary:
+                refs[key] = summary
+        return refs
 
     async def _heartbeat(
         self,

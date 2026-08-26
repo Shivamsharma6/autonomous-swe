@@ -146,6 +146,12 @@ class DispatcherService:
         promote = getattr(self._scheduler, "promote_dependency_ready", None)
         if promote is not None:
             await promote()
+        cascade = getattr(self._scheduler, "cancel_blocked_dependents", None)
+        if cascade is not None:
+            await cascade()
+        run_cancel = getattr(self._scheduler, "cancel_requested_runs", None)
+        if run_cancel is not None:
+            await run_cancel()
         claims = await self._scheduler.claim_ready(owner=self._owner, limit=self._batch_size)
         messages = tuple(DispatchMessage.from_claim(claim) for claim in claims)
         if messages:

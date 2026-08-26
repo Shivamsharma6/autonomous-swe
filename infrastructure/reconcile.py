@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -32,5 +34,26 @@ async def reconcile_all() -> dict[str, int]:
         await database.dispose()
 
 
+async def resolve_parked(project_id: str, task_id: str, resolution: str) -> str:
+    if resolution not in {"fail", "retry"}:
+        raise SystemExit("resolution must be 'fail' or 'retry'")
+    settings = Settings()
+    database = Database(settings.database_url)
+    reconciler = ReconciliationService(database=database)
+    try:
+        action = await reconciler.resolve_needs_reconciliation(
+            project_id=UUID(project_id),
+            task_id=UUID(task_id),
+            resolution=resolution,  # type: ignore[arg-type]
+        )
+        return f"resolved as {action.value}"
+    finally:
+        await database.dispose()
+
+
 if __name__ == "__main__":
-    print(asyncio.run(reconcile_all()))
+    args = sys.argv[1:]
+    if len(args) == 4 and args[0] == "resolve":
+        print(asyncio.run(resolve_parked(args[1], args[2], args[3])))
+    else:
+        print(asyncio.run(reconcile_all()))

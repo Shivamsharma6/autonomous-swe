@@ -302,12 +302,14 @@ def deterministic_memory_id(candidate: MemoryCandidate) -> UUID:
             "autoswe-memory",
             candidate.schema_version,
             str(candidate.project_id),
-            str(candidate.source_run_id),
-            str(candidate.source_task_id),
             candidate.classification,
             content_hash,
         )
     )
+    # Identity is project+type+content: identical knowledge produced by
+    # different runs collapses onto one memory instead of accumulating
+    # per-run duplicates. Run/task provenance lives in the candidate record
+    # and UAMS metadata, not in identity.
     return uuid5(NAMESPACE_URL, value)
 
 

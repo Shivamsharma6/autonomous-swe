@@ -44,6 +44,7 @@ from apps.api.schemas import (
     TaskResponse,
 )
 from apps.api.websocket import EventCursor, PostgresTaskEventSource
+from execution.scheduler.service import RUN_TERMINAL_VALUES
 from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
 from persistence.tables import (
@@ -616,6 +617,23 @@ async def cancel_task(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     return {"task_id": str(task_id), "status": "CANCELLED"}
+
+
+@router.post("/runs/{run_id}/cancel", status_code=202)
+async def cancel_run(run_id: UUID, services: Services) -> dict[str, str]:
+    async with services.database.transaction() as session:
+        run = await session.scalar(
+            select(RunRow).where(RunRow.id == run_id).with_for_update()
+        )
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.state in RUN_TERMINAL_VALUES:
+            raise HTTPException(
+                status_code=409, detail=f"run already {run.state}"
+            )
+        if run.cancellation_requested_at is None:
+            run.cancellation_requested_at = utc_now()
+    return {"run_id": str(run_id), "status": "CANCELLATION_REQUESTED"}
 
 
 @router.post("/approvals/{approval_id}/decision", status_code=202)

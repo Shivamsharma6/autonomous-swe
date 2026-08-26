@@ -84,6 +84,9 @@ class UAMSMemoryAdapter:
                 raise MemoryContractError(f"invalid UAMS search result: {error}") from error
             if is_fresh(record, query):
                 results.append(record)
+        # Deterministic relevance order so budget packing is stable and
+        # aligned with the contract-test port behaviour.
+        results.sort(key=lambda record: record.score, reverse=True)
         return tuple(results)
 
     async def get_context(self, request: ContextRequest) -> MemoryContext:

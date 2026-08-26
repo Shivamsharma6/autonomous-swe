@@ -24,6 +24,29 @@ from knowledge.memory.port import ContextRequest, MemoryPort
 
 _MAX_SAME_MODEL_RETRIES = 3
 _RETRY_BACKOFF_BASE = 0.5
+_MAX_TOOL_RESULT_CHARS = 8_000
+_MAX_PAYLOAD_CHARS = 48_000
+
+
+def _bounded_json(payload: dict[str, Any], *, limit: int = _MAX_PAYLOAD_CHARS) -> str:
+    """Serialize an invocation payload under a hard size ceiling, truncating
+    the longest string values first so structural keys always survive."""
+    def _shrink(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > _MAX_TOOL_RESULT_CHARS:
+            return value[:_MAX_TOOL_RESULT_CHARS] + "...[truncated]"
+        if isinstance(value, dict):
+            return {key: _shrink(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_shrink(item) for item in value]
+        return value
+
+    rendered = json.dumps(_shrink(payload), sort_keys=True)
+    if len(rendered) <= limit:
+        return rendered
+    return (
+        rendered[:limit]
+        + f'...[payload truncated; {len(rendered) - limit} chars omitted]'
+    )
 
 
 class AgentInvocation(ContractModel):
@@ -323,10 +346,18 @@ class AgentRuntime[OutputT: BaseModel]:
                 )
             result = await self._tool_dispatcher.dispatch(call, invocation=invocation)
             all_calls.append(call)
+            serialized = json.dumps(result, sort_keys=True, separators=(",", ":"))
+            if len(serialized) > _MAX_TOOL_RESULT_CHARS:
+                # Keep the head of large outputs; unbounded tool payloads
+                # otherwise accumulate across turns and dominate later prompts.
+                serialized = (
+                    serialized[:_MAX_TOOL_RESULT_CHARS]
+                    + f'...[truncated {len(serialized) - _MAX_TOOL_RESULT_CHARS} chars]'
+                )
             messages.append(
                 ModelMessage(
                     role="tool",
-                    content=json.dumps(result, sort_keys=True, separators=(",", ":")),
+                    content=serialized,
                     tool_call_id=call.call_id,
                 )
             )
@@ -397,10 +428,10 @@ class AgentRuntime[OutputT: BaseModel]:
     def _user_prompt(self, invocation: AgentInvocation, context: str) -> str:
         sections = [
             f"Goal: {invocation.goal}",
-            "Input:\n" + json.dumps(invocation.input_payload, sort_keys=True),
+            "Input:\n" + _bounded_json(invocation.input_payload),
         ]
         if context:
-            sections.append("Verified UAMS context:\n" + context)
+            sections.append("Recalled UAMS context:\n" + context)
         return "\n\n".join(sections)
 
 

@@ -30,6 +30,7 @@ from knowledge.memory.promotion import (
     PromotionOutcome,
     PromotionReview,
     PromotionService,
+    deterministic_memory_id,
 )
 from persistence.artifacts import ArtifactService
 from persistence.database import Database
@@ -627,6 +628,18 @@ class RunFinalizationService:
             )
             existing = await session.get(MemoryCandidateRow, candidate.candidate_id)
             if existing is None:
+                # Content-identical knowledge from a prior run already
+                # promoted? Skip re-promotion entirely; UAMS identity is
+                # content-derived, so this is the same memory.
+                promoted_twin = await session.scalar(
+                    select(MemoryCandidateRow).where(
+                        MemoryCandidateRow.deterministic_memory_id
+                        == deterministic_memory_id(candidate),
+                        MemoryCandidateRow.status == "PROMOTED",
+                    )
+                )
+                if promoted_twin is not None:
+                    return PromotionOutcome.PROMOTED
                 await self._repository.create_memory_candidate(session, candidate)
         review = await self._promotion_review(
             run_id=run.id,

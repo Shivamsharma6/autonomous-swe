@@ -11,7 +11,16 @@ from sqlalchemy import delete, func, insert, literal, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.enums import GraphExecutionState, RetryCategory, RiskLevel, TaskStatus, TaskType
+from domain.enums import (
+    RUN_TERMINAL_STATES,
+    GraphExecutionState,
+    RetryCategory,
+    RiskLevel,
+    RunStatus,
+    TaskStatus,
+    TaskType,
+)
+from domain.events import require_run_transition
 from observability.metrics import PlatformMetrics, platform_metrics
 from persistence.database import Database
 from persistence.repositories import DomainRepository
@@ -24,6 +33,7 @@ from persistence.tables import (
     RunRow,
     TaskAttemptRow,
     TaskRow,
+    utc_now,
 )
 
 
@@ -150,6 +160,13 @@ def evaluate_retry(
             reason="cost budget exhausted",
         )
     return RetryDecision(retry=True, category=category, reason="transient failure within budget")
+
+
+RUN_TERMINAL_VALUES = [status.value for status in RUN_TERMINAL_STATES]
+
+
+async def _noop_notify(_: UUID) -> None:
+    return None
 
 
 class SchedulerService:
@@ -334,7 +351,7 @@ class SchedulerService:
                     literal(project_id),
                     literal(resource),
                     literal(units),
-                    func.now(),
+                    literal(utc_now()),
                 ).where(guard + units <= cap),
             )
             .returning(ReservationRow.task_id)
@@ -381,6 +398,52 @@ class SchedulerService:
                     )
                     promoted += 1
         return promoted
+
+    async def cancel_blocked_dependents(self, *, limit: int = 500) -> int:
+        """Cascade cancellation to PENDING tasks whose dependencies have
+        terminally failed. Without this, one failed leaf wedges the whole run
+        in EXECUTING forever because dependents never become terminal."""
+        cancelled = 0
+        terminal_states = [TaskStatus.FAILED, TaskStatus.CANCELLED]
+        for _ in range(16):
+            async with self.database.transaction() as session:
+                terminal_ids = {
+                    str(value)
+                    for value in (
+                        await session.scalars(
+                            select(TaskRow.id).where(TaskRow.state.in_(terminal_states))
+                        )
+                    )
+                }
+                candidates = tuple(
+                    (
+                        await session.scalars(
+                            select(TaskRow)
+                            .where(TaskRow.state == TaskStatus.PENDING)
+                            .order_by(TaskRow.created_at, TaskRow.id)
+                            .limit(limit)
+                            .with_for_update(skip_locked=True)
+                        )
+                    ).all()
+                )
+                blocked = tuple(
+                    task
+                    for task in candidates
+                    if any(dependency in terminal_ids for dependency in task.dependencies)
+                )
+                if not blocked:
+                    return cancelled
+                for task in blocked:
+                    await self.repository.transition_task(
+                        session,
+                        project_id=task.project_id,
+                        task_id=task.id,
+                        expected_version=task.version,
+                        target=TaskStatus.CANCELLED,
+                    )
+                    terminal_ids.add(str(task.id))
+                    cancelled += 1
+        return cancelled
 
     async def heartbeat(
         self,
@@ -441,6 +504,11 @@ class SchedulerService:
             if run is None or repository is None:
                 raise RuntimeError("task run or repository is missing")
             if task.state is TaskStatus.COMPLETED:
+                attempt = await session.get(TaskAttemptRow, attempt_id)
+                if attempt is None or attempt.task_id != task_id:
+                    raise LookupError(
+                        "dispatch attempt does not match the completed task"
+                    )
                 return self._execution_lease(
                     task, run, repository, attempt_id, already_terminal=True
                 )
@@ -513,6 +581,12 @@ class SchedulerService:
                 return
             if lease is None or lease.owner != owner or lease.token != token:
                 raise PermissionError("worker cannot finish a claim owned by another dispatcher")
+            if lease.expires_at <= current_time - self.lease_ttl:
+                # Fencing: a lease more than one TTL past expiry has almost
+                # certainly been superseded; reconciliation owns that task.
+                raise PermissionError(
+                    "worker lease expired beyond grace; claim ownership lost"
+                )
             graph = await session.scalar(
                 select(GraphExecutionRow).where(GraphExecutionRow.task_id == task_id)
             )
@@ -629,6 +703,88 @@ class SchedulerService:
             await self._release_reservations(session, task_id, current_time)
             await session.execute(delete(LeaseRow).where(LeaseRow.task_id == task_id))
         await notify(task_id)
+
+    async def cancel_requested_runs(self, *, limit: int = 16) -> int:
+        """Resolve operator-requested run cancellations: cancel every
+        non-terminal task, then transition the run itself to CANCELLED."""
+        resolved = 0
+        async with self.database.sessions() as session:
+            runs = (
+                (
+                    await session.scalars(
+                        select(RunRow)
+                        .where(
+                            RunRow.cancellation_requested_at.is_not(None),
+                            RunRow.state.notin_(RUN_TERMINAL_VALUES),
+                        )
+                        .order_by(RunRow.cancellation_requested_at)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        for run in runs:
+            async with self.database.transaction() as session:
+                tasks = (
+                    (
+                        await session.scalars(
+                            select(TaskRow)
+                            .where(
+                                TaskRow.run_id == run.id,
+                                TaskRow.state.notin_(
+                                    [
+                                        TaskStatus.COMPLETED,
+                                        TaskStatus.FAILED,
+                                        TaskStatus.CANCELLED,
+                                    ]
+                                ),
+                            )
+                        )
+                    ).all()
+                )
+            for task in tasks:
+                await self.cancel_task(
+                    project_id=task.project_id,
+                    task_id=task.id,
+                    notify=_noop_notify,
+                )
+            current_time = datetime.now(UTC)
+            async with self.database.transaction() as session:
+                locked = await session.scalar(
+                    select(RunRow).where(RunRow.id == run.id).with_for_update()
+                )
+                if locked is None or locked.state in RUN_TERMINAL_VALUES:
+                    continue
+                require_run_transition(RunStatus(locked.state), RunStatus.CANCELLED)
+                await self.repository.record_state_duration(
+                    session,
+                    aggregate_type="workflow",
+                    aggregate_id=locked.id,
+                    state=locked.state,
+                    entered_at=locked.state_entered_at,
+                    exited_at=current_time,
+                )
+                locked.state = RunStatus.CANCELLED.value
+                locked.state_entered_at = current_time
+                event_id = uuid4()
+                payload = {"run_id": str(run.id), "reason": "operator_cancelled"}
+                await self.repository.append_audit(
+                    session,
+                    event_id=event_id,
+                    event_type="run.cancelled",
+                    aggregate_type="run",
+                    aggregate_id=run.id,
+                    payload=payload,
+                    correlation_id=run.id,
+                    causation_id=event_id,
+                )
+                await self.repository.enqueue_event(
+                    session,
+                    event_id=event_id,
+                    topic="run-state",
+                    payload=payload,
+                )
+            resolved += 1
+        return resolved
 
     async def record_observed_usage(
         self,

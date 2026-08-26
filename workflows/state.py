@@ -139,6 +139,10 @@ class NodeExecutionResult(ContractModel):
     artifact_ids: tuple[UUID, ...] = Field(default_factory=tuple, max_length=1_000)
     result_id: UUID
     summary: str = Field(min_length=1, max_length=2_000)
+    # Content hashes of the changed paths recorded by the node at persist
+    # time. Replay of a COMPLETED row is only trusted while the current
+    # worktree still matches; otherwise the node re-executes.
+    worktree_fingerprint: dict[str, str] = Field(default_factory=dict, max_length=1_000)
 
 
 class TaskGraphResult(ContractModel):
@@ -178,7 +182,10 @@ class CheckpointIdentity(ContractModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def thread_id(self) -> str:
-        return f"run:{self.run_id}:task:{self.task_id}"
+        # Attempt-scoped: every lease attempt executes its own checkpoint
+        # chain, so retries fork cleanly instead of appending divergent state
+        # onto a shared thread.
+        return f"run:{self.run_id}:task:{self.task_id}:attempt:{self.attempt_id}"
 
 
 class WaitWorkflowState(TypedDict, total=False):

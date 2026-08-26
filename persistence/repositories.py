@@ -330,17 +330,55 @@ class DomainRepository:
                 row.run_id != run_id
                 or row.repository_id != repository_id
                 or row.baseline_commit != baseline_commit
-                or row.thread_id != thread_id
             ):
                 raise ValueError(
                     "graph execution identity does not match run, task, repository, or baseline"
                 )
             previous = row.state
-            if previous is target:
+            rolled_over = False
+            if row.thread_id != thread_id:
+                # Attempt rollover: a new lease attempt owns a fresh checkpoint
+                # chain. The durable pointer moves to the new thread and the
+                # execution restarts RUNNING from that chain's beginning; the
+                # superseded chain remains as checkpoint history for retention.
+                # This is the one sanctioned transition out of a terminal graph
+                # state, because a new attempt is a new execution.
+                if target is not GraphExecutionState.RUNNING:
+                    raise ValueError(
+                        "graph thread change is only valid as an attempt restart to RUNNING"
+                    )
+                event_id = uuid4()
+                rollover_payload = {
+                    "task_id": str(task_id),
+                    "from_thread_id": row.thread_id,
+                    "to_thread_id": thread_id,
+                    "previous_state": previous.value,
+                }
+                await self.append_audit(
+                    session,
+                    event_id=event_id,
+                    event_type="workflow.attempt_rollover",
+                    aggregate_type="workflow",
+                    aggregate_id=row.id,
+                    payload=rollover_payload,
+                    correlation_id=run_id,
+                    causation_id=event_id,
+                )
+                await self.enqueue_event(
+                    session,
+                    event_id=event_id,
+                    topic="workflow-state",
+                    payload=rollover_payload,
+                )
+                row.thread_id = thread_id
+                row.state_entered_at = now
+                rolled_over = True
+            elif previous is target:
                 row.checkpoint_id = checkpoint_id or row.checkpoint_id
                 await session.flush()
                 return row
-            require_graph_transition(previous, target)
+            if not rolled_over:
+                require_graph_transition(previous, target)
             await self.record_state_duration(
                 session,
                 aggregate_type="workflow",

@@ -477,6 +477,7 @@ class OutboxRow(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     publisher: Mapped[str | None] = mapped_column(String(255))
     claim_token: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))

@@ -101,8 +101,11 @@ def is_fresh(memory: RetrievedMemory, query: MemoryQuery) -> bool:
     if query.repository_id is not None and query.baseline_commit is not None:
         if memory.repository_id is None or memory.baseline_commit is None:
             return False
-        if memory.repository_id == query.repository_id:
-            return memory.baseline_commit == query.baseline_commit
+        if memory.repository_id != query.repository_id:
+            # Memories from a different repository must never pass a
+            # repository+baseline scoped query.
+            return False
+        return memory.baseline_commit == query.baseline_commit
     return True
 
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, select, text
 
 from domain.enums import RUN_TERMINAL_STATES, ApprovalStatus
 from messaging.redis_streams import RedisStreamsTransport
@@ -13,8 +13,12 @@ from persistence.tables import (
     ApprovalRow,
     AuditEventRow,
     DeadLetterRow,
+    GraphExecutionRow,
     MemoryCandidateRow,
+    OutboxRow,
     RunRow,
+    TaskAttemptRow,
+    TaskRow,
     ToolExecutionRow,
 )
 
@@ -28,6 +32,7 @@ class RetentionPolicy:
     agent_message_payloads: timedelta = timedelta(days=90)
     resolved_dead_letters: timedelta = timedelta(days=30)
     operational_metadata: timedelta = timedelta(days=365)
+    checkpoint_state: timedelta = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +41,7 @@ class RetentionResult:
     message_payloads_purged: int = 0
     dead_letters_deleted: int = 0
     operational_rows_deleted: int = 0
+    checkpoint_rows_deleted: int = 0
 
 
 class RetentionService:
@@ -59,17 +65,24 @@ class RetentionService:
             redis_deleted += await self._transport.trim_before(
                 stream, timestamp - self._policy.redis_streams
             )
-        messages, dead_letters, operational = await self._purge_postgres(timestamp)
+        (
+            messages,
+            dead_letters,
+            operational,
+            checkpoint_rows,
+        ) = await self._purge_postgres(timestamp)
         return RetentionResult(
             redis_entries_deleted=redis_deleted,
             message_payloads_purged=messages,
             dead_letters_deleted=dead_letters,
             operational_rows_deleted=operational,
+            checkpoint_rows_deleted=checkpoint_rows,
         )
 
-    async def _purge_postgres(self, now: datetime) -> tuple[int, int, int]:
+    async def _purge_postgres(self, now: datetime) -> tuple[int, int, int, int]:
         message_cutoff = now - self._policy.agent_message_payloads
         dead_letter_cutoff = now - self._policy.resolved_dead_letters
+        checkpoint_cutoff = now - self._policy.checkpoint_state
         async with self._database.transaction() as session:
             candidates = tuple(
                 (
@@ -106,7 +119,78 @@ class RetentionService:
             operational = await self._purge_operational_metadata(
                 session, now - self._policy.operational_metadata
             )
-            return purged, int(result.rowcount or 0), operational
+            outbox_cutoff = now - self._policy.operational_metadata
+            operational += await self._purge_outbox(session, outbox_cutoff)
+            checkpoint_rows = await self._purge_checkpoint_state(session, checkpoint_cutoff)
+            return purged, int(result.rowcount or 0), operational, checkpoint_rows
+
+    async def _purge_outbox(self, session: Any, cutoff: datetime) -> int:
+        result = await session.execute(
+            delete(OutboxRow).where(
+                OutboxRow.published_at.is_not(None),
+                OutboxRow.published_at <= cutoff,
+            )
+        )
+        parked = await session.execute(
+            delete(OutboxRow).where(
+                OutboxRow.dead_lettered_at.is_not(None),
+                OutboxRow.dead_lettered_at <= cutoff,
+            )
+        )
+        return int(result.rowcount or 0) + int(parked.rowcount or 0)
+
+    async def _purge_checkpoint_state(self, session: Any, cutoff: datetime) -> int:
+        """Delete LangGraph checkpoint chains and workflow node boundaries of
+        terminal runs past the retention window. Graph execution rows survive
+        as compact audit metadata; only the blob state is reclaimed."""
+        run_ids = tuple(
+            (
+                await session.scalars(
+                    select(RunRow.id).where(
+                        RunRow.state.in_(TERMINAL_RUN_STATES),
+                        RunRow.created_at <= cutoff,
+                    )
+                )
+            ).all()
+        )
+        if not run_ids:
+            return 0
+        thread_ids = tuple(
+            (
+                await session.scalars(
+                    select(GraphExecutionRow.thread_id)
+                    .join(TaskRow, TaskRow.id == GraphExecutionRow.task_id)
+                    .where(TaskRow.run_id.in_(run_ids))
+                )
+            ).all()
+        )
+        deleted = 0
+        if thread_ids:
+            for table in ("checkpoint_blobs", "checkpoint_writes", "checkpoints"):
+                result = await session.execute(
+                    text(f"DELETE FROM {table} WHERE thread_id = ANY(:thread_ids)"),  # noqa: S608 - fixed literal allowlist
+                    {"thread_ids": list(thread_ids)},
+                )
+                deleted += int(result.rowcount or 0)
+        attempt_ids = tuple(
+            (
+                await session.scalars(
+                    select(TaskAttemptRow.id)
+                    .join(TaskRow, TaskRow.id == TaskAttemptRow.task_id)
+                    .where(TaskRow.run_id.in_(run_ids))
+                )
+            ).all()
+        )
+        if attempt_ids:
+            result = await session.execute(
+                text(
+                    "DELETE FROM workflow_node_executions "
+                    "WHERE attempt_id = ANY(:attempt_ids)"
+                ),
+                {"attempt_ids": list(attempt_ids)},
+            )
+            deleted += int(result.rowcount or 0)
+        return deleted
 
     async def _purge_operational_metadata(self, session: Any, cutoff: datetime) -> int:
         deleted = 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -296,11 +297,36 @@ class ProductionNodeExecutor:
             if row is None or row.id != execution_id or row.attempt_id != request.attempt_id:
                 raise PermissionError("workflow node idempotency identity conflict")
             if row.status == "COMPLETED":
-                return NodeExecutionResult.model_validate(row.result)
+                replay = NodeExecutionResult.model_validate(row.result)
+                if self._fingerprint_matches(replay.worktree_fingerprint):
+                    return replay
+                # The recorded side effects no longer exist in the current
+                # worktree (it was recreated from baseline); the stored success
+                # is not honest anymore, so re-execute.
             row.status = "RUNNING"
             row.result = {}
             row.completed_at = None
             return None
+
+    def _worktree_fingerprint(self, changed_paths: tuple[str, ...]) -> dict[str, str]:
+        root = self._tool_set.worktree.resolve()
+        fingerprint: dict[str, str] = {}
+        for relative in changed_paths[:1_000]:
+            candidate = (root / relative).resolve()
+            if root not in candidate.parents and candidate != root:
+                continue
+            if not candidate.is_file():
+                fingerprint[relative] = ""
+                continue
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            fingerprint[relative] = digest
+        return fingerprint
+
+    def _fingerprint_matches(self, recorded: dict[str, str]) -> bool:
+        if not recorded:
+            return True
+        current = self._worktree_fingerprint(tuple(recorded))
+        return current == recorded
 
     async def _invoke(
         self, request: NodeExecutionRequest
@@ -366,7 +392,9 @@ class ProductionNodeExecutor:
                     "agent_role": role,
                     "task_type": request.task_type.value,
                     "node": request.node_name,
-                    "input_refs": request.input_refs,
+                    # Dependency-task handoff summaries resolved at dispatch
+                    # time; this is the cross-task context channel.
+                    "upstream_summaries": request.input_refs,
                     "prior_summaries": request.prior_summaries,
                     "prior_message_ids": [str(value) for value in request.prior_message_ids],
                     "prior_artifact_ids": [str(value) for value in request.prior_artifact_ids],
@@ -391,7 +419,10 @@ class ProductionNodeExecutor:
             message_ids=(message_id,),
             artifact_ids=(artifact_id,),
             result_id=request.idempotency_uuid("result"),
-            summary=output.summary,
+            # The graph-state channel is bounded; the full summary remains in
+            # the durable artifact and handoff message.
+            summary=output.summary[:2_000],
+            worktree_fingerprint=self._worktree_fingerprint(output.changed_paths),
         )
         content = json.dumps(
             {

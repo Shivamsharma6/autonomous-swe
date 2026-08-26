@@ -100,7 +100,7 @@ class RunPlanningService:
         claimed = await self._claim_run()
         if claimed is None:
             return None
-        run, repository, stage_attempt_id = claimed
+        run, repository, stage_attempt_id, fence_started_at = claimed
         runtime = AgentRuntime(
             self._spec,
             self._gateway,
@@ -168,13 +168,23 @@ class RunPlanningService:
                 reasons = ", ".join(issue.code for issue in validation.issues)
                 raise ValueError(f"architect produced an invalid task DAG: {reasons}")
             self._require_integration_sink(plan)
-            await self._persist_plan(plan, stage_attempt_id=stage_attempt_id)
+            await self._persist_plan(
+                plan,
+                stage_attempt_id=stage_attempt_id,
+                fence_started_at=fence_started_at,
+            )
             return plan
         except Exception:
-            await self._fail_run(run.id, stage_attempt_id=stage_attempt_id)
+            await self._fail_run(
+                run.id,
+                stage_attempt_id=stage_attempt_id,
+                fence_started_at=fence_started_at,
+            )
             raise
 
-    async def _claim_run(self) -> tuple[RunRow, RepositoryRow, UUID] | None:
+    async def _claim_run(
+        self,
+    ) -> tuple[RunRow, RepositoryRow, UUID, datetime] | None:
         now = datetime.now(UTC)
         stale_before = now - self._stale_after
         async with self._database.transaction() as session:
@@ -187,6 +197,7 @@ class RunPlanningService:
                         & (RunRow.state_entered_at < stale_before)
                     )
                 )
+                .where(RunRow.cancellation_requested_at.is_(None))
                 .order_by(RunRow.created_at, RunRow.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
@@ -214,12 +225,20 @@ class RunPlanningService:
                 )
                 .on_conflict_do_update(
                     index_elements=[RunStageAttemptRow.run_id, RunStageAttemptRow.stage],
-                    set_={"status": "RUNNING", "ended_at": None},
+                    # A stale-takeover restarts the stage clock; this timestamp
+                    # doubles as the ownership fence checked at persist time.
+                    set_={"status": "RUNNING", "started_at": now, "ended_at": None},
                 )
             )
-            return run, repository, attempt_id
+            return run, repository, attempt_id, now
 
-    async def _persist_plan(self, plan: TaskPlan, *, stage_attempt_id: UUID) -> None:
+    async def _persist_plan(
+        self,
+        plan: TaskPlan,
+        *,
+        stage_attempt_id: UUID,
+        fence_started_at: datetime,
+    ) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
             run = await session.scalar(
@@ -232,6 +251,8 @@ class RunPlanningService:
             )
             if existing is None:
                 raise RuntimeError("planning attempt disappeared")
+            if existing.started_at != fence_started_at:
+                raise RuntimeError("planning stage was taken over by another dispatcher")
             await self._repository.create_plan_revision(
                 session,
                 run_id=run.id,
@@ -281,13 +302,21 @@ class RunPlanningService:
                 payload=payload,
             )
 
-    async def _fail_run(self, run_id: UUID, *, stage_attempt_id: UUID) -> None:
+    async def _fail_run(
+        self,
+        run_id: UUID,
+        *,
+        stage_attempt_id: UUID,
+        fence_started_at: datetime,
+    ) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
             run = await session.scalar(
                 select(RunRow).where(RunRow.id == run_id).with_for_update()
             )
             attempt = await session.get(RunStageAttemptRow, stage_attempt_id)
+            if attempt is not None and attempt.started_at != fence_started_at:
+                return
             if run is not None and run.state == RunStatus.PLANNING.value:
                 require_run_transition(RunStatus(run.state), RunStatus.FAILED)
                 await self._record_run_duration(session, run, exited_at=now)

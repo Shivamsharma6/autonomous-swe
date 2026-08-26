@@ -216,6 +216,42 @@ async def test_search_rejects_expired_and_stale_commit_scoped_memory() -> None:
     assert results == (current,)
 
 
+async def test_search_rejects_memories_from_other_repositories() -> None:
+    now = datetime.now(UTC)
+    project_id, repository_id = uuid4(), uuid4()
+    foreign_repository = uuid4()
+    current = RetrievedMemory(
+        memory_id=uuid4(),
+        revision_id=str(uuid4()),
+        text="Current procedure",
+        score=0.9,
+        memory_type="procedural",
+        source_id="Tasks/current.md",
+        evidence_ids=("evidence-current",),
+        project_id=project_id,
+        repository_id=repository_id,
+        baseline_commit="c" * 40,
+        verified_at=now,
+    )
+    foreign = current.model_copy(
+        update={"memory_id": uuid4(), "repository_id": foreign_repository}
+    )
+    unscoped = current.model_copy(update={"memory_id": uuid4(), "repository_id": None})
+    port = FakeMemoryPort(seed=(current, foreign, unscoped))
+
+    results = await port.search(
+        MemoryQuery(
+            query="procedure",
+            project_id=project_id,
+            repository_id=repository_id,
+            baseline_commit="c" * 40,
+            now=now,
+        )
+    )
+
+    assert results == (current,)
+
+
 def _json(request: httpx.Request) -> dict[str, Any]:
     import json
 

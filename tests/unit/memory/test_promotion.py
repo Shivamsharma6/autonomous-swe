@@ -111,11 +111,14 @@ def test_cross_project_knowledge_requires_human_approval() -> None:
     assert approved.accepted is True
 
 
-def test_memory_id_is_uuid5_stable_for_normalized_content_and_changes_with_source() -> None:
+def test_memory_id_is_uuid5_stable_for_content_and_independent_of_source_run() -> None:
     original = candidate(content="Run   TARGETED tests.\n")
     normalized = original.model_copy(update={"content": "run targeted tests."})
-    changed_source = original.model_copy(update={"source_task_id": uuid4()})
+    other_run = original.model_copy(update={"source_run_id": uuid4(), "source_task_id": uuid4()})
+    changed = original.model_copy(update={"content": "Deploy the service."})
 
     assert deterministic_memory_id(original) == deterministic_memory_id(normalized)
-    assert deterministic_memory_id(original) != deterministic_memory_id(changed_source)
+    # Identical knowledge from different runs collapses onto one memory.
+    assert deterministic_memory_id(original) == deterministic_memory_id(other_run)
+    assert deterministic_memory_id(original) != deterministic_memory_id(changed)
     assert deterministic_memory_id(original).version == 5
