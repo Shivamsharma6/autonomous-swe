@@ -139,6 +139,17 @@ class RunResponse(ContractModel):
     model_cost_usd: float
     created_at: str
     updated_at: str
+    project_name: str | None = None
+
+
+class MessageResponse(ContractModel):
+    message_id: UUID
+    task_id: UUID
+    kind: str
+    sender: str
+    recipient: str
+    summary: str
+    created_at: str
 
 
 class ApprovalResponse(ContractModel):

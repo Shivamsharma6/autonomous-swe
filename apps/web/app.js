@@ -1,3 +1,19 @@
+import { api, setUnauthorizedHandler, getToken, setToken, clearToken, connectTaskSocket } from './js/api.js';
+import {
+  el,
+  terminalStates,
+  escapeHtml,
+  formatDuration,
+  formatBytes,
+  summarizeCounts,
+  stateTone,
+  copyToClipboard,
+} from './js/util.js';
+import { showToast } from './js/toast.js';
+import { initRunsBrowser, showRunsBrowser, hideRunsBrowser } from './js/runsBrowser.js';
+import { initPalette, openPalette } from './js/palette.js';
+import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
+
 (() => {
   'use strict';
 
@@ -21,53 +37,9 @@
     modelConfig: null,
   };
 
-  const el = (id) => document.getElementById(id);
-  const terminalStates = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
-
-  // Centralized Authenticated API Client
-  async function api(path, options = {}) {
-    if (!state.token) {
-      openAuth();
-      throw new Error('Operator authentication is required.');
-    }
-    const headers = new Headers(options.headers || {});
-    headers.set('Authorization', `Bearer ${state.token}`);
-    if (options.body && !headers.has('Content-Type')) {
-      headers.set('Content-Type', 'application/json');
-    }
-    const response = await fetch(path, { ...options, headers });
-    if (response.status === 401) {
-      openAuth();
-      throw new Error('Admin token was rejected by server.');
-    }
-    if (!response.ok) {
-      let message = `Request failed (${response.status})`;
-      try {
-        const body = await response.json();
-        if (body.detail) {
-          message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
-        }
-      } catch (_) { /* non-json response */ }
-      throw new Error(message);
-    }
-    if (response.status === 204) return null;
-    return response.json();
-  }
-
-  // Toast Notification Manager
-  function showToast(message, isError = false) {
-    const toast = el('toast');
-    if (!toast) return;
-    toast.textContent = message;
-    toast.classList.toggle('error', isError);
-    toast.classList.remove('hidden');
-    window.clearTimeout(showToast.timer);
-    showToast.timer = window.setTimeout(() => toast.classList.add('hidden'), 4000);
-  }
-
   // Authentication Dialog Controls
   function openAuth() {
-    el('adminToken').value = state.token;
+    el('adminToken').value = getToken();
     if (!el('authDialog').open) el('authDialog').showModal();
   }
 
@@ -160,7 +132,7 @@
 
   // Restore Session Storage State
   function restoreIdentity() {
-    if (state.token) {
+    if (getToken()) {
       el('authBtnText').textContent = 'Admin Connected';
     }
     if (state.projectId && state.repositoryId) {
@@ -176,7 +148,7 @@
       el('runLookup').value = state.runId;
       void loadRun(state.runId);
     }
-    if (!state.token) {
+    if (!getToken()) {
       window.setTimeout(openAuth, 300);
     }
   }
@@ -417,6 +389,12 @@
       state.events = events || [];
 
       saveRecentRun(candidate, run.goal);
+      hideRunsBrowser();
+      el('launchpadSection')?.classList.add('hidden');
+      document.querySelectorAll('[data-nav]').forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.nav === 'mission');
+      });
+      el('dashboard').classList.remove('hidden');
       renderRun(run);
       setupWebSocket(run.project_id, candidate);
 
@@ -430,7 +408,10 @@
     }
   }
 
-  // WebSocket Live Event Streaming with Token Auth
+  // Live event streaming over the hardened subprotocol-authenticated socket,
+  // with exponential-backoff reconnect while the task stays active.
+  let wsRetryDelay = 1000;
+
   function setupWebSocket(projectId, runId) {
     if (state.ws) {
       state.ws.close();
@@ -444,37 +425,32 @@
       return;
     }
 
-    try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(runningTask.id)}/events?token=${encodeURIComponent(state.token)}`;
-      const ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
+    const handleEvent = (payload) => {
+      state.events.unshift(payload);
+      renderEvents(state.events);
+    };
+    const handleState = (status) => {
+      if (status === 'open') {
+        wsRetryDelay = 1000;
         el('liveStreamBadge').classList.add('live');
         el('streamStatusText').textContent = 'LIVE WEBSOCKET';
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          state.events.unshift(payload);
-          renderEvents(state.events);
-        } catch (_) {}
-      };
-
-      ws.onerror = () => {
-        el('streamStatusText').textContent = 'POLLING FALLBACK';
+      } else if (status === 'error') {
         el('liveStreamBadge').classList.remove('live');
-      };
-
-      ws.onclose = () => {
+        el('streamStatusText').textContent = 'POLLING FALLBACK';
+      } else if (status === 'close') {
         state.ws = null;
-      };
+        if (!state.runId) return;
+        const stillActive = state.tasks.some(t => t.state === 'RUNNING' || t.state === 'LEASED');
+        if (stillActive && wsRetryDelay <= 8000) {
+          window.setTimeout(() => {
+            if (state.runId === runId) setupWebSocket(projectId, runId);
+          }, wsRetryDelay);
+          wsRetryDelay *= 2;
+        }
+      }
+    };
 
-      state.ws = ws;
-    } catch (_) {
-      el('streamStatusText').textContent = 'POLLING ACTIVE';
-    }
+    state.ws = connectTaskSocket(projectId, runningTask.id, { onEvent: handleEvent, onState: handleState });
   }
 
   // Render Dashboard
@@ -698,6 +674,9 @@
 
     el('drawerTaskGoal').textContent = task.goal || task.title;
 
+    // Agent reasoning feed (handoff summaries) for this task.
+    void loadTaskIntel(state.projectId, task.id, el('drawerTaskIntel'));
+
     // Filter events for this task
     const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.id);
     const eventsContainer = el('drawerTaskEvents');
@@ -863,7 +842,7 @@
 
     try {
       const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
-        headers: { Authorization: `Bearer ${state.token}` },
+        headers: { Authorization: `Bearer ${getToken()}` },
       });
       if (!response.ok) throw new Error(`Fetch failed (${response.status})`);
       const text = await response.text();
@@ -888,14 +867,10 @@
     }
   }
 
-  function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
   async function downloadArtifact(projectId, artifact) {
     try {
       const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
-        headers: { Authorization: `Bearer ${state.token}` },
+        headers: { Authorization: `Bearer ${getToken()}` },
       });
       if (!response.ok) throw new Error(`Download failed (${response.status})`);
       const blob = await response.blob();
@@ -960,142 +935,6 @@
   }
 
   // Utility Formatters
-  function summarizeCounts(counts) {
-    const entries = Object.entries(counts || {});
-    if (!entries.length) return 'No tasks';
-    return entries.map(([name, count]) => `${count} ${name.toLowerCase()}`).join(' · ');
-  }
-
-  function formatDuration(seconds) {
-    const value = Math.max(0, Math.floor(Number(seconds) || 0));
-    if (value < 60) return `${value}s`;
-    if (value < 3600) return `${Math.floor(value / 60)}m ${value % 60}s`;
-    return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
-  }
-
-  function formatBytes(bytes) {
-    const value = Number(bytes) || 0;
-    if (value < 1024) return `${value} B`;
-    if (value < 1048576) return `${(value / 1024).toFixed(1)} KiB`;
-    return `${(value / 1048576).toFixed(1)} MiB`;
-  }
-
-  // Event Listeners & Binding
-  el('openAuth').addEventListener('click', openAuth);
-  
-  el('clearToken').addEventListener('click', () => {
-    state.token = '';
-    sessionStorage.removeItem('autoswe.adminToken');
-    el('adminToken').value = '';
-    el('authBtnText').textContent = 'Admin Access';
-    showToast('Session token cleared.');
-    closeAuth();
-  });
-
-  el('authForm').addEventListener('submit', () => {
-    state.token = el('adminToken').value.trim();
-    sessionStorage.setItem('autoswe.adminToken', state.token);
-    el('authBtnText').textContent = 'Admin Connected';
-    showToast('Admin token saved for this session.');
-    closeAuth();
-    if (state.runId) void loadRun(state.runId);
-  });
-
-  el('browseFolderBtn').addEventListener('click', selectDirectory);
-  el('dirPickerFallback').addEventListener('change', handleFallbackDirPicker);
-  el('projectForm').addEventListener('submit', registerProject);
-  el('runForm').addEventListener('submit', startRun);
-  
-  el('lookupForm').addEventListener('submit', (e) => {
-    e.preventDefault();
-    void loadRun(el('runLookup').value);
-  });
-
-  el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
-  
-  el('copyRunId').addEventListener('click', async () => {
-    if (!state.runId) return;
-    await navigator.clipboard.writeText(state.runId);
-    showToast('Run ID copied to clipboard.');
-  });
-
-  // Switch to New Mission Launchpad
-  const newRunBtn = el('newRunBtn');
-  if (newRunBtn) {
-    newRunBtn.addEventListener('click', () => {
-      window.clearTimeout(state.pollTimer);
-      if (state.ws) {
-        state.ws.close();
-        state.ws = null;
-      }
-      el('dashboard').classList.add('hidden');
-      el('onboardingSection').classList.remove('hidden');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    });
-  }
-
-  // Brand Logo Click: Return to Launchpad
-  const brandLogo = el('brandLogo');
-  if (brandLogo) {
-    brandLogo.addEventListener('click', (e) => {
-      e.preventDefault();
-      if (!el('dashboard').classList.contains('hidden')) {
-        el('dashboard').classList.add('hidden');
-        el('onboardingSection').classList.remove('hidden');
-      }
-    });
-  }
-
-  // Prompt Preset Chips Click Binding
-  document.querySelectorAll('.preset-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const goal = chip.dataset.goal;
-      if (goal) {
-        el('runGoal').value = goal;
-        showToast(`Preset loaded: ${chip.dataset.title || 'Goal'}`);
-        el('runGoal').focus();
-      }
-    });
-  });
-
-  // Fill Sample SHA Helper Button
-  const fillSampleShaBtn = el('fillSampleSha');
-  if (fillSampleShaBtn) {
-    fillSampleShaBtn.addEventListener('click', () => {
-      el('baselineCommit').value = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
-      showToast('Filled sample commit SHA.');
-    });
-  }
-
-  // Clear Recent Runs Button
-  const clearRecentBtn = el('clearRecentRuns');
-  if (clearRecentBtn) {
-    clearRecentBtn.addEventListener('click', () => {
-      localStorage.removeItem(RECENT_RUNS_KEY);
-      renderRecentRuns();
-      showToast('Recent runs cleared.');
-    });
-  }
-
-  // --------------------------------------------------------------------------
-  // LLM Model & Provider Studio
-  // --------------------------------------------------------------------------
-  const DEFAULT_MODELS = [
-    'gemma4:12b-mlx',
-    'qwen3.6:35b-a3b-coding-nvfp4',
-    'qwen3.8:27b-mlx',
-    'nemotron-3.5-lightning:30b-mlx',
-    'gpt-4o',
-    'gpt-4o-mini',
-    'o3-mini',
-    'o1',
-    'anthropic/claude-3.7-sonnet',
-    'anthropic/claude-3.5-sonnet',
-    'deepseek-chat',
-    'deepseek-reasoner',
-    'llama-3.3-70b-versatile',
-  ];
-
   function openModelStudio() {
     if (state.modelConfig) {
       if (el('modelBaseUrl')) el('modelBaseUrl').value = state.modelConfig.base_url || '';
@@ -1540,9 +1379,203 @@
     if (state.tasks.length) drawDAGConnectors(state.tasks);
   });
 
+  // Event Listeners & Binding
+  el('openAuth').addEventListener('click', openAuth);
+
+  el('clearToken').addEventListener('click', () => {
+    clearToken();
+    el('adminToken').value = '';
+    el('authBtnText').textContent = 'Admin Access';
+    showToast('Session token cleared.');
+    closeAuth();
+  });
+
+  el('authForm').addEventListener('submit', () => {
+    setToken(el('adminToken').value.trim());
+    el('authBtnText').textContent = 'Admin Connected';
+    showToast('Admin token saved for this session.');
+    closeAuth();
+    if (state.runId) void loadRun(state.runId);
+  });
+
+  el('browseFolderBtn').addEventListener('click', selectDirectory);
+  el('dirPickerFallback').addEventListener('change', handleFallbackDirPicker);
+  el('projectForm').addEventListener('submit', registerProject);
+  el('runForm').addEventListener('submit', startRun);
+
+  el('lookupForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    void loadRun(el('runLookup').value);
+  });
+
+  el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
+
+  el('copyRunId').addEventListener('click', async () => {
+    if (!state.runId) return;
+    await copyToClipboard(state.runId);
+    showToast('Run ID copied to clipboard.');
+  });
+
+  // Switch to New Mission Launchpad
+  const legacyNewRunBtn = el('newRunBtn');
+  if (legacyNewRunBtn) {
+    legacyNewRunBtn.addEventListener('click', () => {
+      window.clearTimeout(state.pollTimer);
+      if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+      }
+      showLaunchpad();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  // Brand Logo Click: back to the Runs Browser.
+  const brandLogo = el('brandLogo');
+  if (brandLogo) {
+    brandLogo.addEventListener('click', (e) => {
+      e.preventDefault();
+      backToRuns();
+    });
+  }
+
+  // Prompt Preset Chips Click Binding
+  document.querySelectorAll('.preset-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const goal = chip.dataset.goal;
+      if (goal) {
+        el('runGoal').value = goal;
+        showToast(`Preset loaded: ${chip.dataset.title || 'Goal'}`);
+        el('runGoal').focus();
+      }
+    });
+  });
+
+  // Fill Sample SHA Helper Button
+  const fillSampleShaBtn = el('fillSampleSha');
+  if (fillSampleShaBtn) {
+    fillSampleShaBtn.addEventListener('click', () => {
+      el('baselineCommit').value = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+      showToast('Filled sample commit SHA.');
+    });
+  }
+
+  // Clear Recent Runs Button
+  const clearRecentBtn = el('clearRecentRuns');
+  if (clearRecentBtn) {
+    clearRecentBtn.addEventListener('click', () => {
+      localStorage.removeItem(RECENT_RUNS_KEY);
+      renderRecentRuns();
+      showToast('Recent runs cleared.');
+    });
+  }
+
+  // View router: Runs Browser <-> Mission Console <-> Launchpad.
+  function showLaunchpad() {
+    hideRunsBrowser();
+    el('dashboard')?.classList.add('hidden');
+    el('launchpadSection')?.classList.remove('hidden');
+    document.querySelectorAll('[data-nav]').forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.nav === 'new');
+    });
+  }
+
+  function backToRuns() {
+    el('dashboard')?.classList.add('hidden');
+    el('launchpadSection')?.classList.add('hidden');
+    showRunsBrowser();
+  }
+
+  function paletteActions() {
+    const items = [
+      { id: 'runs', title: 'Go to Runs Browser', icon: '▦', hint: 'overview', keywords: 'runs list missions browse', run: backToRuns },
+      { id: 'new', title: 'New Mission', icon: '＋', hint: 'launch', keywords: 'new run launch start goal create', run: showLaunchpad },
+    ];
+    if (state.runId) {
+      items.push({
+        id: 'copyRun',
+        title: 'Copy Run ID',
+        icon: '⧉',
+        hint: state.runId.slice(0, 8),
+        keywords: 'copy id clipboard uuid',
+        run: () => {
+          void copyToClipboard(state.runId);
+          showToast('Run ID copied to clipboard');
+        },
+      });
+      items.push({
+        id: 'cancel',
+        title: 'Cancel Current Run',
+        icon: '✕',
+        hint: 'destructive',
+        keywords: 'cancel abort stop mission',
+        run: async () => {
+          try {
+            await api(`/api/v1/runs/${encodeURIComponent(state.runId)}/cancel`, { method: 'POST' });
+            showToast('Cancellation requested — workers will wind down.');
+          } catch (error) {
+            showToast(error.message, true);
+          }
+        },
+      });
+      if (state.projectId && state.tasks.length) {
+        items.push({
+          id: 'intel',
+          title: 'Jump to Latest Task Reasoning',
+          icon: '⤷',
+          hint: 'drawer',
+          keywords: 'agent reasoning messages summaries drawer intel',
+          run: () => {
+            const running = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED') || state.tasks[0];
+            if (running) openTaskDrawer(running);
+          },
+        });
+      }
+    }
+    for (const recent of getRecentRuns()) {
+      items.push({
+        id: `run:${recent.runId}`,
+        title: `Open ${recent.goal || recent.runId}`.slice(0, 80),
+        icon: '▸',
+        hint: recent.runId.slice(0, 8),
+        keywords: `open run mission ${recent.runId}`,
+        run: () => { void loadRun(recent.runId); },
+      });
+    }
+    items.push({
+      id: 'studio',
+      title: 'Open Model Studio',
+      icon: '⚙',
+      hint: 'providers',
+      keywords: 'model studio llm provider config api key endpoint',
+      run: openModelStudio,
+    });
+    return items;
+  }
+
+  // Topbar navigation tabs.
+  document.querySelectorAll('[data-nav]').forEach((tab) => {
+    tab.addEventListener('click', (event) => {
+      event.preventDefault();
+      const target = tab.dataset.nav;
+      if (target === 'runs') backToRuns();
+      else if (target === 'new') showLaunchpad();
+    });
+  });
+
   // Bootstrap
+  el('runsNewBtn')?.addEventListener('click', showLaunchpad);
+  initPalette(paletteActions);
+  setUnauthorizedHandler(openAuth);
+  initRunsBrowser({
+    onOpenRun: (runId) => { void loadRun(runId); },
+    onNewRun: showLaunchpad,
+  });
   void checkHealth();
   window.setInterval(checkHealth, 15000);
   restoreIdentity();
   void loadModelConfig();
+  if (!state.runId) {
+    backToRuns();
+  }
 })();

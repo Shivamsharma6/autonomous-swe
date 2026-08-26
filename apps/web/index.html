@@ -35,6 +35,10 @@
             <span class="brand-subtitle">Autonomous Engineering Plane</span>
           </div>
         </a>
+        <nav class="top-nav" aria-label="Primary">
+          <a href="#" data-nav="runs" class="active" title="Runs overview">Runs</a>
+          <a href="#" data-nav="new" title="Launch a new mission">New Mission</a>
+        </nav>
       </div>
 
       <!-- Quick Run Search Bar with Command Shortcut -->
@@ -76,6 +80,32 @@
 
     <!-- Main Workspace -->
     <main class="main-content">
+      <!-- Runs Browser: cross-project mission overview -->
+      <section id="runsBrowserSection" class="section-container runs-browser-section hidden" aria-live="polite">
+        <header class="runs-header">
+          <div>
+            <h2 class="runs-title">Missions</h2>
+            <p class="runs-subtitle">Every engineering run across your projects — live status, cost, and progress.</p>
+          </div>
+          <div class="runs-controls">
+            <input id="runsSearch" type="search" class="runs-search" placeholder="Filter by goal, project, or ID…" autocomplete="off">
+            <button id="runsRefresh" class="button ghost icon-btn" type="button" title="Refresh runs">⟳</button>
+            <button id="runsNewBtn" class="button primary" type="button">＋ New Mission</button>
+          </div>
+        </header>
+        <div class="runs-toolbar">
+          <div class="filter-chips" id="runsFilters"></div>
+          <span id="runsCountLabel" class="runs-count-label"></span>
+        </div>
+        <div id="runsGrid" class="runs-grid">
+          <div class="runs-skeletons">
+            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
+            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
+            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
+          </div>
+        </div>
+      </section>
+
       <!-- Workflow Initiation Section (Mission Control Launchpad) -->
       <section id="onboardingSection" class="section-container launchpad-section">
         <!-- Hero Mission Banner -->
@@ -474,6 +504,24 @@
   </div>
 
   <!-- Slide-Over Task Inspector Drawer -->
+  <!-- Command palette (⌘K) -->
+  <dialog id="paletteDialog" class="palette-dialog" aria-label="Command palette">
+    <div class="palette-card">
+      <div class="palette-input-row">
+        <span class="palette-glyph">⌘</span>
+        <input id="paletteInput" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Search actions, runs, projects…">
+        <kbd class="palette-esc">esc</kbd>
+      </div>
+      <div id="paletteList" class="palette-list" role="listbox"></div>
+      <footer class="palette-footer">
+        <span><kbd>↑↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> run</span>
+        <span><kbd>esc</kbd> dismiss</span>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="taskDrawer" class="drawer-dialog" aria-labelledby="drawerTaskTitle">
     <div class="drawer-content">
       <div class="drawer-header">
@@ -502,6 +550,12 @@
         <div class="drawer-section">
           <h4 class="drawer-section-title">Goal & Specification</h4>
           <div id="drawerTaskGoal" class="markdown-preview"></div>
+
+      <!-- Agent reasoning feed (handoff summaries) -->
+      <div class="drawer-subsection">
+        <h4 class="subsection-title">Agent Reasoning</h4>
+        <div id="drawerTaskIntel" class="task-intel-container hidden"></div>
+      </div>
         </div>
 
         <div class="drawer-section">
@@ -693,6 +747,6 @@
   <!-- Toast Notification -->
   <div id="toast" class="toast-notification hidden" role="status" aria-live="assertive"></div>
 
-  <script src="app.js" defer></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

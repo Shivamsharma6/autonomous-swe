@@ -19,7 +19,7 @@ from knowledge.memory.fake import FakeMemoryPort
 from persistence.artifacts import ArtifactService, ArtifactStore
 from persistence.database import Database
 from persistence.repositories import DomainRepository
-from persistence.tables import DeadLetterRow, OutboxRow
+from persistence.tables import DeadLetterRow, OutboxRow, utc_now
 from tools.approval import ApprovalService
 from tools.registry import ToolExecutionContext
 
@@ -316,3 +316,125 @@ async def test_readiness_is_dependency_aware(
         response = await client.get("/health/ready")
     assert response.status_code == 503
     assert response.json()["dependencies"]["uams"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_listing_and_task_message_feeds(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    dependencies = services(database, tmp_path)
+    imported_repository = dependencies.settings.repository_import_root / "listrepo"
+    imported_repository.mkdir()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(dependencies)),
+        base_url="http://control-plane.test",
+        headers=authorization(),
+    ) as client:
+        project = await client.post(
+            "/api/v1/projects",
+            json={"name": "Listed", "source_path": str(imported_repository)},
+        )
+        assert project.status_code == 201
+        project_id = UUID(project.json()["project_id"])
+        repository_id = UUID(project.json()["repository_id"])
+
+        created: list[UUID] = []
+        for index in range(3):
+            response = await client.post(
+                "/api/v1/runs",
+                json={
+                    "project_id": str(project_id),
+                    "repository_id": str(repository_id),
+                    "goal": f"Run number {index}",
+                    "baseline_commit": "a" * 40,
+                },
+            )
+            assert response.status_code == 202
+            created.append(UUID(response.json()["run_id"]))
+
+        listing = await client.get("/api/v1/runs")
+        assert listing.status_code == 200
+        rows = listing.json()
+        assert [row["run_id"] for row in rows] == [str(value) for value in reversed(created)]
+        assert all(row["project_name"] == "Listed" for row in rows)
+
+        filtered = await client.get(
+            "/api/v1/runs",
+            params={"status": "PENDING", "project_id": str(project_id)},
+        )
+        assert filtered.status_code == 200
+        assert len(filtered.json()) == 3
+
+        bad_status = await client.get("/api/v1/runs", params={"status": "WAT"})
+        assert bad_status.status_code == 422
+
+        # Task message feed: seed two handoffs and read them newest-first.
+        task = TaskSpec(
+            id=uuid4(),
+            plan_revision=1,
+            project_id=project_id,
+            repository_id=repository_id,
+            title="Summarize work",
+            description="Produce handoff summaries.",
+            task_type=TaskType.RESEARCH,
+            assigned_capability="researcher",
+            acceptance_criteria=("Summary recorded",),
+            risk_ceiling=RiskLevel.LOW,
+        )
+        attempt_a, attempt_b = uuid4(), uuid4()
+        async with database.transaction() as session:
+            await dependencies.database_repository.create_plan_revision(
+                session, run_id=created[0], revision=1, plan={}
+            )
+            await dependencies.database_repository.create_task(
+                session, run_id=created[0], task=task
+            )
+            await dependencies.database_repository.create_attempt(
+                session,
+                attempt_id=attempt_a,
+                task_id=task.id,
+                agent_spec_hash="c" * 64,
+            )
+            await dependencies.database_repository.create_attempt(
+                session,
+                attempt_id=attempt_b,
+                task_id=task.id,
+                agent_spec_hash="c" * 64,
+            )
+            from domain.messages import ContextHandoff
+
+            for attempt, text in (
+                (attempt_a, "older recall summary"),
+                (attempt_b, "newest recall summary"),
+            ):
+                await dependencies.database_repository.persist_message(
+                    session,
+                    ContextHandoff(
+                        message_id=uuid4(),
+                        sender="researcher",
+                        recipient="workflow",
+                        run_id=created[0],
+                        task_id=task.id,
+                        attempt_id=attempt,
+                        created_at=utc_now(),
+                        causation_id=uuid4(),
+                        correlation_id=created[0],
+                        artifact_ids=(),
+                        summary=text,
+                    ),
+                )
+
+        feed = await client.get(
+            f"/api/v1/projects/{project_id}/tasks/{task.id}/messages"
+        )
+        assert feed.status_code == 200
+        messages = feed.json()
+        assert [message["summary"] for message in messages] == [
+            "newest recall summary",
+            "older recall summary",
+        ]
+        missing = await client.get(
+            f"/api/v1/projects/{project_id}/tasks/{uuid4()}/messages"
+        )
+        assert missing.status_code == 404

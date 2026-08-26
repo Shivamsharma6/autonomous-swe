@@ -28,6 +28,7 @@ from apps.api.schemas import (
     ArtifactMetadataResponse,
     AuditEventResponse,
     DeadLetterResponse,
+    MessageResponse,
     ModelConfigRequest,
     ModelConfigResponse,
     ModelProbeRequest,
@@ -44,16 +45,19 @@ from apps.api.schemas import (
     TaskResponse,
 )
 from apps.api.websocket import EventCursor, PostgresTaskEventSource
+from domain.enums import RunStatus
 from execution.scheduler.service import RUN_TERMINAL_VALUES
 from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
 from persistence.tables import (
+    AgentMessageRow,
     ApprovalRow,
     ArtifactRow,
     AuditEventRow,
     DeadLetterRow,
     ModelCallRow,
     PlanRevisionRow,
+    ProjectRow,
     RunRow,
     TaskRow,
     ToolExecutionRow,
@@ -426,33 +430,34 @@ async def create_run(
     return RunCreated(run_id=request.run_id, state="PENDING")
 
 
-@router.get("/runs/{run_id}", response_model=RunResponse)
-async def get_run(run_id: UUID, services: Services) -> RunResponse:
-    async with services.database.sessions() as session:
-        run = await session.get(RunRow, run_id)
-        if run is None:
-            raise HTTPException(status_code=404, detail="run not found")
-        active_revision = await session.scalar(
-            select(func.max(PlanRevisionRow.revision)).where(PlanRevisionRow.run_id == run_id)
-        )
-        counts = tuple(
-            (
-                await session.execute(
-                    select(TaskRow.state, func.count())
-                    .where(TaskRow.run_id == run_id)
-                    .group_by(TaskRow.state)
-                )
-            ).all()
-        )
-        usage = (
+async def _build_run_response(
+    session: AsyncSession, run: RunRow
+) -> RunResponse:
+    run_id = run.id
+    active_revision = await session.scalar(
+        select(func.max(PlanRevisionRow.revision)).where(PlanRevisionRow.run_id == run_id)
+    )
+    counts = tuple(
+        (
             await session.execute(
-                select(
-                    func.coalesce(func.sum(ModelCallRow.input_tokens), 0),
-                    func.coalesce(func.sum(ModelCallRow.output_tokens), 0),
-                    func.coalesce(func.sum(ModelCallRow.cost_usd), 0.0),
-                ).where(ModelCallRow.run_id == run_id)
+                select(TaskRow.state, func.count())
+                .where(TaskRow.run_id == run_id)
+                .group_by(TaskRow.state)
             )
-        ).one()
+        ).all()
+    )
+    usage = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(ModelCallRow.input_tokens), 0),
+                func.coalesce(func.sum(ModelCallRow.output_tokens), 0),
+                func.coalesce(func.sum(ModelCallRow.cost_usd), 0.0),
+            ).where(ModelCallRow.run_id == run_id)
+        )
+    ).one()
+    project_name = await session.scalar(
+        select(ProjectRow.name).where(ProjectRow.id == run.project_id)
+    )
     now = utc_now()
     return RunResponse(
         run_id=run.id,
@@ -470,7 +475,51 @@ async def get_run(run_id: UUID, services: Services) -> RunResponse:
         model_cost_usd=float(usage[2]),
         created_at=run.created_at.isoformat(),
         updated_at=run.updated_at.isoformat(),
+        project_name=project_name,
     )
+
+
+@router.get("/runs", response_model=tuple[RunResponse, ...])
+async def list_runs(
+    services: Services,
+    project_id: UUID | None = None,
+    status: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> tuple[RunResponse, ...]:
+    if status is not None and status not in RUN_TERMINAL_VALUES and status not in {
+        RunStatus.PENDING.value,
+        RunStatus.PLANNING.value,
+        RunStatus.EXECUTING.value,
+        RunStatus.WAITING_FOR_APPROVAL.value,
+        RunStatus.WAITING_FOR_MEMORY.value,
+    }:
+        raise HTTPException(status_code=422, detail=f"unknown run status {status!r}")
+    async with services.database.sessions() as session:
+        statement = (
+            select(RunRow)
+            .order_by(RunRow.created_at.desc(), RunRow.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        if project_id is not None:
+            statement = statement.where(RunRow.project_id == project_id)
+        if status is not None:
+            statement = statement.where(RunRow.state == status)
+        runs = tuple((await session.scalars(statement)).all())
+        responses: list[RunResponse] = []
+        for run in runs:
+            responses.append(await _build_run_response(session, run))
+    return tuple(responses)
+
+
+@router.get("/runs/{run_id}", response_model=RunResponse)
+async def get_run(run_id: UUID, services: Services) -> RunResponse:
+    async with services.database.sessions() as session:
+        run = await session.get(RunRow, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return await _build_run_response(session, run)
 
 
 @router.get("/runs/{run_id}/tasks", response_model=tuple[TaskResponse, ...])
@@ -600,6 +649,52 @@ async def get_task(
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
     return _task_response(row)
+
+
+@router.get(
+    "/projects/{project_id}/tasks/{task_id}/messages",
+    response_model=tuple[MessageResponse, ...],
+)
+async def list_task_messages(
+    project_id: UUID,
+    task_id: UUID,
+    services: Services,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> tuple[MessageResponse, ...]:
+    async with services.database.sessions() as session:
+        row = await services.database_repository.get_task(
+            session,
+            project_id=project_id,
+            task_id=task_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        messages = tuple(
+            (
+                await session.scalars(
+                    select(AgentMessageRow)
+                    .where(AgentMessageRow.task_id == task_id)
+                    .order_by(AgentMessageRow.created_at.desc(), AgentMessageRow.id.desc())
+                    .limit(limit)
+                )
+            ).all()
+        )
+    result: list[MessageResponse] = []
+    for message in messages:
+        payload = message.payload if isinstance(message.payload, dict) else {}
+        summary = str(payload.get("summary", ""))[:20_000]
+        result.append(
+            MessageResponse(
+                message_id=message.id,
+                task_id=message.task_id,
+                kind=message.kind,
+                sender=message.sender,
+                recipient=message.recipient,
+                summary=summary or "(no summary recorded)",
+                created_at=message.created_at.isoformat(),
+            )
+        )
+    return tuple(result)
 
 
 @router.post("/projects/{project_id}/tasks/{task_id}/cancel", status_code=202)
