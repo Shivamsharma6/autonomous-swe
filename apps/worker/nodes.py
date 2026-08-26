@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -36,6 +37,21 @@ from tools.gateway import (
 from tools.production import ProductionToolSet
 from tools.registry import ToolExecutionContext, ToolRegistry
 from workflows.state import NodeExecutionRequest, NodeExecutionResult
+
+
+def _fingerprint_worktree(root: Path, changed_paths: tuple[str, ...]) -> dict[str, str]:
+    resolved_root = root.resolve()
+    fingerprint: dict[str, str] = {}
+    for relative in changed_paths[:1_000]:
+        candidate = (resolved_root / relative).resolve()
+        if resolved_root not in candidate.parents and candidate != resolved_root:
+            continue
+        if not candidate.is_file():
+            fingerprint[relative] = ""
+            continue
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        fingerprint[relative] = digest
+    return fingerprint
 
 
 class NodeAgentOutput(ContractModel):
@@ -298,7 +314,7 @@ class ProductionNodeExecutor:
                 raise PermissionError("workflow node idempotency identity conflict")
             if row.status == "COMPLETED":
                 replay = NodeExecutionResult.model_validate(row.result)
-                if self._fingerprint_matches(replay.worktree_fingerprint):
+                if await self._fingerprint_matches(replay.worktree_fingerprint):
                     return replay
                 # The recorded side effects no longer exist in the current
                 # worktree (it was recreated from baseline); the stored success
@@ -308,24 +324,17 @@ class ProductionNodeExecutor:
             row.completed_at = None
             return None
 
-    def _worktree_fingerprint(self, changed_paths: tuple[str, ...]) -> dict[str, str]:
-        root = self._tool_set.worktree.resolve()
-        fingerprint: dict[str, str] = {}
-        for relative in changed_paths[:1_000]:
-            candidate = (root / relative).resolve()
-            if root not in candidate.parents and candidate != root:
-                continue
-            if not candidate.is_file():
-                fingerprint[relative] = ""
-                continue
-            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-            fingerprint[relative] = digest
-        return fingerprint
+    async def _worktree_fingerprint(self, changed_paths: tuple[str, ...]) -> dict[str, str]:
+        if not changed_paths:
+            return {}
+        return await asyncio.to_thread(
+            _fingerprint_worktree, self._tool_set.worktree, tuple(changed_paths)
+        )
 
-    def _fingerprint_matches(self, recorded: dict[str, str]) -> bool:
+    async def _fingerprint_matches(self, recorded: dict[str, str]) -> bool:
         if not recorded:
             return True
-        current = self._worktree_fingerprint(tuple(recorded))
+        current = await self._worktree_fingerprint(tuple(recorded))
         return current == recorded
 
     async def _invoke(
@@ -422,7 +431,7 @@ class ProductionNodeExecutor:
             # The graph-state channel is bounded; the full summary remains in
             # the durable artifact and handoff message.
             summary=output.summary[:2_000],
-            worktree_fingerprint=self._worktree_fingerprint(output.changed_paths),
+            worktree_fingerprint=await self._worktree_fingerprint(output.changed_paths),
         )
         content = json.dumps(
             {

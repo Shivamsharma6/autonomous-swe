@@ -363,3 +363,62 @@ async def test_task_reads_are_always_project_scoped(database: object) -> None:
             )
             is not None
         )
+
+
+@pytest.mark.asyncio
+async def test_graph_thread_change_is_a_sanctioned_attempt_rollover(
+    database: object,
+) -> None:
+    repository = DomainRepository()
+    async with database.transaction() as session:
+        core = await create_core(repository, session)
+        task = core["task"]
+        first_thread = f"run:{core['run_id']}:task:{task.id}:attempt:{uuid4()}"
+        await repository.transition_graph_execution(
+            session,
+            task_id=task.id,
+            run_id=core["run_id"],
+            repository_id=core["repository_id"],
+            baseline_commit="a" * 40,
+            thread_id=first_thread,
+            target=GraphExecutionState.RUNNING,
+            checkpoint_id="checkpoint-1",
+        )
+        await repository.transition_graph_execution(
+            session,
+            task_id=task.id,
+            run_id=core["run_id"],
+            repository_id=core["repository_id"],
+            baseline_commit="a" * 40,
+            thread_id=first_thread,
+            target=GraphExecutionState.CANCELLED,
+            checkpoint_id=None,
+        )
+
+        # A new attempt restarts the terminal graph on a fresh chain.
+        second_thread = f"run:{core['run_id']}:task:{task.id}:attempt:{uuid4()}"
+        row = await repository.transition_graph_execution(
+            session,
+            task_id=task.id,
+            run_id=core["run_id"],
+            repository_id=core["repository_id"],
+            baseline_commit="a" * 40,
+            thread_id=second_thread,
+            target=GraphExecutionState.RUNNING,
+            checkpoint_id="checkpoint-2",
+        )
+        assert row.state is GraphExecutionState.RUNNING
+        assert row.thread_id == second_thread
+
+        # Non-RUNNING targets under a changed thread are rejected.
+        with pytest.raises(ValueError, match="attempt restart"):
+            await repository.transition_graph_execution(
+                session,
+                task_id=task.id,
+                run_id=core["run_id"],
+                repository_id=core["repository_id"],
+                baseline_commit="a" * 40,
+                thread_id=f"run:{core['run_id']}:task:{task.id}:attempt:{uuid4()}",
+                target=GraphExecutionState.COMPLETED,
+                checkpoint_id=None,
+            )

@@ -312,19 +312,30 @@ flowchart LR
 ```
 
 Production graphs require `AsyncPostgresSaver`; an in-memory checkpointer is rejected by production
-compilation. Graph thread identity is deterministic from run and task IDs. Nodes derive stable
-idempotency keys from run, task, attempt, and node names, and reducers reject conflicting replay
-results.
+compilation. Graph thread identity is deterministic from run, task, and attempt IDs: every lease
+attempt executes its own checkpoint chain. When a new attempt starts, the durable graph row performs
+an audited *attempt rollover* onto the new thread and restarts `RUNNING`; the superseded chain is
+retained as checkpoint history until retention purges it. Nodes derive stable idempotency keys from
+run, task, attempt, and node names, and reducers reject conflicting replay results. A completed node
+result is only replayed while the content hashes of its recorded changed paths still match the task
+worktree; otherwise the node re-executes.
 
-Interrupt graphs persist waits for tools, approvals, or UAMS. Resume payloads must bind to the exact
-request ID and explicitly release the wait.
+The interrupt-capable wait states (`WAITING_FOR_TOOL`, `WAITING_FOR_APPROVAL`) and explicit resume
+payloads are supported by the runtime but are not exercised by the production task subgraphs: no
+production node calls `interrupt()`, and approval-gated tools called inside an agent loop are denied
+with a typed failure instead of pausing. `WAITING_FOR_MEMORY` is produced only by the run-level
+promotion path, not by task graph execution.
 
 ### Graph execution state machine
 
 `RUNNING` may transition to `WAITING_FOR_TOOL`, `WAITING_FOR_APPROVAL`,
 `WAITING_FOR_MEMORY`, `PAUSED`, a terminal state, or `NEEDS_RECONCILIATION`. Terminal graph states
-do not transition. `NEEDS_RECONCILIATION` requires a deterministic operator/system decision before
-returning to execution or a terminal state.
+do not transition — with one sanctioned exception: a new lease attempt rolls the execution over to a
+fresh checkpoint chain as described above. `NEEDS_RECONCILIATION` requires a deterministic
+operator/system decision before returning to execution or a terminal state; the reconcile CLI's
+`resolve <project> <task> <fail|retry>` command provides that exit. Reconciliation also enforces
+symmetric divergence rules: domain-terminal-wins over a live graph, and graph-terminal-wins (task
+cancelled) when an execution was cancelled while its task remained live.
 
 ## Agent runtime and structured model I/O
 
@@ -791,7 +802,7 @@ For the full runbook, see [docs/operator-guide.md](docs/operator-guide.md).
 
 | Failure | Durable behavior | Recovery path |
 |---|---|---|
-| Worker crash | Lease, attempt, node boundary, and checkpoint remain | Lease expiry + reconciliation resumes replay-safe work |
+| Worker crash | Lease, attempt, node boundary, and checkpoint remain | Lease expiry + reconciliation requeue the task; the next attempt replays on a fresh checkpoint chain, honoring durable node results only where worktree fingerprints still match |
 | Sandbox-manager crash | Container identity was persisted before start | Startup reaps orphans and records interruption |
 | Redis loss | PostgreSQL domain/outbox records remain | Restart transport; republish canonical events; receipts suppress duplicates |
 | UAMS unavailable | Graph/candidate wait visibly in `WAITING_FOR_MEMORY` | Restore UAMS; deterministic memory ID resumes same operation |

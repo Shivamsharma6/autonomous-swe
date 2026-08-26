@@ -175,7 +175,13 @@ class DispatchedTaskExecutor:
                     attempt_id=context.attempt_id,
                     target=TaskStatus.FAILED,
                 )
-            except (PermissionError, LookupError):
+            except (PermissionError, LookupError, RuntimeError):
+                # Best-effort only: the lease may already be gone
+                # (PermissionError/LookupError) or the runtime persisted the
+                # graph as CANCELLED while we record FAILED (RuntimeError).
+                # Reconciliation is the authority that closes those gaps;
+                # this handler must never mask the original cancellation or
+                # crash the worker loop.
                 pass
             raise
         except Exception:

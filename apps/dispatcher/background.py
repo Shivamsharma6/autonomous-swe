@@ -18,6 +18,11 @@ EVENT_STREAMS: tuple[str, ...] = (
     "workflow-state",
     "artifact-integrity",
     "reconciliation",
+    "run-state",
+    "tool-execution",
+    "plan-created",
+    "memory-promoted",
+    "release-review",
 )
 
 
