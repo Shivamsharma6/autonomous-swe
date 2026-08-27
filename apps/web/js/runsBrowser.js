@@ -79,11 +79,67 @@ function cardHtml(run) {
     </article>`;
 }
 
+function renderHero() {
+  const hero = el('runsHero');
+  if (!hero) return;
+  const active = rows.find((r) => ACTIVE_STATES.has(r.state));
+  if (!active) {
+    hero.classList.add('hidden');
+    hero.innerHTML = '';
+    return;
+  }
+  hero.classList.remove('hidden');
+  const prog = progressFor(active);
+  hero.innerHTML = `
+    <div class="runs-hero-card">
+      <span class="runs-hero-label"><i></i> Active Mission</span>
+      <h3 class="runs-hero-goal">${escapeHtml(active.goal.slice(0, 160))}</h3>
+      <div class="runs-hero-meta">
+        <span class="meta-chip">${escapeHtml(active.project_name || 'Project')}</span>
+        <span class="meta-chip mono">${escapeHtml(active.state)}</span>
+        <span class="meta-chip mono">${escapeHtml(timeAgo(active.created_at))}</span>
+      </div>
+      <div class="run-card-progress" style="margin-top:10px">
+        <div class="progress-track"><div class="progress-fill tone-${stateTone(active.state)}" style="width:${prog.pct}%"></div></div>
+        <span class="progress-label">${prog.label}</span>
+      </div>
+    </div>
+    <div class="runs-hero-card" style="display:flex;flex-direction:column;justify-content:center;gap:10px">
+      <div class="hud-header"><span class="hud-label">Live Fleet</span><span class="hud-icon">◈</span></div>
+      <div style="display:flex;gap:18px">
+        <div><div class="hud-main-val" style="font-size:1.4rem">${rows.filter((r) => ACTIVE_STATES.has(r.state)).length}</div><div class="hud-subtext">active</div></div>
+        <div><div class="hud-main-val" style="font-size:1.4rem">${rows.length}</div><div class="hud-subtext">total runs</div></div>
+        <div><div class="hud-main-val text-emerald" style="font-size:1.15rem">${formatCost(rows.reduce((s, r) => s + Number(r.model_cost_usd || 0), 0))}</div><div class="hud-subtext">fleet cost</div></div>
+      </div>
+    </div>`;
+}
+
+function renderTicker() {
+  const ticker = el('liveTicker');
+  const track = el('liveTickerTrack');
+  if (!ticker || !track) return;
+  if (!rows.length) { ticker.classList.add('hidden'); return; }
+  ticker.classList.remove('hidden');
+  const activeCount = rows.filter((r) => ACTIVE_STATES.has(r.state)).length;
+  const totalCost = formatCost(rows.reduce((s, r) => s + Number(r.model_cost_usd || 0), 0));
+  const segs = [
+    `${rows.length} missions`,
+    `${activeCount} active`,
+    `fleet cost ${totalCost}`,
+    `${rows.filter((r) => r.state === 'COMPLETED').length} shipped`,
+    `${rows.filter((r) => r.state === 'FAILED').length} failed`,
+  ];
+  const html = segs.map((s) => `<span>● ${escapeHtml(s)}</span>`).join('');
+  track.innerHTML = html + html; // doubled for seamless loop
+}
+
 function render() {
   const grid = el('runsGrid');
   if (!grid) return;
   const filtered = rows.filter(matches);
   el('runsCountLabel').textContent = `${filtered.length} run${filtered.length === 1 ? '' : 's'}`;
+  renderHero();
+  renderTicker();
 
   if (!rows.length) {
     grid.innerHTML = `
