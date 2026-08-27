@@ -481,9 +481,25 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
     if (progressFill) progressFill.style.width = `${pct}%`;
 
     const totalTokens = (run.model_input_tokens || 0) + (run.model_output_tokens || 0);
-    el('tokenTotal').textContent = totalTokens.toLocaleString();
+    {
+      const tokenEl = el('tokenTotal');
+      const newVal = totalTokens.toLocaleString();
+      if (tokenEl.textContent !== newVal) {
+        tokenEl.textContent = newVal;
+        tokenEl.classList.remove('pulse'); void tokenEl.offsetWidth; tokenEl.classList.add('pulse');
+        window.setTimeout(() => tokenEl.classList.remove('pulse'), 600);
+      }
+    }
     el('tokenDetail').textContent = `${(run.model_input_tokens || 0).toLocaleString()} in · ${(run.model_output_tokens || 0).toLocaleString()} out`;
-    el('modelCost').textContent = `$${Number(run.model_cost_usd || 0).toFixed(4)}`;
+    {
+      const costEl = el('modelCost');
+      const newVal = `$${Number(run.model_cost_usd || 0).toFixed(4)}`;
+      if (costEl.textContent !== newVal) {
+        costEl.textContent = newVal;
+        costEl.classList.remove('pulse'); void costEl.offsetWidth; costEl.classList.add('pulse');
+        window.setTimeout(() => costEl.classList.remove('pulse'), 600);
+      }
+    }
 
     renderDAG(state.tasks);
     renderApprovals(state.approvals);
@@ -492,6 +508,8 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
   }
 
   // Topological DAG Layout & Stage Grouping Engine
+  function isRunningState(state) { return state === 'RUNNING' || state === 'LEASED'; }
+
   function renderDAG(tasks) {
     const root = el('taskDag');
     const svg = el('dagSvgConnections');
@@ -567,7 +585,7 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
 
       columnTasks.forEach(task => {
         const node = document.createElement('article');
-        node.className = `task-node ${task.state.toLowerCase()}`;
+        node.className = `task-node ${task.state.toLowerCase()}${isRunningState(task.state) ? ' is-running' : ''}`;
         node.id = `node-${task.id}`;
         node.dataset.taskId = task.id;
 
@@ -650,7 +668,7 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
         path.setAttribute('fill', 'none');
         path.setAttribute('stroke', isRunning ? 'url(#activeGrad)' : 'rgba(255, 255, 255, 0.15)');
         path.setAttribute('stroke-width', isRunning ? '2.4' : '1.6');
-        path.setAttribute('stroke-dasharray', isRunning ? '6 3' : '4 2');
+        path.classList.add(isRunning ? 'live-edge' : 'idle-edge');
         svg.append(path);
       });
     });

@@ -2377,3 +2377,38 @@ dialog::backdrop {
 .intel-error { color: var(--status-failed); font-size: 0.78rem; }
 .intel-empty { color: var(--text-muted); font-size: 0.78rem; font-style: italic; }
 .intel-skeleton { display: flex; flex-direction: column; gap: 8px; padding: 6px 0; }
+
+/* Motion & live-system polish (v2.1) */
+.section-container { animation: viewIn 200ms ease both; }
+@keyframes viewIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.runs-grid .run-card { animation: cardIn 300ms ease both; }
+.runs-grid .run-card:nth-child(1) { animation-delay: 0ms; }
+.runs-grid .run-card:nth-child(2) { animation-delay: 45ms; }
+.runs-grid .run-card:nth-child(3) { animation-delay: 90ms; }
+.runs-grid .run-card:nth-child(4) { animation-delay: 135ms; }
+.runs-grid .run-card:nth-child(5) { animation-delay: 180ms; }
+.runs-grid .run-card:nth-child(n+6) { animation-delay: 220ms; }
+@keyframes cardIn { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+/* DAG live flow */
+#dagSvgConnections path.live-edge {
+  stroke-dasharray: 8 6;
+  animation: edgeFlow 900ms linear infinite;
+}
+@keyframes edgeFlow { to { stroke-dashoffset: -14; } }
+.task-node.is-running { box-shadow: 0 0 0 1px var(--accent-cyan), 0 0 18px rgba(6, 182, 212, 0.35); }
+
+/* HUD value pulse */
+.hud-main-val.pulse {
+  animation: hudPulse 520ms ease;
+}
+@keyframes hudPulse { 0% { color: var(--accent-emerald); transform: scale(1.04); } 100% { color: inherit; transform: none; } }
+
+/* Skeleton crossfade */
+.runs-skeletons { animation: fadeOut 220ms ease 1.2s both; }
+@keyframes fadeOut { to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .section-container, .runs-grid .run-card, #dagSvgConnections path.live-edge, .hud-main-val.pulse { animation: none !important; }
+}
