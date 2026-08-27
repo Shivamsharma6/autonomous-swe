@@ -28,6 +28,8 @@ from apps.api.schemas import (
     ArtifactMetadataResponse,
     AuditEventResponse,
     DeadLetterResponse,
+    HistoryResponse,
+    HistorySample,
     MessageResponse,
     ModelConfigRequest,
     ModelConfigResponse,
@@ -536,6 +538,37 @@ async def list_run_tasks(run_id: UUID, services: Services) -> tuple[TaskResponse
             ).all()
         )
     return tuple(_task_response(row) for row in rows)
+
+
+@router.get("/runs/{run_id}/history", response_model=HistoryResponse)
+async def get_run_history(
+    run_id: UUID,
+    services: Services,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> HistoryResponse:
+    async with services.database.sessions() as session:
+        await _require_run(session, run_id)
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(ModelCallRow)
+                    .where(ModelCallRow.run_id == run_id)
+                    .order_by(ModelCallRow.created_at.asc(), ModelCallRow.id.asc())
+                    .limit(limit)
+                )
+            ).all()
+        )
+    samples = tuple(
+        HistorySample(
+            timestamp=row.created_at.isoformat(),
+            input_tokens=int(row.input_tokens or 0),
+            output_tokens=int(row.output_tokens or 0),
+            cost_usd=float(row.cost_usd or 0.0),
+            model=str(row.model or ""),
+        )
+        for row in rows
+    )
+    return HistoryResponse(run_id=run_id, samples=samples)
 
 
 @router.get("/runs/{run_id}/approvals", response_model=tuple[ApprovalResponse, ...])

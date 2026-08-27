@@ -57,6 +57,7 @@
 
       <!-- System Telemetry & Operator Controls -->
       <div class="topbar-right">
+        <button id="tourHelpBtn" class="button ghost icon-btn" type="button" title="Guided tour (first run)" aria-label="Start guided tour">?</button>
         <button id="modelStudioBtn" class="button ghost model-button" type="button" aria-haspopup="dialog" title="Configure LLM Models & Providers">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
@@ -372,6 +373,7 @@
               <span id="tokenTotal" class="hud-main-val">0</span>
             </div>
             <span id="tokenDetail" class="hud-subtext">0 in · 0 out</span>
+            <div id="tokenSparkline" class="hud-sparkline" aria-hidden="true"></div>
           </div>
 
           <div class="hud-card">
@@ -385,6 +387,7 @@
               <span id="modelCost" class="hud-main-val text-emerald">$0.0000</span>
             </div>
             <span class="hud-subtext">Precision USD accounting</span>
+            <div id="costSparkline" class="hud-sparkline" aria-hidden="true"></div>
           </div>
         </div>
 

@@ -13,6 +13,9 @@ import { showToast } from './js/toast.js';
 import { initRunsBrowser, showRunsBrowser, hideRunsBrowser } from './js/runsBrowser.js';
 import { initPalette, openPalette } from './js/palette.js';
 import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
+import { renderSparkline, fetchHistory, pushLiveSample, getLiveHistory } from './js/sparkline.js';
+import { createVirtualList } from './js/virtualList.js';
+import { initTour } from './js/tour.js';
 
 (() => {
   'use strict';
@@ -35,7 +38,39 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
     wsReconnectTimer: null,
     selectedTask: null,
     modelConfig: null,
+    historyCache: new Map(),
   };
+
+  // Virtualized timeline — initialized lazily on first render
+  let timelineVirtual = null;
+  function ensureTimelineVirtual() {
+    if (timelineVirtual) return timelineVirtual;
+    const container = el('terminalScrollContainer');
+    if (!container) return null;
+    timelineVirtual = createVirtualList({
+      container,
+      rowHeight: 56,
+      overscan: 10,
+      renderRow: (event) => {
+        const item = document.createElement('li');
+        item.className = 'timeline-item';
+        const time = document.createElement('span');
+        time.className = 'timeline-time';
+        time.textContent = new Date(event.created_at).toLocaleTimeString();
+        const name = document.createElement('span');
+        name.className = 'timeline-event-name';
+        name.textContent = event.event_type;
+        const data = document.createElement('span');
+        data.className = 'timeline-data';
+        try {
+          data.textContent = JSON.stringify(event.payload).slice(0, 400);
+        } catch (_) { data.textContent = String(event.payload); }
+        item.append(time, name, data);
+        return item;
+      },
+    });
+    return timelineVirtual;
+  }
 
   // Authentication Dialog Controls
   function openAuth() {
@@ -501,6 +536,33 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
       }
     }
 
+    // --- Live sparkline history (HUD) ---
+    pushLiveSample(run.run_id, {
+      input_tokens: run.model_input_tokens,
+      output_tokens: run.model_output_tokens,
+      cost_usd: run.model_cost_usd,
+      model: '',
+    });
+    const hudCostEl = el('costSparkline');
+    const hudTokenEl = el('tokenSparkline');
+    if (hudCostEl || hudTokenEl) {
+      const cached = state.historyCache.get(run.run_id);
+      const doRender = (samples) => {
+        const costSamples = samples.map((s) => ({ cost_usd: s.cost_usd }));
+        const tokenSamples = samples.map((s) => ({ cost_usd: (s.input_tokens || 0) + (s.output_tokens || 0) }));
+        if (hudCostEl) renderSparkline(hudCostEl, costSamples, { width: 100, height: 22, stroke: 'var(--accent-emerald)', fill: 'rgba(16,185,129,0.08)' });
+        if (hudTokenEl) renderSparkline(hudTokenEl, tokenSamples, { width: 100, height: 22, stroke: 'var(--accent-cyan)', fill: 'rgba(6,182,212,0.08)' });
+      };
+      if (cached) {
+        doRender(getLiveHistory(run.run_id, cached));
+      } else {
+        fetchHistory(run.run_id).then((samples) => {
+          state.historyCache.set(run.run_id, samples);
+          doRender(getLiveHistory(run.run_id, samples));
+        });
+      }
+    }
+
     renderDAG(state.tasks);
     renderApprovals(state.approvals);
     renderArtifacts(state.artifacts, run.project_id);
@@ -903,53 +965,81 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
     }
   }
 
-  // Render Immutable Audit Events Timeline with Live Search
+  // Render Immutable Audit Events Timeline with Live Search (virtualized)
   function renderEvents(events) {
-    const root = el('eventList');
-    root.replaceChildren();
-
     const query = (state.searchQuery || '').toLowerCase().trim();
-
-    const filtered = (events || []).filter(e => {
-      // Category filter
+    const filtered = (events || []).filter((e) => {
       if (state.currentFilter === 'TASK' && !e.event_type.startsWith('task.')) return false;
       if (state.currentFilter === 'TOOL' && !e.event_type.startsWith('tool.')) return false;
       if (state.currentFilter === 'APPROVAL' && !e.event_type.startsWith('approval.')) return false;
-
-      // Text search query filter
       if (query) {
         const payloadStr = JSON.stringify(e.payload || {}).toLowerCase();
         const typeStr = e.event_type.toLowerCase();
         if (!typeStr.includes(query) && !payloadStr.includes(query)) return false;
       }
-
       return true;
     });
 
+    // Virtualized rendering for large audit trails (500+ events)
+    const vt = ensureTimelineVirtual();
+    if (vt && filtered.length > 40) {
+      vt.setItems(filtered);
+      // Hover pauses auto-scroll: track via data attribute
+      const container = el('terminalScrollContainer');
+      if (container && !container._virtualHoverBound) {
+        container._virtualHoverBound = true;
+        let paused = false;
+        container.addEventListener('mouseenter', () => { paused = true; container.dataset.paused = '1'; });
+        container.addEventListener('mouseleave', () => { paused = false; container.dataset.paused = '0'; });
+      }
+      return;
+    }
+
+    // Fallback: direct render for small lists (<40) or if virtual not ready
+    const root = el('eventList');
+    if (!root) return;
+    // Ensure virtual viewport hidden when falling back
+    if (vt) {
+      const vp = document.querySelector('.virtual-viewport');
+      if (vp) vp.style.display = 'none';
+      root.style.display = '';
+    }
+    root.replaceChildren();
     if (!filtered.length) {
       root.innerHTML = '<li class="timeline-empty">No matching events found in audit trail.</li>';
       return;
     }
-
-    filtered.forEach(event => {
+    // Show virtual content if previously hidden
+    if (vt) {
+      const vp = document.querySelector('.virtual-viewport');
+      if (vp) vp.style.display = '';
+    }
+    const frag = document.createDocumentFragment();
+    for (const event of filtered) {
       const item = document.createElement('li');
       item.className = 'timeline-item';
-
       const time = document.createElement('span');
       time.className = 'timeline-time';
       time.textContent = new Date(event.created_at).toLocaleTimeString();
-
       const name = document.createElement('span');
       name.className = 'timeline-event-name';
       name.textContent = event.event_type;
-
       const data = document.createElement('span');
       data.className = 'timeline-data';
-      data.textContent = JSON.stringify(event.payload);
-
+      const raw = JSON.stringify(event.payload);
+      data.textContent = raw.length > 400 ? `${raw.slice(0, 400)}…` : raw;
+      data.title = raw.length > 400 ? 'Click to copy full payload' : '';
+      if (raw.length > 400) {
+        data.style.cursor = 'pointer';
+        data.addEventListener('click', () => {
+          void copyToClipboard(raw);
+          showToast('Payload copied');
+        });
+      }
       item.append(time, name, data);
-      root.append(item);
-    });
+      frag.appendChild(item);
+    }
+    root.appendChild(frag);
   }
 
   // Utility Formatters
@@ -1589,6 +1679,7 @@ import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
     onOpenRun: (runId) => { void loadRun(runId); },
     onNewRun: showLaunchpad,
   });
+  initTour();
   void checkHealth();
   window.setInterval(checkHealth, 15000);
   restoreIdentity();

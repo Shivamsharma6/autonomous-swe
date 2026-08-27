@@ -3,6 +3,7 @@
 import { api } from './api.js';
 import { el, escapeHtml, summarizeCounts, stateTone, timeAgo, formatCost, relativeTimeShort } from './util.js';
 import { showToast } from './toast.js';
+import { renderSparkline, fetchHistory } from './sparkline.js';
 
 const FILTERS = [
   { id: 'ALL', label: 'All' },
@@ -62,6 +63,7 @@ function cardHtml(run) {
         <div class="progress-track"><div class="progress-fill tone-${tone}" style="width:${progress.pct}%"></div></div>
         <span class="progress-label">${progress.label}</span>
       </div>
+      <div class="run-sparkline" data-run-id="${escapeHtml(run.run_id)}" title="Cost history"></div>
       <footer class="run-card-foot">
         <span class="foot-stat" title="Model tokens">
           <span class="foot-icon">◈</span>${(run.model_input_tokens + run.model_output_tokens).toLocaleString()}
@@ -112,6 +114,24 @@ function render() {
       }
     });
   });
+  // Lazy sparkline hydration — IntersectionObserver avoids thundering herd
+  const sparklines = grid.querySelectorAll('.run-sparkline[data-run-id]');
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const el2 = entry.target;
+        io.unobserve(el2);
+        const rid = el2.getAttribute('data-run-id');
+        fetchHistory(rid).then((samples) => renderSparkline(el2, samples, { width: 110, height: 26 }));
+      }
+    }, { rootMargin: '100px' });
+    sparklines.forEach((el2) => io.observe(el2));
+  } else {
+    sparklines.forEach((el2) => {
+      fetchHistory(el2.getAttribute('data-run-id')).then((samples) => renderSparkline(el2, samples, { width: 110, height: 26 }));
+    });
+  }
 }
 
 async function refresh({ silent = false } = {}) {

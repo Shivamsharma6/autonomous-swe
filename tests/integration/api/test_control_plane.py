@@ -438,3 +438,82 @@ async def test_run_listing_and_task_message_feeds(
             f"/api/v1/projects/{project_id}/tasks/{uuid4()}/messages"
         )
         assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_history_returns_model_call_samples(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    dependencies = services(database, tmp_path)
+    imported_repository = dependencies.settings.repository_import_root / "historyrepo"
+    imported_repository.mkdir()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(dependencies)),
+        base_url="http://control-plane.test",
+        headers=authorization(),
+    ) as client:
+        project = await client.post(
+            "/api/v1/projects",
+            json={"name": "HistoryProj", "source_path": str(imported_repository)},
+        )
+        assert project.status_code == 201
+        project_id = UUID(project.json()["project_id"])
+        repository_id = UUID(project.json()["repository_id"])
+
+        run_resp = await client.post(
+            "/api/v1/runs",
+            json={
+                "project_id": str(project_id),
+                "repository_id": str(repository_id),
+                "goal": "History test run",
+                "baseline_commit": "b" * 40,
+            },
+        )
+        assert run_resp.status_code == 202
+        run_id = UUID(run_resp.json()["run_id"])
+
+        # Seed two model calls via run stage attempt scope
+        from persistence.tables import ModelCallRow, RunStageAttemptRow
+
+        stage_attempt_id = uuid4()
+        async with database.transaction() as session:
+            session.add(
+                RunStageAttemptRow(
+                    id=stage_attempt_id,
+                    run_id=run_id,
+                    stage="architect",
+                    agent_spec_hash="a" * 64,
+                    status="COMPLETED",
+                )
+            )
+            await session.flush()
+            for idx in range(2):
+                row = ModelCallRow(
+                    id=uuid4(),
+                    run_id=run_id,
+                    task_id=None,
+                    attempt_id=None,
+                    run_stage_attempt_id=stage_attempt_id,
+                    trace_id=f"trace-{idx}",
+                    model="test-model",
+                    turn=idx + 1,
+                    agent_spec_hash="a" * 64,
+                    input_tokens=10 + idx,
+                    output_tokens=5,
+                    cached_input_tokens=0,
+                    cost_usd=0.001 * (idx + 1),
+                )
+                session.add(row)
+
+        hist = await client.get(f"/api/v1/runs/{run_id}/history")
+        assert hist.status_code == 200
+        body = hist.json()
+        assert body["run_id"] == str(run_id)
+        assert len(body["samples"]) == 2
+        assert body["samples"][0]["model"] == "test-model"
+        assert body["samples"][0]["input_tokens"] == 10
+
+        # Missing run 404
+        missing = await client.get(f"/api/v1/runs/{uuid4()}/history")
+        assert missing.status_code == 404

@@ -202,3 +202,16 @@ class DeadLetterResponse(ContractModel):
     last_error: str
     created_at: str
     resolved: bool
+
+
+class HistorySample(ContractModel):
+    timestamp: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    model: str
+
+
+class HistoryResponse(ContractModel):
+    run_id: UUID
+    samples: tuple[HistorySample, ...]
