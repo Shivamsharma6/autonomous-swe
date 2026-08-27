@@ -61,6 +61,7 @@ from persistence.tables import (
     PlanRevisionRow,
     ProjectRow,
     RunRow,
+    RunStageAttemptRow,
     TaskRow,
     ToolExecutionRow,
     utc_now,
@@ -759,8 +760,54 @@ async def cancel_run(run_id: UUID, services: Services) -> dict[str, str]:
             raise HTTPException(
                 status_code=409, detail=f"run already {run.state}"
             )
+        now = utc_now()
         if run.cancellation_requested_at is None:
-            run.cancellation_requested_at = utc_now()
+            run.cancellation_requested_at = now
+        # PENDING/PLANNING runs have no dispatched tasks yet; the dispatcher
+        # loop may be blocked inside the planner's long model call, so the
+        # asynchronous sweep would never run. Transition synchronously.
+        if run.state in (RunStatus.PENDING.value, RunStatus.PLANNING.value):
+            from domain.events import require_run_transition
+
+            require_run_transition(RunStatus(run.state), RunStatus.CANCELLED)
+            await services.database_repository.record_state_duration(
+                session,
+                aggregate_type="workflow",
+                aggregate_id=run.id,
+                state=run.state,
+                entered_at=run.state_entered_at,
+                exited_at=now,
+            )
+            run.state = RunStatus.CANCELLED.value
+            run.state_entered_at = now
+            attempt = await session.scalar(
+                select(RunStageAttemptRow)
+                .where(RunStageAttemptRow.run_id == run.id)
+                .order_by(RunStageAttemptRow.started_at.desc())
+                .limit(1)
+            )
+            if attempt is not None and attempt.status not in ("CANCELLED", "FAILED", "COMPLETED"):
+                attempt.status = "CANCELLED"
+                attempt.ended_at = now
+            event_id = uuid4()
+            payload = {"run_id": str(run.id), "reason": "operator_cancelled"}
+            await services.database_repository.append_audit(
+                session,
+                event_id=event_id,
+                event_type="run.cancelled",
+                aggregate_type="run",
+                aggregate_id=run.id,
+                payload=payload,
+                correlation_id=run.id,
+                causation_id=event_id,
+            )
+            await services.database_repository.enqueue_event(
+                session,
+                event_id=event_id,
+                topic="run-state",
+                payload=payload,
+            )
+            return {"run_id": str(run_id), "status": "CANCELLED"}
     return {"run_id": str(run_id), "status": "CANCELLATION_REQUESTED"}
 
 
