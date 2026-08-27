@@ -26,7 +26,7 @@ def build_agent_specs(
         "primary_model": primary_model,
         "fallback_models": fallback_models,
         "memory_policy": "project-procedure-and-prior-failures",
-        "token_budget": 20_000,
+        "token_budget": 40_000,
         "cost_budget_usd": 2.0,
         "turn_budget": 12,
         "wall_time_seconds": 900,
