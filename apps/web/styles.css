@@ -2693,3 +2693,27 @@ body::after {
   .runs-header { flex-direction: column; align-items: stretch; }
   .runs-search { min-width: 0; width: 100%; }
 }
+
+/* Failure banner for runs that never produced a DAG */
+.failure-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: rgba(244, 63, 94, 0.08);
+  border: 1px solid rgba(244, 63, 94, 0.25);
+  border-radius: var(--radius-md);
+}
+.failure-icon {
+  width: 28px; height: 28px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: rgba(244, 63, 94, 0.18);
+  color: #f43f5e;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.failure-body h4 { margin: 0 0 4px; font-size: 0.88rem; font-weight: 700; color: var(--text-primary); }
+.failure-body p { margin: 0; font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; }
+.failure-body { flex: 1; }

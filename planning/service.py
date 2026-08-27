@@ -112,75 +112,112 @@ class RunPlanningService:
                 stage_attempt_id=stage_attempt_id,
             ),
         )
-        try:
-            result = await runtime.run(
-                AgentInvocation(
-                    trace_id=f"run:{run.id}:stage:architect",
-                    run_id=run.id,
-                    task_id=run.id,
-                    attempt_id=stage_attempt_id,
-                    project_id=run.project_id,
-                    repository_id=run.repository_id,
-                    baseline_commit=run.baseline_commit,
-                    goal=run.goal,
-                    input_payload={
-                        "required_task_types": [
-                            "RESEARCH",
-                            "IMPLEMENTATION",
-                            "TEST",
-                            "REFACTOR",
-                            "DOCUMENTATION",
-                            "VALIDATION",
-                        ],
-                        "platform_limits": self._limits.model_dump(mode="json"),
-                        "repository": self._repository_context(repository.source_path),
-                        "requirements": (
-                            "Create the smallest sufficient typed DAG. Independent tasks should "
-                            "have no artificial dependencies. Every task needs testable acceptance "
-                            "criteria, bounded budgets, and only registered tools."
-                        ),
-                    },
+        last_error: Exception | None = None
+        base_payload: dict[str, object] = {
+            "required_task_types": [
+                "RESEARCH",
+                "IMPLEMENTATION",
+                "TEST",
+                "REFACTOR",
+                "DOCUMENTATION",
+                "VALIDATION",
+            ],
+            "allowed_tools": sorted(self._validator.allowed_tools),
+            "platform_limits": self._limits.model_dump(mode="json"),
+            "repository": self._repository_context(repository.source_path),
+            "requirements": (
+                "Create the smallest sufficient typed DAG. Independent tasks should "
+                "have no artificial dependencies. Every task needs testable acceptance "
+                "criteria, bounded budgets, and only registered tools from allowed_tools. "
+                "The DAG must end in exactly one VALIDATION task that transitively depends "
+                "on every other task."
+            ),
+        }
+        for attempt in range(3):
+            try:
+                payload: dict[str, object] = dict(base_payload)
+                if last_error is not None:
+                    payload["previous_attempt_errors"] = str(last_error)
+                    # Surface validator issues explicitly so the model can repair
+                    if isinstance(last_error, ValueError) and "invalid task DAG" in str(last_error):
+                        payload["repair_hint"] = str(last_error)
+                result = await runtime.run(
+                    AgentInvocation(
+                        trace_id=f"run:{run.id}:stage:architect:attempt:{attempt}",
+                        run_id=run.id,
+                        task_id=run.id,
+                        attempt_id=stage_attempt_id,
+                        project_id=run.project_id,
+                        repository_id=run.repository_id,
+                        baseline_commit=run.baseline_commit,
+                        goal=run.goal,
+                        input_payload=payload,
+                    )
                 )
-            )
-            plan = result.output.model_copy(
-                update={
-                    "run_id": run.id,
-                    "project_id": run.project_id,
-                    "repository_id": run.repository_id,
-                    "baseline_commit": run.baseline_commit,
-                    "revision": 1,
-                    "limits": self._limits,
-                    "tasks": tuple(
-                        task.model_copy(
-                            update={
-                                "project_id": run.project_id,
-                                "repository_id": run.repository_id,
-                                "plan_revision": 1,
-                            }
-                        )
-                        for task in result.output.tasks
-                    ),
-                }
-            )
-            self._validate_scope(plan, run)
-            validation = self._validator.validate(plan)
-            if not validation.valid:
-                reasons = ", ".join(issue.code for issue in validation.issues)
-                raise ValueError(f"architect produced an invalid task DAG: {reasons}")
-            self._require_integration_sink(plan)
-            await self._persist_plan(
-                plan,
-                stage_attempt_id=stage_attempt_id,
-                fence_started_at=fence_started_at,
-            )
-            return plan
-        except Exception:
-            await self._fail_run(
-                run.id,
-                stage_attempt_id=stage_attempt_id,
-                fence_started_at=fence_started_at,
-            )
-            raise
+                plan = result.output.model_copy(
+                    update={
+                        "run_id": run.id,
+                        "project_id": run.project_id,
+                        "repository_id": run.repository_id,
+                        "baseline_commit": run.baseline_commit,
+                        "revision": 1,
+                        "limits": self._limits,
+                        "tasks": tuple(
+                            task.model_copy(
+                                update={
+                                    "project_id": run.project_id,
+                                    "repository_id": run.repository_id,
+                                    "plan_revision": 1,
+                                }
+                            )
+                            for task in result.output.tasks
+                        ),
+                    }
+                )
+                self._validate_scope(plan, run)
+                validation = self._validator.validate(plan)
+                if not validation.valid:
+                    reasons = ", ".join(
+                        f"{issue.code}:{issue.message}" for issue in validation.issues
+                    )
+                    last_error = ValueError(
+                        f"architect produced an invalid task DAG: {reasons}"
+                    )
+                    if attempt == 2:
+                        raise last_error
+                    continue
+                try:
+                    self._require_integration_sink(plan)
+                except ValueError as sink_error:
+                    last_error = sink_error
+                    if attempt == 2:
+                        raise
+                    continue
+                await self._persist_plan(
+                    plan,
+                    stage_attempt_id=stage_attempt_id,
+                    fence_started_at=fence_started_at,
+                )
+                return plan
+            except Exception as error:
+                last_error = error
+                if attempt == 2:
+                    await self._fail_run(
+                        run.id,
+                        stage_attempt_id=stage_attempt_id,
+                        fence_started_at=fence_started_at,
+                    )
+                    raise
+                # Retry with validation error feedback
+                continue
+        # Should be unreachable — loop either returns or raises
+        assert last_error is not None
+        await self._fail_run(
+            run.id,
+            stage_attempt_id=stage_attempt_id,
+            fence_started_at=fence_started_at,
+        )
+        raise last_error
 
     async def _claim_run(
         self,

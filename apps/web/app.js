@@ -515,6 +515,33 @@ import { initTour } from './js/tour.js';
     const progressFill = el('dagProgressBar');
     if (progressFill) progressFill.style.width = `${pct}%`;
 
+    // Failure banner for runs that never produced a DAG — the UI previously showed an empty canvas with no explanation.
+    const existingBanner = el('runFailureBanner');
+    if (existingBanner) existingBanner.remove();
+    if (run.state === 'FAILED' && totalTasks === 0) {
+      const dagPanel = document.querySelector('.dag-canvas-panel');
+      if (dagPanel) {
+        const banner = document.createElement('div');
+        banner.id = 'runFailureBanner';
+        banner.className = 'failure-banner';
+        banner.innerHTML = `
+          <div class="failure-icon">✕</div>
+          <div class="failure-body">
+            <h4>Planning failed — no tasks were created</h4>
+            <p>The architect's DAG was invalid (unsupported tools / missing final validation). With the 40k budget fix, retrying now usually succeeds — the planner will re-attempt with validation feedback.</p>
+          </div>
+          <button class="button primary" id="retryRunBtn" type="button">Retry with same goal</button>`;
+        dagPanel.prepend(banner);
+        banner.querySelector('#retryRunBtn')?.addEventListener('click', () => {
+          el('runGoal').value = run.goal;
+          el('baselineCommit').value = run.baseline_commit;
+          showLaunchpad();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          showToast('Goal restored — hit Launch Mission to retry');
+        });
+      }
+    }
+
     const totalTokens = (run.model_input_tokens || 0) + (run.model_output_tokens || 0);
     {
       const tokenEl = el('tokenTotal');
