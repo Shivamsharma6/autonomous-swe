@@ -401,7 +401,8 @@ import { initTour } from './js/tour.js';
     }
   }
 
-  // Main Load Run Controller
+  // Main Load Run Controller — resilient: dashboard opens as soon as the run itself loads,
+  // even if tasks/approvals/artifacts/events are slow or fail.
   async function loadRun(runId) {
     const candidate = String(runId || '').trim();
     if (!candidate) return;
@@ -409,37 +410,48 @@ import { initTour } from './js/tour.js';
     sessionStorage.setItem('autoswe.runId', candidate);
     window.clearTimeout(state.pollTimer);
 
+    let run;
     try {
-      const [run, tasks, approvals, artifacts, events] = await Promise.all([
-        api(`/api/v1/runs/${encodeURIComponent(candidate)}`),
-        api(`/api/v1/runs/${encodeURIComponent(candidate)}/tasks`),
-        api(`/api/v1/runs/${encodeURIComponent(candidate)}/approvals`),
-        api(`/api/v1/runs/${encodeURIComponent(candidate)}/artifacts`),
-        api(`/api/v1/runs/${encodeURIComponent(candidate)}/events?limit=500`),
-      ]);
-
-      state.tasks = tasks || [];
-      state.approvals = approvals || [];
-      state.artifacts = artifacts || [];
-      state.events = events || [];
-
-      saveRecentRun(candidate, run.goal);
-      hideRunsBrowser();
-      el('launchpadSection')?.classList.add('hidden');
-      document.querySelectorAll('[data-nav]').forEach((tab) => {
-        tab.classList.toggle('active', tab.dataset.nav === 'mission');
-      });
-      el('dashboard').classList.remove('hidden');
-      renderRun(run);
-      setupWebSocket(run.project_id, candidate);
-
-      if (!terminalStates.has(run.state)) {
-        state.pollTimer = window.setTimeout(() => void loadRun(candidate), 3000);
-      }
+      run = await api(`/api/v1/runs/${encodeURIComponent(candidate)}`);
     } catch (error) {
       el('streamStatusText').textContent = 'POLLING PAUSED';
       el('liveStreamBadge').classList.remove('live');
       showToast(error.message, true);
+      return;
+    }
+
+    // Optimistically switch to the mission view so clicks feel instant
+    saveRecentRun(candidate, run.goal);
+    hideRunsBrowser();
+    el('launchpadSection')?.classList.add('hidden');
+    document.querySelectorAll('[data-nav]').forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.nav === 'mission');
+    });
+    el('dashboard').classList.remove('hidden');
+    // Render once with whatever we have (empty task arrays) so the HUD appears immediately
+    renderRun(run);
+
+    const results = await Promise.allSettled([
+      api(`/api/v1/runs/${encodeURIComponent(candidate)}/tasks`),
+      api(`/api/v1/runs/${encodeURIComponent(candidate)}/approvals`),
+      api(`/api/v1/runs/${encodeURIComponent(candidate)}/artifacts`),
+      api(`/api/v1/runs/${encodeURIComponent(candidate)}/events?limit=500`),
+    ]);
+    const [tasksRes, approvalsRes, artifactsRes, eventsRes] = results;
+    state.tasks = tasksRes.status === 'fulfilled' ? (tasksRes.value || []) : [];
+    state.approvals = approvalsRes.status === 'fulfilled' ? (approvalsRes.value || []) : [];
+    state.artifacts = artifactsRes.status === 'fulfilled' ? (artifactsRes.value || []) : [];
+    state.events = eventsRes.status === 'fulfilled' ? (eventsRes.value || []) : [];
+    for (const res of results) {
+      if (res.status === 'rejected') showToast(res.reason.message, true);
+    }
+
+    // Re-render with full data
+    renderRun(run);
+    setupWebSocket(run.project_id, candidate);
+
+    if (!terminalStates.has(run.state)) {
+      state.pollTimer = window.setTimeout(() => void loadRun(candidate), 3000);
     }
   }
 

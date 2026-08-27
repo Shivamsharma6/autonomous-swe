@@ -2717,3 +2717,24 @@ body::after {
 .failure-body h4 { margin: 0 0 4px; font-size: 0.88rem; font-weight: 700; color: var(--text-primary); }
 .failure-body p { margin: 0; font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; }
 .failure-body { flex: 1; }
+
+/* Runs Browser Open button (delegated) */
+.run-open-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--accent-cyan);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+.run-card:hover .run-open-btn,
+.run-open-btn:focus-visible {
+  background: var(--accent-cyan);
+  color: #04141a;
+  border-color: var(--accent-cyan);
+  outline: none;
+}

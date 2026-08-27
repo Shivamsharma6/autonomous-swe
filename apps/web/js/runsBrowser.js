@@ -74,7 +74,7 @@ function cardHtml(run) {
         <span class="foot-stat fail-stat${run.task_counts.FAILED ? ' has-fails' : ''}" title="Failed tasks">
           <span class="foot-icon">⚑</span>${Number(run.task_counts.FAILED || 0)}
         </span>
-        <span class="run-open-hint">Open →</span>
+        <button class="run-open-btn" type="button" data-run-id="${escapeHtml(run.run_id)}">Open →</button>
       </footer>
     </article>`;
 }
@@ -160,16 +160,6 @@ function render() {
   }
 
   grid.innerHTML = filtered.map(cardHtml).join('');
-  grid.querySelectorAll('.run-card').forEach((card) => {
-    const open = () => hooks.onOpenRun(card.dataset.runId);
-    card.addEventListener('click', open);
-    card.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        open();
-      }
-    });
-  });
   // Lazy sparkline hydration — IntersectionObserver avoids thundering herd
   const sparklines = grid.querySelectorAll('.run-sparkline[data-run-id]');
   if ('IntersectionObserver' in window) {
@@ -229,6 +219,31 @@ export function initRunsBrowser(options = {}) {
     render();
   });
   el('runsRefresh')?.addEventListener('click', () => void refresh());
+  // Delegated open — works for cards added after render, and for the inner Open button
+  const gridEl = el('runsGrid');
+  if (gridEl && !gridEl._openBound) {
+    gridEl._openBound = true;
+    gridEl.addEventListener('click', (event) => {
+      const btn = event.target.closest('.run-open-btn');
+      if (btn && btn.dataset.runId) {
+        event.preventDefault();
+        hooks.onOpenRun(btn.dataset.runId);
+        return;
+      }
+      const card = event.target.closest('.run-card');
+      if (card && card.dataset.runId) {
+        hooks.onOpenRun(card.dataset.runId);
+      }
+    });
+    gridEl.addEventListener('keydown', (event) => {
+      const card = event.target.closest('.run-card');
+      if (!card || !card.dataset.runId) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        hooks.onOpenRun(card.dataset.runId);
+      }
+    });
+  }
 }
 
 export function showRunsBrowser() {
