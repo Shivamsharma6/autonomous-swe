@@ -1710,6 +1710,9 @@ import { initTour } from './js/tour.js';
     });
   });
 
+  // Global fallback for inline card handlers (survives module load failures)
+  window.__openRun = (runId) => { void loadRun(runId); };
+
   // Bootstrap
   el('runsNewBtn')?.addEventListener('click', showLaunchpad);
   initPalette(paletteActions);

@@ -46,7 +46,7 @@ function cardHtml(run) {
   const active = ACTIVE_STATES.has(run.state);
   return `
     <article class="run-card" data-run-id="${escapeHtml(run.run_id)}" tabindex="0" role="button"
-             aria-label="Open run ${escapeHtml(run.goal)}">
+             aria-label="Open run ${escapeHtml(run.goal)}" onclick="window.__openRun && window.__openRun('${escapeHtml(run.run_id)}')">
       <header class="run-card-head">
         <span class="state-pill tone-${tone}${active ? ' pulse' : ''}">
           <span class="pill-dot"></span>${escapeHtml(run.state)}
