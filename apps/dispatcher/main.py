@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from redis.asyncio import Redis
 
 from agents.gateway import OpenAICompatibleGateway, ProviderCapabilities
-from apps.dispatcher.background import CONSUMER_GROUP, EventConsumptionLoop, RetentionLoop
+from apps.dispatcher.background import EventConsumptionLoop, RetentionLoop
 from domain.models import ContractModel, PlanLimits
 from execution.sandbox.worktrees import GitWorktreeManager
 from execution.scheduler.reconciliation import ReconciliationService
@@ -157,9 +157,7 @@ class DispatcherService:
         if messages:
             state = await self._dispatch_graph.ainvoke(
                 {
-                    "dispatch_messages": [
-                        message.model_dump(mode="json") for message in messages
-                    ],
+                    "dispatch_messages": [message.model_dump(mode="json") for message in messages],
                     "published_lease_tokens": [],
                 }
             )
@@ -190,7 +188,7 @@ class DispatcherService:
                 )
             if dispatched:
                 continue
-            delay = self._poll_seconds * (2**min(failures, 4))
+            delay = self._poll_seconds * (2 ** min(failures, 4))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
             except TimeoutError:
@@ -297,7 +295,15 @@ async def run_dispatcher() -> None:
 
     async def publish_outbox() -> None:
         while not stop.is_set():
-            published = await outbox.publish_batch(limit=100)
+            try:
+                published = await outbox.publish_batch(limit=100)
+            except Exception as error:
+                logger.error(
+                    "outbox_publish_failed",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                )
+                published = 0
             if not published:
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.25)
@@ -308,19 +314,21 @@ async def run_dispatcher() -> None:
         # Re-dispatch after crashes is owned by Postgres lease expiry plus
         # reconciliation; this loop only reclaims stale pending entries so the
         # consumer PEL does not grow forever.
-        await transport.ensure_group("task-dispatch", CONSUMER_GROUP)
         while not stop.is_set():
             try:
+                # The real worker group must be recreated after Redis loss;
+                # setup belongs inside the retry boundary, including startup.
+                await transport.ensure_group("task-dispatch", "autoswe-workers")
                 stale = await transport.reclaim(
                     "task-dispatch",
-                    CONSUMER_GROUP,
+                    "autoswe-workers",
                     f"dispatch-reaper:{owner}",
                     min_idle=timedelta(minutes=5),
                     count=32,
                 )
                 for record in stale:
                     await transport.acknowledge(
-                        "task-dispatch", CONSUMER_GROUP, record.stream_id
+                        "task-dispatch", "autoswe-workers", record.stream_id
                     )
                 if stale:
                     logger.info(

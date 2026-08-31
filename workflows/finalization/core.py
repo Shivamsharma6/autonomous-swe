@@ -105,6 +105,7 @@ class RunFinalizationService:
             repository=self._repository,
         )
         validator = TaskPlanValidator(
+            enforce_execution_policy=True,
             allowed_tools={"read_file", "search_code", "apply_patch", "run_tests"},
             require_final_validation_sink=True,
         )
@@ -212,9 +213,7 @@ class RunFinalizationService:
         self._require_integration_plan(plan)
         criteria = tuple(
             dict.fromkeys(
-                criterion
-                for task in plan.tasks
-                for criterion in task.acceptance_criteria
+                criterion for task in plan.tasks for criterion in task.acceptance_criteria
             )
         )
         if not criteria:
@@ -401,9 +400,9 @@ class RunFinalizationService:
             run = await session.get(RunRow, run_id)
             repair_count = int(
                 await session.scalar(
-                    select(func.count()).select_from(RepairMutationRow).where(
-                        RepairMutationRow.run_id == run_id
-                    )
+                    select(func.count())
+                    .select_from(RepairMutationRow)
+                    .where(RepairMutationRow.run_id == run_id)
                 )
                 or 0
             )
@@ -495,9 +494,7 @@ class RunFinalizationService:
             attempt = await session.get(RunStageAttemptRow, stage_attempt_id)
             if attempt is not None:
                 attempt.status = (
-                    "COMPLETED"
-                    if decision.action is RepairAction.APPLY_MUTATION
-                    else "FAILED"
+                    "COMPLETED" if decision.action is RepairAction.APPLY_MUTATION else "FAILED"
                 )
                 attempt.ended_at = utc_now()
         if decision.action is not RepairAction.APPLY_MUTATION:
@@ -507,9 +504,7 @@ class RunFinalizationService:
             raise RuntimeError("accepted repair is missing its durable plan revision")
         self._require_integration_plan(decision.plan)
 
-    async def _request_commit_approval(
-        self, run_id: UUID, *, latest: tuple[TaskRow, ...]
-    ) -> None:
+    async def _request_commit_approval(self, run_id: UUID, *, latest: tuple[TaskRow, ...]) -> None:
         sink = self._integration_sink(latest)
         async with self._database.sessions() as session:
             run = await session.get(RunRow, run_id)
@@ -784,9 +779,7 @@ class RunFinalizationService:
     async def _transition_run(self, run_id: UUID, target: RunStatus) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
-            run = await session.scalar(
-                select(RunRow).where(RunRow.id == run_id).with_for_update()
-            )
+            run = await session.scalar(select(RunRow).where(RunRow.id == run_id).with_for_update())
             if run is None:
                 raise LookupError(f"run {run_id} does not exist")
             current = RunStatus(run.state)

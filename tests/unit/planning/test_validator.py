@@ -182,6 +182,33 @@ def test_rejects_unsupported_tool(validator: TaskPlanValidator) -> None:
     assert "UNSUPPORTED_TOOL" in issue_codes(result)
 
 
+def test_production_plan_rejects_tasks_that_cannot_execute_their_subgraph() -> None:
+    validator = TaskPlanValidator(
+        allowed_tools={"read_file", "search_code", "apply_patch", "run_tests"},
+        enforce_execution_policy=True,
+    )
+    invalid = task("code without write or test permissions")
+    assert "MISSING_STAGE_TOOL" in issue_codes(validator.validate(plan((invalid,))))
+
+    invalid = task("unknown capability", tools=("read_file", "apply_patch", "run_tests"))
+    invalid = invalid.model_copy(update={"assigned_capability": "arbitrary-admin"})
+    assert "INVALID_TASK_CAPABILITY" in issue_codes(validator.validate(plan((invalid,))))
+
+    invalid = invalid.model_copy(
+        update={"assigned_capability": "coder", "risk_ceiling": RiskLevel.LOW}
+    )
+    assert "INSUFFICIENT_TASK_RISK" in issue_codes(validator.validate(plan((invalid,))))
+
+
+def test_production_plan_accepts_complete_implementation_grants() -> None:
+    validator = TaskPlanValidator(
+        allowed_tools={"read_file", "search_code", "apply_patch", "run_tests"},
+        enforce_execution_policy=True,
+    )
+    valid = task("implement", tools=("read_file", "apply_patch", "run_tests"))
+    assert validator.validate(plan((valid,))).valid
+
+
 @pytest.mark.parametrize("path", ["/etc/passwd", "../secrets.env", "src/../../outside"])
 def test_rejects_repository_path_escape(validator: TaskPlanValidator, path: str) -> None:
     result = validator.validate(plan((task("escape", paths=(path,)),)))

@@ -74,6 +74,8 @@ class SandboxRequest(ContractModel):
 
 
 class SandboxResult(ContractModel):
+    model_config = {"str_strip_whitespace": False}
+
     execution: SandboxExecution
     stdout: str
     stderr: str
@@ -199,6 +201,9 @@ class DockerSandboxRunner:
             "LC_ALL": "C.UTF-8",
             "NO_COLOR": "1",
             "PYTHONUNBUFFERED": "1",
+            # Each container owns an empty tmpfs. Never load bytecode cached in
+            # a dependency worktree before a same-size/same-second source edit.
+            "PYTHONPYCACHEPREFIX": "/tmp/autoswe-pycache",  # noqa: S108 - private container tmpfs
             "TZ": "UTC",
             **request.environment,
         }
@@ -294,9 +299,7 @@ class DockerSandboxRunner:
             container = self._client.containers.get(container_id)
             container.reload()
             status = str(container.attrs.get("State", {}).get("Status", ""))
-            if status == "created":
-                container.start()
-            elif status not in {"running", "restarting"}:
+            if status not in {"created", "running", "restarting"}:
                 raise SandboxInfrastructureError(
                     f"sandbox container cannot start from status {status or 'unknown'}"
                 )
@@ -304,7 +307,7 @@ class DockerSandboxRunner:
                 stdout=True,
                 stderr=True,
                 stream=True,
-                logs=True,
+                logs=status != "created",
                 demux=True,
             )
         except docker.errors.DockerException as exc:
@@ -318,6 +321,13 @@ class DockerSandboxRunner:
             name=f"sandbox-output-{request.execution_id}",
         )
         output_thread.start()
+        if status == "created":
+            try:
+                container.start()
+            except docker.errors.DockerException as exc:
+                _close_stream(stream)
+                output_thread.join(timeout=0.5)
+                raise SandboxInfrastructureError("cannot start isolated Docker container") from exc
         started = time.monotonic()
         cpu_time_ms = 0
         peak_memory_bytes = 0
@@ -368,6 +378,8 @@ class DockerSandboxRunner:
             _close_stream(stream)
 
         duration_ms = max(0, int((time.monotonic() - started) * 1_000))
+        if collector.limit_reached.is_set() and triggered is None:
+            triggered = "output_bytes"
         container.reload()
         state = container.attrs.get("State", {})
         exit_code_value = state.get("ExitCode")
@@ -448,6 +460,7 @@ class DockerSandboxRunner:
         except docker.errors.DockerException:
             return None
         return _parse_stats(stats)
+
 
 def _exit_reason(
     *,

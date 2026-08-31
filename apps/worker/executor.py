@@ -14,17 +14,18 @@ from apps.dispatcher.main import DispatchMessage
 from apps.worker.runner import WorkerOutcome
 from domain.enums import GraphExecutionState, RiskLevel, TaskStatus, TaskType
 from execution.scheduler.service import SchedulerService, TaskExecutionLease
+from observability.logging import get_structured_logger
 from observability.tracing import CorrelationContext, bind_correlation, reset_correlation
 from persistence.database import Database
+from persistence.repositories import DomainRepository
 from persistence.tables import AgentMessageRow
 from workflows.runtime import CheckpointedWorkflowRuntime
 from workflows.state import CheckpointIdentity, TaskExecutionInput
 from workflows.task_subgraphs import TaskNodeExecutor, build_task_subgraph
 
 NodeExecutorFactory = Callable[["TaskExecutionContext"], Awaitable[TaskNodeExecutor]]
-CheckpointerFactory = Callable[
-    [], AbstractAsyncContextManager[BaseCheckpointSaver[Any] | None]
-]
+CheckpointerFactory = Callable[[], AbstractAsyncContextManager[BaseCheckpointSaver[Any] | None]]
+logger = get_structured_logger("autoswe.worker.executor")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +99,6 @@ class DispatchedTaskExecutor:
         if lease.already_terminal:
             return WorkerOutcome.COMPLETED
         context = TaskExecutionContext.from_lease(lease)
-        node_executor = await self._node_executor_factory(context)
         correlation_token = bind_correlation(
             CorrelationContext(
                 trace_id=f"task:{context.task_id}:attempt:{context.attempt_id}",
@@ -112,7 +112,12 @@ class DispatchedTaskExecutor:
         heartbeat = asyncio.create_task(
             self._heartbeat(message, heartbeat_stop, execution_task=current_execution_task)
         )
+        runtime_invoked = False
         try:
+            await self._record_preparation_state(context, GraphExecutionState.RUNNING)
+            # Worktree preparation is fallible and can outlast a lease. It
+            # belongs inside both the heartbeat and failure-cleanup boundary.
+            node_executor = await self._node_executor_factory(context)
             async with self._checkpointer_factory() as checkpointer:
                 graph = build_task_subgraph(
                     context.task_type,
@@ -124,6 +129,8 @@ class DispatchedTaskExecutor:
                     database=self._database,
                     graph=cast(Any, graph),
                 )
+                input_refs = await self._dependency_context(context.dependencies)
+                runtime_invoked = True
                 outcome = await runtime.invoke(
                     CheckpointIdentity(
                         run_id=context.run_id,
@@ -145,9 +152,7 @@ class DispatchedTaskExecutor:
                             baseline_commit=context.baseline_commit,
                             task_type=context.task_type,
                             goal=context.goal,
-                            input_refs=await self._dependency_context(
-                                context.dependencies
-                            ),
+                            input_refs=input_refs,
                         ).to_state(),
                     ),
                 )
@@ -184,15 +189,33 @@ class DispatchedTaskExecutor:
                 # crash the worker loop.
                 pass
             raise
-        except Exception:
-            await self._scheduler.finish_claim(
-                task_id=context.task_id,
-                project_id=context.project_id,
-                owner=message.owner,
-                token=message.lease_token,
-                attempt_id=context.attempt_id,
-                target=TaskStatus.FAILED,
+        except Exception as error:
+            logger.error(
+                "task_execution_failed",
+                task_id=str(context.task_id),
+                run_id=str(context.run_id),
+                attempt_id=str(context.attempt_id),
+                error_type=type(error).__name__,
+                error_message=str(error),
             )
+            try:
+                if not runtime_invoked:
+                    await self._record_preparation_state(context, GraphExecutionState.FAILED)
+                await self._scheduler.finish_claim(
+                    task_id=context.task_id,
+                    project_id=context.project_id,
+                    owner=message.owner,
+                    token=message.lease_token,
+                    attempt_id=context.attempt_id,
+                    target=TaskStatus.FAILED,
+                )
+            except Exception as cleanup_error:
+                logger.error(
+                    "task_failure_cleanup_failed",
+                    task_id=str(context.task_id),
+                    error_type=type(cleanup_error).__name__,
+                    error_message=str(cleanup_error),
+                )
             raise
         finally:
             heartbeat_stop.set()
@@ -203,24 +226,35 @@ class DispatchedTaskExecutor:
                 pass
             reset_correlation(correlation_token)
 
-    async def _dependency_context(
-        self, dependencies: tuple[UUID, ...]
-    ) -> dict[str, str]:
+    async def _record_preparation_state(
+        self, context: TaskExecutionContext, state: GraphExecutionState
+    ) -> None:
+        async with self._database.transaction() as session:
+            await DomainRepository().transition_graph_execution(
+                session,
+                task_id=context.task_id,
+                run_id=context.run_id,
+                repository_id=context.repository_id,
+                baseline_commit=context.baseline_commit,
+                thread_id=f"run:{context.run_id}:task:{context.task_id}:attempt:{context.attempt_id}",
+                target=state,
+                checkpoint_id=None,
+            )
+
+    async def _dependency_context(self, dependencies: tuple[UUID, ...]) -> dict[str, str]:
         """Resolve the newest handoff summary per dependency task so downstream
         execution inherits real upstream context instead of opaque IDs."""
         if not dependencies:
             return {}
         async with self._database.sessions() as session:
             rows = (
-                (
-                    await session.scalars(
-                        select(AgentMessageRow)
-                        .where(AgentMessageRow.task_id.in_(dependencies))
-                        .order_by(AgentMessageRow.created_at.desc())
-                        .limit(64)
-                    )
-                ).all()
-            )
+                await session.scalars(
+                    select(AgentMessageRow)
+                    .where(AgentMessageRow.task_id.in_(dependencies))
+                    .order_by(AgentMessageRow.created_at.desc())
+                    .limit(64)
+                )
+            ).all()
         refs: dict[str, str] = {}
         for row in rows:
             key = str(row.task_id)

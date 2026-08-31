@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from domain.enums import GraphExecutionState, TaskStatus
 from persistence.database import Database
+from persistence.repositories import DomainRepository
 from persistence.tables import TaskRow
 from tests.integration.messaging.helpers import seed_task
 from workflows.checkpoints import postgres_checkpointer
@@ -62,15 +63,27 @@ async def test_prior_schema_checkpoint_resumes_across_upgrade_and_reversible_rol
     )
     async with postgres_checkpointer(sync_url, setup=True) as saver:
         prior_graph = build_wait_graph(checkpointer=saver, production=True)
-        prior_runtime = CheckpointedWorkflowRuntime(
-            database=database,
-            graph=cast(Any, prior_graph),
+        # Seed the prior release's checkpoint directly. Running today's ORM
+        # against 0009 would reference columns introduced by later migrations.
+        config_values = {"configurable": {"thread_id": identity.thread_id}}
+        paused = await prior_graph.ainvoke(
+            prior_input.to_state(),
+            config_values,
+            durability="sync",
         )
-        paused = await prior_runtime.invoke(
-            identity,
-            cast(dict[str, Any], prior_input.to_state()),
+        snapshot = await prior_graph.aget_state(config_values)
+    assert paused["__interrupt__"]
+    async with database.transaction() as session:
+        await DomainRepository().record_graph_execution(
+            session,
+            task_id=identity.task_id,
+            run_id=identity.run_id,
+            repository_id=identity.repository_id,
+            baseline_commit=identity.baseline_commit,
+            thread_id=identity.thread_id,
+            state=GraphExecutionState.WAITING_FOR_APPROVAL,
+            checkpoint_id=snapshot.config["configurable"]["checkpoint_id"],
         )
-    assert paused.state is GraphExecutionState.WAITING_FOR_APPROVAL
     await database.dispose()
 
     command.upgrade(config, "head")
@@ -93,14 +106,15 @@ async def test_prior_schema_checkpoint_resumes_across_upgrade_and_reversible_rol
     command.downgrade(config, "0009")
     tables_after_rollback = set(inspect(sync_engine).get_table_names())
     assert "workflow_node_executions" not in tables_after_rollback
-    assert {"projects", "tasks", "checkpoints", "checkpoint_writes"}.issubset(
-        tables_after_rollback
-    )
+    assert {"projects", "tasks", "checkpoints", "checkpoint_writes"}.issubset(tables_after_rollback)
     with sync_engine.begin() as connection:
-        assert connection.scalar(
-            text("SELECT count(*) FROM tasks WHERE id = :task_id"),
-            {"task_id": ids["task_id"]},
-        ) == 1
+        assert (
+            connection.scalar(
+                text("SELECT count(*) FROM tasks WHERE id = :task_id"),
+                {"task_id": ids["task_id"]},
+            )
+            == 1
+        )
         assert connection.scalar(
             text("SELECT count(*) FROM checkpoints WHERE thread_id = :thread_id"),
             {"thread_id": identity.thread_id},

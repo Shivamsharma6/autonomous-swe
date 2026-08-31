@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from agents.specs import AgentRole, build_agent_specs
 from domain.enums import RiskLevel, RunStatus, TaskStatus, TaskType
 from domain.events import require_run_transition
 from domain.models import PlanLimits, TaskPlan
+from domain.task_policy import planner_execution_contract
 from execution.repositories import RepositoryAdapterRegistry
 from knowledge.memory.port import MemoryPort
 from persistence.database import Database
@@ -94,6 +96,7 @@ class RunPlanningService:
             allowed_tools={"read_file", "search_code", "apply_patch", "run_tests"},
             require_final_validation_sink=True,
             max_risk_ceiling=max_risk_ceiling,
+            enforce_execution_policy=True,
         )
 
     async def plan_next(self) -> TaskPlan | None:
@@ -113,8 +116,19 @@ class RunPlanningService:
             ),
         )
         last_error: Exception | None = None
+        try:
+            repository_context = await asyncio.to_thread(
+                self._repository_context, repository.source_path
+            )
+        except Exception:
+            await self._fail_run(
+                run.id,
+                stage_attempt_id=stage_attempt_id,
+                fence_started_at=fence_started_at,
+            )
+            raise
         base_payload: dict[str, object] = {
-            "required_task_types": [
+            "available_task_types": [
                 "RESEARCH",
                 "IMPLEMENTATION",
                 "TEST",
@@ -123,14 +137,18 @@ class RunPlanningService:
                 "VALIDATION",
             ],
             "allowed_tools": sorted(self._validator.allowed_tools),
+            "task_execution_contract": planner_execution_contract(),
             "platform_limits": self._limits.model_dump(mode="json"),
-            "repository": self._repository_context(repository.source_path),
+            "repository": repository_context,
             "requirements": (
                 "Create the smallest sufficient typed DAG. Independent tasks should "
                 "have no artificial dependencies. Every task needs testable acceptance "
                 "criteria, bounded budgets, and only registered tools from allowed_tools. "
                 "The DAG must end in exactly one VALIDATION task that transitively depends "
-                "on every other task."
+                "on every other task. Use only the task types needed for this goal; "
+                "they are alternatives, not a required checklist. Choose assigned_capability, "
+                "required tools and risk from task_execution_contract. Ground tasks in the "
+                "repository manifest; do not invent issue trackers or unrelated source paths."
             ),
         }
         for attempt in range(3):
@@ -180,9 +198,7 @@ class RunPlanningService:
                     reasons = ", ".join(
                         f"{issue.code}:{issue.message}" for issue in validation.issues
                     )
-                    last_error = ValueError(
-                        f"architect produced an invalid task DAG: {reasons}"
-                    )
+                    last_error = ValueError(f"architect produced an invalid task DAG: {reasons}")
                     if attempt == 2:
                         raise last_error
                     continue
@@ -348,9 +364,7 @@ class RunPlanningService:
     ) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
-            run = await session.scalar(
-                select(RunRow).where(RunRow.id == run_id).with_for_update()
-            )
+            run = await session.scalar(select(RunRow).where(RunRow.id == run_id).with_for_update())
             attempt = await session.get(RunStageAttemptRow, stage_attempt_id)
             if attempt is not None and attempt.started_at != fence_started_at:
                 return
@@ -363,9 +377,7 @@ class RunPlanningService:
                 attempt.status = "FAILED"
                 attempt.ended_at = now
 
-    async def _record_run_duration(
-        self, session: Any, run: RunRow, *, exited_at: datetime
-    ) -> None:
+    async def _record_run_duration(self, session: Any, run: RunRow, *, exited_at: datetime) -> None:
         await self._repository.record_state_duration(
             session,
             aggregate_type="workflow",
@@ -405,8 +417,7 @@ class RunPlanningService:
 
         all_ids = set(tasks_by_id)
         if not any(
-            sink.task_type is TaskType.VALIDATION
-            and ancestors(sink.id) | {sink.id} == all_ids
+            sink.task_type is TaskType.VALIDATION and ancestors(sink.id) | {sink.id} == all_ids
             for sink in sinks
         ):
             raise ValueError(
@@ -418,6 +429,22 @@ def default_repository_context(source_path: str) -> dict[str, Any]:
     root = Path(source_path).resolve(strict=True)
     adapter = RepositoryAdapterRegistry.default().detect(root)
     manifest = adapter.inspect(root)
+    # Adapter source lists describe their own language. Keep a bounded broader
+    # inventory so e.g. a Python harness does not hide the actual HTML game.
+    files: list[str] = []
+    excluded = {"node_modules", "vendor", "dist", "build", "__pycache__"}
+    for directory, subdirectories, filenames in root.walk(follow_symlinks=False):
+        subdirectories[:] = sorted(
+            name for name in subdirectories if not name.startswith(".") and name not in excluded
+        )
+        for name in sorted(filenames):
+            candidate = directory / name
+            if not name.startswith(".") and not candidate.is_symlink():
+                files.append(candidate.relative_to(root).as_posix())
+                if len(files) >= 2_000:
+                    break
+        if len(files) >= 2_000:
+            break
     return {
         "adapter": manifest.adapter,
         "lockfile": manifest.lockfile,
@@ -425,4 +452,5 @@ def default_repository_context(source_path: str) -> dict[str, Any]:
         "test_files": list(manifest.test_files[:5_000]),
         "metadata_files": list(manifest.metadata_files),
         "dependencies": sorted(manifest.dependencies)[:5_000],
+        "repository_files": files,
     }

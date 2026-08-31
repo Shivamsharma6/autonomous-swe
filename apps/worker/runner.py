@@ -8,6 +8,9 @@ from uuid import UUID
 
 from apps.dispatcher.main import DispatchMessage
 from messaging.redis_streams import RedisStreamRecord, RedisStreamsTransport
+from observability.logging import get_structured_logger
+
+logger = get_structured_logger("autoswe.worker")
 
 
 class WorkerOutcome(StrEnum):
@@ -37,18 +40,26 @@ class RedisDispatchInbox:
         self._transport = transport
         self._group = group
         self._consumer = consumer
+        self._ready = False
 
     async def setup(self) -> None:
         await self._transport.ensure_group("task-dispatch", self._group)
+        self._ready = True
 
     async def read(self, *, count: int, block_ms: int) -> tuple[RedisStreamRecord, ...]:
-        return await self._transport.read(
-            "task-dispatch",
-            self._group,
-            self._consumer,
-            count=count,
-            block_ms=block_ms,
-        )
+        try:
+            if not self._ready:
+                await self.setup()
+            return await self._transport.read(
+                "task-dispatch",
+                self._group,
+                self._consumer,
+                count=count,
+                block_ms=block_ms,
+            )
+        except Exception:
+            self._ready = False
+            raise
 
     async def acknowledge(self, record: RedisStreamRecord) -> bool:
         return await self._transport.acknowledge(
@@ -87,8 +98,24 @@ class WorkerService:
         return completed
 
     async def run(self, stop: asyncio.Event) -> None:
+        failures = 0
         while not stop.is_set():
-            await self.process_once()
+            try:
+                await self.process_once()
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Leave the envelope unacknowledged. Lease reconciliation owns
+                # recovery; a single failed task must not kill other workers.
+                failures += 1
+                logger.error(
+                    "worker_cycle_failed", error_type=type(error).__name__, error_message=str(error)
+                )
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=0.25 * 2 ** min(failures, 5))
+                except TimeoutError:
+                    pass
 
 
 def install_worker_signal_handlers(stop: asyncio.Event) -> None:

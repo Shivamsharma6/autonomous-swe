@@ -142,7 +142,6 @@ async def run_worker() -> None:
         group="autoswe-workers",
         consumer=f"worker:{socket.gethostname()}",
     )
-    await inbox.setup()
     stop = asyncio.Event()
     install_worker_signal_handlers(stop)
     start_metrics_endpoint()

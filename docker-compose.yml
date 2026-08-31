@@ -93,7 +93,9 @@ services:
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID]
+    # The root entrypoint traverses Redis-owned 0700 AOF directories before
+    # dropping to redis. Without DAC_OVERRIDE every persisted restart fails.
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
     healthcheck:
       test: [CMD, redis-cli, ping]
       interval: 5s

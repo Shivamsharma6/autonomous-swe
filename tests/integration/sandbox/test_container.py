@@ -95,6 +95,23 @@ def test_network_is_disabled_by_default(
     assert result.execution.network_bytes_received == 0
 
 
+def test_fresh_sandbox_does_not_reuse_bytecode_from_before_a_patch(
+    pinned_runner_image: str,
+    repositories: tuple[Path, Path],
+) -> None:
+    module = repositories[1] / "example.py"
+    module.write_text("VALUE = 1\n")
+    os.utime(module, (1_700_000_000, 1_700_000_000))
+    runner = DockerSandboxRunner()
+    command = ("python", "-c", "import example; print(example.VALUE)")
+    before = runner.run(request(pinned_runner_image, repositories, command))
+    assert before.stdout.strip() == "1"
+    module.write_text("VALUE = 2\n")
+    os.utime(module, (1_700_000_000, 1_700_000_000))
+    after = runner.run(request(pinned_runner_image, repositories, command))
+    assert after.stdout.strip() == "2"
+
+
 def test_container_boundary_mounts_source_read_only_and_drops_host_privilege(
     pinned_runner_image: str,
     repositories: tuple[Path, Path],
@@ -249,14 +266,14 @@ def test_pid_limit_produces_an_explicit_reason(
     repositories: tuple[Path, Path],
 ) -> None:
     program = (
-        "exec(\"import subprocess, sys, time\\n"
+        'exec("import subprocess, sys, time\\n'
         "children = []\\n"
         "try:\\n"
         "    for _ in range(20):\\n"
         "        children.append(subprocess.Popen(['sleep', '5']))\\n"
         "except OSError:\\n"
         "    time.sleep(1.5)\\n"
-        "    sys.exit(7)\")"
+        '    sys.exit(7)")'
     )
     result = DockerSandboxRunner().run(
         request(

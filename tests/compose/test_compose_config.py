@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -149,3 +150,48 @@ def test_dependencies_are_health_gated_and_only_edge_ports_are_published(
     assert services["workers"]["depends_on"]["postgres"]["condition"] == "service_healthy"
     published = {name for name, service in services.items() if service.get("ports")}
     assert published == {"api", "web"}
+
+
+def test_redis_can_restart_with_private_appendonly_files(compose: dict[str, Any]) -> None:
+    import docker
+
+    client = docker.from_env()
+    service = compose["services"]["redis"]
+    volume = client.volumes.create()
+    container = client.containers.create(
+        service["image"],
+        command=["redis-server", "--appendonly", "yes", "--save", ""],
+        volumes={volume.name: {"bind": "/data", "mode": "rw"}},
+        cap_drop=service["cap_drop"],
+        cap_add=service.get("cap_add", []),
+        security_opt=service["security_opt"],
+        network_mode="none",
+    )
+
+    def wait_for_redis() -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            container.reload()
+            assert container.status == "running", container.logs().decode()
+            try:
+                result = container.exec_run(["redis-cli", "ping"])
+            except docker.errors.APIError:
+                pytest.fail(container.logs().decode())
+            if result.exit_code == 0 and result.output.strip() == b"PONG":
+                return
+            time.sleep(0.1)
+        pytest.fail("Redis did not become ready")
+
+    try:
+        container.start()
+        wait_for_redis()
+        assert container.exec_run(["redis-cli", "set", "restart-proof", "retained"]).exit_code == 0
+        container.restart(timeout=5)
+        wait_for_redis()
+        assert (
+            container.exec_run(["redis-cli", "get", "restart-proof"]).output.strip() == b"retained"
+        )
+    finally:
+        container.remove(force=True)
+        volume.remove()
+        client.close()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -31,6 +32,7 @@ _MAX_PAYLOAD_CHARS = 48_000
 def _bounded_json(payload: dict[str, Any], *, limit: int = _MAX_PAYLOAD_CHARS) -> str:
     """Serialize an invocation payload under a hard size ceiling, truncating
     the longest string values first so structural keys always survive."""
+
     def _shrink(value: Any) -> Any:
         if isinstance(value, str) and len(value) > _MAX_TOOL_RESULT_CHARS:
             return value[:_MAX_TOOL_RESULT_CHARS] + "...[truncated]"
@@ -43,10 +45,7 @@ def _bounded_json(payload: dict[str, Any], *, limit: int = _MAX_PAYLOAD_CHARS) -
     rendered = json.dumps(_shrink(payload), sort_keys=True)
     if len(rendered) <= limit:
         return rendered
-    return (
-        rendered[:limit]
-        + f'...[payload truncated; {len(rendered) - limit} chars omitted]'
-    )
+    return rendered[:limit] + f"...[payload truncated; {len(rendered) - limit} chars omitted]"
 
 
 class AgentInvocation(ContractModel):
@@ -137,6 +136,7 @@ class AgentRuntime[OutputT: BaseModel]:
         tool_dispatcher: ToolDispatcher | None = None,
         usage_recorder: UsageRecorder | None = None,
         max_schema_repairs: int = 1,
+        output_validator: Callable[[OutputT], None] | None = None,
     ) -> None:
         if max_schema_repairs < 0:
             raise ValueError("max_schema_repairs cannot be negative")
@@ -149,6 +149,7 @@ class AgentRuntime[OutputT: BaseModel]:
         self._tool_dispatcher = tool_dispatcher
         self._usage_recorder = usage_recorder or InMemoryUsageRecorder()
         self._max_schema_repairs = max_schema_repairs
+        self._output_validator = output_validator
         self._validate_configuration()
 
     async def run(
@@ -275,6 +276,8 @@ class AgentRuntime[OutputT: BaseModel]:
 
             try:
                 output = self._validate_response(response)
+                if self._output_validator is not None:
+                    self._output_validator(output)
             except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as error:
                 errors = _validation_messages(error)
                 attempt = self._attempt(invocation, turn, response, validation_errors=errors)
@@ -294,7 +297,8 @@ class AgentRuntime[OutputT: BaseModel]:
                     ModelMessage(
                         role="user",
                         content=(
-                            "Schema repair required. Return only an object that conforms to "
+                            "Schema repair or evidence repair required. Use the granted tools "
+                            "when evidence is missing, then return an object that conforms to "
                             f"{self.spec.output_schema}. Validation errors: " + json.dumps(errors)
                         ),
                     )
@@ -352,7 +356,7 @@ class AgentRuntime[OutputT: BaseModel]:
                 # otherwise accumulate across turns and dominate later prompts.
                 serialized = (
                     serialized[:_MAX_TOOL_RESULT_CHARS]
-                    + f'...[truncated {len(serialized) - _MAX_TOOL_RESULT_CHARS} chars]'
+                    + f"...[truncated {len(serialized) - _MAX_TOOL_RESULT_CHARS} chars]"
                 )
             messages.append(
                 ModelMessage(

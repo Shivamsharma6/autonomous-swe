@@ -226,33 +226,50 @@ class ProductionToolSet:
         registry = ToolRegistry()
         registry.register(
             self._spec(
-                "read_file", ReadFileArguments, ReadFileResult, capability="repository-read",
-                risk=RiskLevel.LOW, side_effect=SideEffectClass.NONE, path_fields=("path",)
+                "read_file",
+                ReadFileArguments,
+                ReadFileResult,
+                capability="repository-read",
+                risk=RiskLevel.LOW,
+                side_effect=SideEffectClass.NONE,
+                path_fields=("path",),
             ),
             self._read_file,
         )
         registry.register(
             self._spec(
-                "search_code", SearchCodeArguments, SearchCodeResult,
-                capability="repository-read", risk=RiskLevel.LOW,
-                side_effect=SideEffectClass.NONE, path_fields=("path",)
+                "search_code",
+                SearchCodeArguments,
+                SearchCodeResult,
+                capability="repository-read",
+                risk=RiskLevel.LOW,
+                side_effect=SideEffectClass.NONE,
+                path_fields=("path",),
             ),
             self._search_code,
         )
         registry.register(
             self._spec(
-                "apply_patch", ApplyPatchArguments, ApplyPatchResult,
-                capability="repository-write", risk=RiskLevel.MEDIUM,
-                side_effect=SideEffectClass.LOCAL, replay=ReplayPolicy.IDEMPOTENT,
-                path_fields=("path",)
+                "apply_patch",
+                ApplyPatchArguments,
+                ApplyPatchResult,
+                capability="repository-write",
+                risk=RiskLevel.MEDIUM,
+                side_effect=SideEffectClass.LOCAL,
+                replay=ReplayPolicy.IDEMPOTENT,
+                path_fields=("path",),
             ),
             self._apply_patch,
         )
         registry.register(
             self._spec(
-                "run_tests", RunChecksArguments, RunChecksResult,
-                capability="verification", risk=RiskLevel.MEDIUM,
-                side_effect=SideEffectClass.LOCAL, replay=ReplayPolicy.SAFE,
+                "run_tests",
+                RunChecksArguments,
+                RunChecksResult,
+                capability="verification",
+                risk=RiskLevel.MEDIUM,
+                side_effect=SideEffectClass.LOCAL,
+                replay=ReplayPolicy.SAFE,
                 timeout=1_900,
             ),
             self._run_checks,
@@ -291,7 +308,7 @@ class ProductionToolSet:
         )
 
     async def _read_file(
-        self, arguments: ContractModel, _: ToolExecutionContext
+        self, arguments: ContractModel, context: ToolExecutionContext
     ) -> dict[str, Any]:
         values = ReadFileArguments.model_validate(arguments)
         result = await self._generic(
@@ -306,54 +323,64 @@ class ProductionToolSet:
                 ),
                 timeout_seconds=30,
             ),
+            tool_call_id=context.tool_call_id,
         )
         payload = self._json_stdout(result)
         payload["sandbox_execution_id"] = str(result.execution.execution_id)
         return payload
 
     async def _search_code(
-        self, arguments: ContractModel, _: ToolExecutionContext
+        self, arguments: ContractModel, context: ToolExecutionContext
     ) -> dict[str, Any]:
         values = SearchCodeArguments.model_validate(arguments)
         result = await self._generic(
             "search_code",
             CommandSpec(
                 argv=(
-                    "python", "-c", _fixed_python_program(_SEARCH_SCRIPT), values.path,
-                    values.query, str(values.maximum_results),
+                    "python",
+                    "-c",
+                    _fixed_python_program(_SEARCH_SCRIPT),
+                    values.path,
+                    values.query,
+                    str(values.maximum_results),
                 ),
                 timeout_seconds=60,
             ),
+            tool_call_id=context.tool_call_id,
         )
         payload = self._json_stdout(result)
         payload["sandbox_execution_id"] = str(result.execution.execution_id)
         return payload
 
     async def _apply_patch(
-        self, arguments: ContractModel, _: ToolExecutionContext
+        self, arguments: ContractModel, context: ToolExecutionContext
     ) -> dict[str, Any]:
         values = ApplyPatchArguments.model_validate(arguments)
         encoded = base64.b64encode(values.content.encode()).decode("ascii")
         chunks = tuple(
-            encoded[index : index + 3_500]
-            for index in range(0, len(encoded), 3_500)
+            encoded[index : index + 3_500] for index in range(0, len(encoded), 3_500)
         ) or ("",)
         result = await self._generic(
             "apply_patch",
             CommandSpec(
                 argv=(
-                    "python", "-c", _fixed_python_program(_WRITE_SCRIPT), values.path,
-                    values.expected_sha256 or "-", *chunks,
+                    "python",
+                    "-c",
+                    _fixed_python_program(_WRITE_SCRIPT),
+                    values.path,
+                    values.expected_sha256 or "-",
+                    *chunks,
                 ),
                 timeout_seconds=60,
             ),
+            tool_call_id=context.tool_call_id,
         )
         payload = self._json_stdout(result)
         payload["sandbox_execution_id"] = str(result.execution.execution_id)
         return payload
 
     async def _run_checks(
-        self, arguments: ContractModel, _: ToolExecutionContext
+        self, arguments: ContractModel, context: ToolExecutionContext
     ) -> dict[str, Any]:
         values = RunChecksArguments.model_validate(arguments)
         kind = CommandKind(values.operation)
@@ -364,9 +391,12 @@ class ProductionToolSet:
             f"run_checks:{values.operation}:{values.target or '-'}",
             command,
             image=self.python_image if manifest.adapter == "python" else self.node_image,
+            tool_call_id=context.tool_call_id,
         )
         return {
-            "passed": result.execution.exit_code == 0,
+            "passed": (
+                result.execution.exit_code == 0 and result.execution.exit_reason == "COMPLETED"
+            ),
             "command": list(command.argv),
             "stdout": result.stdout,
             "stderr": result.stderr,
@@ -375,15 +405,19 @@ class ProductionToolSet:
             "sandbox_execution_id": str(result.execution.execution_id),
         }
 
-    async def _generic(self, operation: str, command: CommandSpec) -> SandboxResult:
-        return await self._execute(operation, command, image=self.python_image)
+    async def _generic(
+        self, operation: str, command: CommandSpec, *, tool_call_id: UUID | None = None
+    ) -> SandboxResult:
+        return await self._execute(
+            operation, command, image=self.python_image, tool_call_id=tool_call_id
+        )
 
     async def _execute(
-        self, operation: str, command: CommandSpec, *, image: str
+        self, operation: str, command: CommandSpec, *, image: str, tool_call_id: UUID | None = None
     ) -> SandboxResult:
         execution_id = uuid5(
             NAMESPACE_URL,
-            f"sandbox:{self.attempt_id}:{operation}:{json.dumps(command.argv)}",
+            f"sandbox:{self.attempt_id}:{tool_call_id}:{operation}:{json.dumps(command.argv)}",
         )
         request = SandboxRequest(
             execution_id=execution_id,
@@ -412,10 +446,8 @@ class ProductionToolSet:
 
     @staticmethod
     def _json_stdout(result: SandboxResult) -> dict[str, Any]:
-        if result.execution.exit_code != 0:
-            raise RuntimeError(
-                f"sandbox {result.execution.exit_reason}: {result.stderr[:1_000]}"
-            )
+        if result.execution.exit_code != 0 or result.execution.exit_reason != "COMPLETED":
+            raise RuntimeError(f"sandbox {result.execution.exit_reason}: {result.stderr[:1_000]}")
         try:
             value = json.loads(result.stdout)
         except json.JSONDecodeError as error:

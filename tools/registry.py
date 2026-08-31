@@ -46,6 +46,7 @@ class ToolExecutionContext(ContractModel):
     agent_capabilities: frozenset[str] = Field(max_length=100)
     risk_ceiling: RiskLevel
     worktree_root: Path
+    tool_call_id: UUID | None = None
 
     @field_validator("worktree_root")
     @classmethod
@@ -212,7 +213,7 @@ def normalize_worktree_path(value: str, root: Path) -> str:
         or "\x00" in normalized
         or path.is_absolute()
         or ".." in path.parts
-        or ":" in path.parts[0]
+        or (path.parts and ":" in path.parts[0])
     ):
         raise ValueError("path escapes the managed worktree")
     resolved_root = root.resolve(strict=True)

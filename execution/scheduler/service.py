@@ -208,18 +208,12 @@ class SchedulerService:
                 str(resource): int(units or 0) for resource, units in reservation_rows
             }
             state_rows = (
-                await session.execute(
-                    select(TaskRow.state, func.count()).group_by(TaskRow.state)
-                )
+                await session.execute(select(TaskRow.state, func.count()).group_by(TaskRow.state))
             ).all()
             state_counts = {TaskStatus(state): int(count) for state, count in state_rows}
         for resource in ("task", "model", "sandbox"):
-            self.metrics.set_resource_reservations(
-                resource, reservation_counts.get(resource, 0)
-            )
-        self.metrics.set_resource_actual(
-            "task", state_counts.get(TaskStatus.RUNNING, 0)
-        )
+            self.metrics.set_resource_reservations(resource, reservation_counts.get(resource, 0))
+        self.metrics.set_resource_actual("task", state_counts.get(TaskStatus.RUNNING, 0))
         for state in TaskStatus:
             self.metrics.set_queue_depth(state.value, state_counts.get(state, 0))
 
@@ -455,9 +449,7 @@ class SchedulerService:
     ) -> bool:
         current_time = now or datetime.now(UTC)
         async with self.database.transaction() as session:
-            task_state = await session.scalar(
-                select(TaskRow.state).where(TaskRow.id == task_id)
-            )
+            task_state = await session.scalar(select(TaskRow.state).where(TaskRow.id == task_id))
             if task_state in {
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
@@ -506,9 +498,7 @@ class SchedulerService:
             if task.state is TaskStatus.COMPLETED:
                 attempt = await session.get(TaskAttemptRow, attempt_id)
                 if attempt is None or attempt.task_id != task_id:
-                    raise LookupError(
-                        "dispatch attempt does not match the completed task"
-                    )
+                    raise LookupError("dispatch attempt does not match the completed task")
                 return self._execution_lease(
                     task, run, repository, attempt_id, already_terminal=True
                 )
@@ -584,9 +574,7 @@ class SchedulerService:
             if lease.expires_at <= current_time - self.lease_ttl:
                 # Fencing: a lease more than one TTL past expiry has almost
                 # certainly been superseded; reconciliation owns that task.
-                raise PermissionError(
-                    "worker lease expired beyond grace; claim ownership lost"
-                )
+                raise PermissionError("worker lease expired beyond grace; claim ownership lost")
             graph = await session.scalar(
                 select(GraphExecutionRow).where(GraphExecutionRow.task_id == task_id)
             )
@@ -633,7 +621,11 @@ class SchedulerService:
             baseline_commit=run.baseline_commit,
             source_path=repository.source_path,
             task_type=task.task_type,
-            goal=task.description,
+            goal=(
+                f"Run objective: {run.goal[:6_000]}\n"
+                f"Task: {task.title}\n{task.description[:6_000]}\n"
+                "Acceptance criteria:\n" + "\n".join(task.acceptance_criteria)[:6_000]
+            ),
             allowed_tools=tuple(str(value) for value in task.allowed_tools),
             assigned_capability=str(task.assigned_capability),
             risk_ceiling=RiskLevel(task.risk_ceiling),
@@ -710,37 +702,32 @@ class SchedulerService:
         resolved = 0
         async with self.database.sessions() as session:
             runs = (
-                (
-                    await session.scalars(
-                        select(RunRow)
-                        .where(
-                            RunRow.cancellation_requested_at.is_not(None),
-                            RunRow.state.notin_(RUN_TERMINAL_VALUES),
-                        )
-                        .order_by(RunRow.cancellation_requested_at)
-                        .limit(limit)
+                await session.scalars(
+                    select(RunRow)
+                    .where(
+                        RunRow.cancellation_requested_at.is_not(None),
+                        RunRow.state.notin_(RUN_TERMINAL_VALUES),
                     )
-                ).all()
-            )
+                    .order_by(RunRow.cancellation_requested_at)
+                    .limit(limit)
+                )
+            ).all()
         for run in runs:
             async with self.database.transaction() as session:
                 tasks = (
-                    (
-                        await session.scalars(
-                            select(TaskRow)
-                            .where(
-                                TaskRow.run_id == run.id,
-                                TaskRow.state.notin_(
-                                    [
-                                        TaskStatus.COMPLETED,
-                                        TaskStatus.FAILED,
-                                        TaskStatus.CANCELLED,
-                                    ]
-                                ),
-                            )
+                    await session.scalars(
+                        select(TaskRow).where(
+                            TaskRow.run_id == run.id,
+                            TaskRow.state.notin_(
+                                [
+                                    TaskStatus.COMPLETED,
+                                    TaskStatus.FAILED,
+                                    TaskStatus.CANCELLED,
+                                ]
+                            ),
                         )
-                    ).all()
-                )
+                    )
+                ).all()
             for task in tasks:
                 await self.cancel_task(
                     project_id=task.project_id,

@@ -73,12 +73,9 @@ from workflows.finalization import RunFinalizationService
 pytestmark = pytest.mark.asyncio
 
 UV_IMAGE = (
-    "ghcr.io/astral-sh/uv@sha256:"
-    "531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca"
+    "ghcr.io/astral-sh/uv@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca"
 )
-NODE_IMAGE = (
-    "node@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
-)
+NODE_IMAGE = "node@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 ADMIN_TOKEN = "e2e-" + "a" * 40
 GIT = shutil.which("git")
 
@@ -138,8 +135,7 @@ class ScriptedScenarioGateway:
                     "approved": True,
                     "summary": "All acceptance criteria pass with verified final evidence.",
                     "acceptance_evidence": {
-                        criterion: [evidence]
-                        for criterion in payload["acceptance_criteria"]
+                        criterion: [evidence] for criterion in payload["acceptance_criteria"]
                     },
                     "failure_reasons": [],
                 },
@@ -200,9 +196,7 @@ class ScriptedScenarioGateway:
                 self._parallel_gate.set()
         await asyncio.wait_for(self._parallel_gate.wait(), timeout=10)
 
-    def _tool_call(
-        self, task_id: UUID, node: str, *, has_result: bool
-    ) -> ToolCall | None:
+    def _tool_call(self, task_id: UUID, node: str, *, has_result: bool) -> ToolCall | None:
         if has_result:
             return None
         research, implementation, tests, initial_validation = self.plan.tasks
@@ -255,6 +249,12 @@ class ScriptedScenarioGateway:
         if task_id == repair.id and node == "targeted_test":
             return ToolCall(
                 call_id=f"repair-test-{task_id}",
+                name="run_tests",
+                arguments={"operation": "full_test"},
+            )
+        if node in {"targeted_test", "execute", "regression_verify"}:
+            return ToolCall(
+                call_id=f"test-{task_id}-{node}",
                 name="run_tests",
                 arguments={"operation": "full_test"},
             )
@@ -676,6 +676,7 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
             repository_id=context.repository_id,
             baseline_commit=context.baseline_commit,
             allowed_tools=context.allowed_tools,
+            assigned_capability=context.assigned_capability,
             risk_ceiling=context.risk_ceiling,
             primary_model="scripted-model",
             fallback_models=(),
@@ -767,7 +768,7 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
         latest_failures, _ = await finalization._verification_evidence(  # noqa: SLF001
             latest_tasks
         )
-        assert latest_failures == (), gateway.tool_results
+        assert latest_failures == (), json.dumps(gateway.tool_results, indent=2)
         assert await dispatcher.dispatch_once() == 0
         approvals_response = await api_client.get(f"/api/v1/runs/{run_id}/approvals")
         assert approvals_response.status_code == 200
@@ -843,8 +844,7 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
             release_artifact = await session.scalar(
                 select(ArtifactRow).where(
                     ArtifactRow.run_id == run_id,
-                    ArtifactRow.media_type
-                    == "application/vnd.autoswe.release-decision+json",
+                    ArtifactRow.media_type == "application/vnd.autoswe.release-decision+json",
                 )
             )
             repair_event = await session.scalar(
@@ -877,9 +877,7 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
         committed_test = git(source, "show", f"{commit}:tests/test_calc.py")
         assert "left + right" in committed_source
         assert "self.assertEqual(add(2, 3), 5)" in committed_test
-        assert not worktrees.managed_root.joinpath(
-            f"task-{mutation.tasks[-1].id}"
-        ).exists()
+        assert not worktrees.managed_root.joinpath(f"task-{mutation.tasks[-1].id}").exists()
         observed_checks = tuple(
             result.get("output", {}).get("passed") for result in gateway.tool_results
         )

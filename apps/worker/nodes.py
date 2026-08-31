@@ -22,17 +22,27 @@ from agents.gateway import ModelGateway, ToolCall, ToolDefinition
 from domain.enums import RiskLevel, TaskStatus
 from domain.messages import ContextHandoff
 from domain.models import AgentSpec, ContractModel, ToolCallRequest
+from domain.task_policy import capabilities_for_assignment
 from knowledge.memory.port import MemoryPort
 from persistence.artifacts import ArtifactService
 from persistence.database import Database
 from persistence.repositories import DomainRepository
-from persistence.tables import ModelCallRow, TaskRow, WorkflowNodeExecutionRow, utc_now
+from persistence.tables import (
+    ModelCallRow,
+    TaskRow,
+    ToolExecutionRow,
+    WorkflowNodeExecutionRow,
+    utc_now,
+)
+from planning.service import default_repository_context
+from policies.guardrails.secret_redactor import SecretRedactor
 from tools.approval import ApprovalService
 from tools.gateway import (
     ApprovalRequired,
     ToolCallResult,
     ToolExecutionStatus,
     ToolGateway,
+    _result_from_row,
 )
 from tools.production import ProductionToolSet
 from tools.registry import ToolExecutionContext, ToolRegistry
@@ -210,6 +220,19 @@ class GatewayToolDispatcher(ToolDispatcher):
                 risk=self._risk_ceiling,
                 attempts=0,
             )
+        except (ValueError, PermissionError, LookupError) as error:
+            # These are pre-execution contract/policy denials, not uncertain
+            # side effects. Return feedback without weakening the gateway.
+            result = ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                tool_version=request.tool_version,
+                status=ToolExecutionStatus.FAILED,
+                output={},
+                error=str(SecretRedactor().redact(str(error)))[:2_000],
+                risk=self._risk_ceiling,
+                attempts=0,
+            )
         self.results.append(result)
         return result.model_dump(mode="json")
 
@@ -282,8 +305,8 @@ class ProductionNodeExecutor:
                 tool_calls=tool_calls,
                 role=role,
             )
-        except Exception:
-            await self._mark_failed(request)
+        except Exception as error:
+            await self._mark_failed(request, error)
             raise
 
     async def _claim(self, request: NodeExecutionRequest) -> NodeExecutionResult | None:
@@ -301,9 +324,7 @@ class ProductionNodeExecutor:
                     result={},
                     started_at=utc_now(),
                 )
-                .on_conflict_do_nothing(
-                    index_elements=[WorkflowNodeExecutionRow.idempotency_key]
-                )
+                .on_conflict_do_nothing(index_elements=[WorkflowNodeExecutionRow.idempotency_key])
             )
             row = await session.scalar(
                 select(WorkflowNodeExecutionRow)
@@ -342,9 +363,7 @@ class ProductionNodeExecutor:
     ) -> tuple[NodeAgentOutput, tuple[UUID, ...], tuple[ToolCall, ...], str]:
         role = _NODE_ROLES[request.node_name]
         tool_names = tuple(
-            name
-            for name in _NODE_TOOL_POLICY[request.node_name]
-            if name in self._allowed_tools
+            name for name in _NODE_TOOL_POLICY[request.node_name] if name in self._allowed_tools
         )
         definitions = tuple(self._tool_definition(name) for name in tool_names)
         spec = AgentSpec(
@@ -374,9 +393,22 @@ class ProductionNodeExecutor:
             repository_id=self._repository_id,
             baseline_commit=self._baseline_commit,
             worktree=self._tool_set.worktree,
-            agent_capabilities=frozenset({self._assigned_capability}),
+            agent_capabilities=capabilities_for_assignment(self._assigned_capability),
             risk_ceiling=self._risk_ceiling,
         )
+        prior_results = await self._prior_tool_results(request)
+
+        def require_evidence(output: NodeAgentOutput) -> None:
+            try:
+                validate_tool_evidence(
+                    request.node_name,
+                    output,
+                    tuple(dispatcher.results),
+                    prior_results=prior_results,
+                )
+            except RuntimeError as error:
+                raise ValueError(str(error)) from error
+
         runtime = AgentRuntime(
             spec,
             self._model_gateway,
@@ -386,6 +418,8 @@ class ProductionNodeExecutor:
             tool_definitions=definitions,
             tool_dispatcher=dispatcher,
             usage_recorder=self._usage,
+            output_validator=require_evidence,
+            max_schema_repairs=2,
         )
         result = await runtime.run(
             AgentInvocation(
@@ -401,6 +435,18 @@ class ProductionNodeExecutor:
                     "agent_role": role,
                     "task_type": request.task_type.value,
                     "node": request.node_name,
+                    "repository": await asyncio.to_thread(
+                        default_repository_context, str(self._tool_set.worktree)
+                    ),
+                    "execution_requirements": (
+                        "Use repository-relative paths, e.g. src/app.py; use '.' for search_code. "
+                        "Read real source before investigating. Mutation stages must "
+                        "call apply_patch. Test stages must call run_tests. Only report "
+                        "changed paths and verification backed by successful tool results. "
+                        "Recall summarizes supplied context only; "
+                        "it must not claim to have read files, changed code, or run tests. "
+                        "Do not invent bug reports, files, issue trackers, or playtest results."
+                    ),
                     # Dependency-task handoff summaries resolved at dispatch
                     # time; this is the cross-task context channel.
                     "upstream_summaries": request.input_refs,
@@ -410,8 +456,36 @@ class ProductionNodeExecutor:
                 },
             )
         )
-        validate_tool_evidence(request.node_name, result.output, tuple(dispatcher.results))
-        return result.output, result.context_memory_ids, result.tool_calls, role
+        # Fingerprint actual writes even when the model omits changed_paths.
+        written_paths = tuple(
+            sorted(
+                {
+                    str(item.output["path"])
+                    for item in dispatcher.results
+                    if item.tool_name == "apply_patch"
+                    and item.status is ToolExecutionStatus.COMPLETED
+                    and isinstance(item.output.get("path"), str)
+                }
+            )
+        )
+        output = result.output.model_copy(update={"changed_paths": written_paths})
+        return output, result.context_memory_ids, result.tool_calls, role
+
+    async def _prior_tool_results(
+        self, request: NodeExecutionRequest
+    ) -> tuple[ToolCallResult, ...]:
+        async with self._database.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(ToolExecutionRow)
+                    .where(
+                        ToolExecutionRow.task_id == request.task_id,
+                        ToolExecutionRow.attempt_id == request.attempt_id,
+                    )
+                    .order_by(ToolExecutionRow.created_at, ToolExecutionRow.id)
+                )
+            ).all()
+        return tuple(_result_from_row(row, replayed=True) for row in rows)
 
     async def _persist(
         self,
@@ -486,7 +560,7 @@ class ProductionNodeExecutor:
             node.completed_at = utc_now()
         return result
 
-    async def _mark_failed(self, request: NodeExecutionRequest) -> None:
+    async def _mark_failed(self, request: NodeExecutionRequest, error: Exception) -> None:
         async with self._database.transaction() as session:
             row = await session.scalar(
                 select(WorkflowNodeExecutionRow)
@@ -495,6 +569,10 @@ class ProductionNodeExecutor:
             )
             if row is not None and row.status != "COMPLETED":
                 row.status = "FAILED"
+                row.result = {
+                    "error_type": type(error).__name__,
+                    "error": str(SecretRedactor().redact(str(error)))[:4_000],
+                }
                 row.completed_at = utc_now()
 
     def _tool_definition(self, name: str) -> ToolDefinition:
@@ -510,6 +588,8 @@ def validate_tool_evidence(
     node_name: str,
     output: NodeAgentOutput,
     results: tuple[ToolCallResult, ...],
+    *,
+    prior_results: tuple[ToolCallResult, ...] = (),
 ) -> None:
     """Refuse model claims that are not supported by the durable tool outcomes."""
     latest_by_tool: dict[str, ToolCallResult] = {}
@@ -517,11 +597,16 @@ def validate_tool_evidence(
         latest_by_tool[result.tool_name] = result
     mutation_nodes = {"implement", "generate_tests", "refactor", "draft"}
     patch_result = latest_by_tool.get("apply_patch")
-    if node_name in mutation_nodes and patch_result is not None:
-        if patch_result.status is not ToolExecutionStatus.COMPLETED:
+    if node_name in mutation_nodes:
+        if patch_result is None or patch_result.status is not ToolExecutionStatus.COMPLETED:
             raise RuntimeError("mutation node requires a successful apply_patch result")
-    elif node_name in mutation_nodes and output.changed_paths:
-        raise RuntimeError("changed paths require a successful apply_patch result")
+    written_paths = {
+        result.output.get("path")
+        for result in results
+        if result.tool_name == "apply_patch" and result.status is ToolExecutionStatus.COMPLETED
+    }
+    if set(output.changed_paths) - written_paths:
+        raise RuntimeError("changed paths must match successful apply_patch results")
 
     unrecovered = tuple(
         name
@@ -534,8 +619,31 @@ def validate_tool_evidence(
             + ", ".join(sorted(unrecovered))
         )
 
-    test_result = latest_by_tool.get("run_tests")
-    if output.verification_passed is not None and test_result is not None:
+    if node_name == "investigate" and not any(
+        name in latest_by_tool for name in ("read_file", "search_code")
+    ):
+        raise RuntimeError(
+            "investigation requires repository evidence from read_file or search_code"
+        )
+
+    test_result = None
+    for item in (*prior_results, *results):
+        if item.tool_name == "apply_patch":
+            test_result = None
+        elif item.tool_name == "run_tests":
+            test_result = item
+    if node_name in {
+        "targeted_test",
+        "execute",
+        "regression_verify",
+        "verify",
+        "validate_examples",
+    }:
+        if "run_tests" not in latest_by_tool:
+            raise RuntimeError("verification stage requires a governed run_tests result")
+    if output.verification_passed is not None:
+        if test_result is None or test_result.status is not ToolExecutionStatus.COMPLETED:
+            raise RuntimeError("verification claim requires a governed run_tests result")
         passed = test_result.output.get("passed")
         if not isinstance(passed, bool) or passed is not output.verification_passed:
             raise RuntimeError(

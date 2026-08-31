@@ -163,6 +163,13 @@ def test_path_normalization_rejects_symlink_escape(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("path", [".", "./"])
+def test_repository_root_is_a_valid_search_path(tmp_path: Path, path: str) -> None:
+    from tools.registry import normalize_worktree_path
+
+    assert normalize_worktree_path(path, tmp_path) == "."
+
+
 def test_risk_combines_tool_target_arguments_and_repository_policy() -> None:
     policy = ToolRiskPolicy(
         protected_paths=(".github/workflows", "infra"),

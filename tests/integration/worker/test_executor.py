@@ -127,6 +127,8 @@ async def test_dispatched_executor_completes_checkpoint_and_releases_claim(datab
     assert replay is WorkerOutcome.COMPLETED
     assert node_executor.nodes == ["recall", "inspect", "verify", "evidence"]
     assert seen[0].task_id == message.task_id
+    assert "Inspect the repository" in seen[0].goal
+    assert "Evidence exists" in seen[0].goal
     async with database.sessions() as session:
         task = await session.get(TaskRow, message.task_id)
         attempt = await session.get(TaskAttemptRow, message.attempt_id)
@@ -173,3 +175,41 @@ async def test_dispatched_executor_rejects_a_forged_lease_token(database) -> Non
 
     with pytest.raises(PermissionError, match="lease"):
         await executor.execute(message.model_copy(update={"lease_token": uuid4()}))
+
+
+@pytest.mark.parametrize("failure_stage", ["factory", "dependency_context"])
+async def test_preparation_failure_releases_the_started_task_lease(database, failure_stage) -> None:
+    message, scheduler = await _seed_claim(database)
+
+    async def factory(context):
+        if failure_stage == "factory":
+            raise RuntimeError("worktree preparation failed")
+        return RecordingNodeExecutor()
+
+    @asynccontextmanager
+    async def no_checkpointer():
+        yield InMemorySaver()
+
+    executor = DispatchedTaskExecutor(
+        database=database,
+        scheduler=scheduler,
+        node_executor_factory=factory,
+        checkpointer_factory=no_checkpointer,
+        production_graph=False,
+        agent_spec_hash="f" * 64,
+    )
+    if failure_stage == "dependency_context":
+
+        async def unavailable_context(_):
+            raise RuntimeError("worktree preparation failed")
+
+        executor._dependency_context = unavailable_context
+    with pytest.raises(RuntimeError, match="worktree preparation failed"):
+        await executor.execute(message)
+    async with database.sessions() as session:
+        task = await session.get(TaskRow, message.task_id)
+        assert task.state is TaskStatus.FAILED
+        assert (
+            await session.scalar(select(LeaseRow).where(LeaseRow.task_id == message.task_id))
+            is None
+        )

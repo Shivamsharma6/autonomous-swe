@@ -7,6 +7,7 @@ from uuid import UUID
 
 from domain.enums import RiskLevel, TaskType
 from domain.models import TaskPlan, TaskPlanMutation, TaskSpec
+from domain.task_policy import TASK_CAPABILITY_NAMES, TASK_REQUIRED_TOOLS, task_minimum_risk
 from policies.risk.policy_engine import risk_exceeds
 
 
@@ -41,10 +42,12 @@ class TaskPlanValidator:
         allowed_tools: set[str] | frozenset[str],
         require_final_validation_sink: bool = False,
         max_risk_ceiling: RiskLevel = RiskLevel.HIGH,
+        enforce_execution_policy: bool = False,
     ) -> None:
         self.allowed_tools = frozenset(allowed_tools)
         self.require_final_validation_sink = require_final_validation_sink
         self.max_risk_ceiling = max_risk_ceiling
+        self.enforce_execution_policy = enforce_execution_policy
 
     def validate(self, plan: TaskPlan) -> PlanValidationResult:
         issues: list[ValidationIssue] = []
@@ -242,6 +245,36 @@ class TaskPlanValidator:
         self, task: TaskSpec, tasks_by_id: dict[UUID, TaskSpec]
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
+        if self.enforce_execution_policy:
+            if task.assigned_capability not in TASK_CAPABILITY_NAMES[task.task_type]:
+                issues.append(
+                    ValidationIssue(
+                        code="INVALID_TASK_CAPABILITY",
+                        message=(
+                            f"{task.task_type.value} requires one of "
+                            f"{TASK_CAPABILITY_NAMES[task.task_type]}"
+                        ),
+                        task_id=task.id,
+                    )
+                )
+            missing = TASK_REQUIRED_TOOLS[task.task_type] - set(task.allowed_tools)
+            if missing:
+                issues.append(
+                    ValidationIssue(
+                        code="MISSING_STAGE_TOOL",
+                        message=f"{task.task_type.value} stages require tools {sorted(missing)}",
+                        task_id=task.id,
+                    )
+                )
+            minimum = task_minimum_risk(task.task_type)
+            if risk_exceeds(minimum, task.risk_ceiling):
+                issues.append(
+                    ValidationIssue(
+                        code="INSUFFICIENT_TASK_RISK",
+                        message=f"{task.task_type.value} requires at least {minimum.value} risk",
+                        task_id=task.id,
+                    )
+                )
         if not task.acceptance_criteria:
             issues.append(
                 ValidationIssue(
@@ -368,7 +401,6 @@ class TaskPlanValidator:
         valid = tuple(
             task
             for task in sinks
-            if task.task_type is TaskType.VALIDATION
-            and ancestors(task.id) | {task.id} == complete
+            if task.task_type is TaskType.VALIDATION and ancestors(task.id) | {task.id} == complete
         )
         return len(valid) == 1

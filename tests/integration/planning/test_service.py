@@ -150,3 +150,47 @@ async def test_planner_persists_dynamic_parallel_dag_and_only_roots_are_ready(da
     assert {row.id for row in rows if row.state is TaskStatus.PENDING} == {integration_id}
     assert stage is not None and stage.status == "COMPLETED"
     assert len(calls) == 1 and calls[0].run_stage_attempt_id == stage.id
+
+
+async def test_missing_repository_does_not_leave_run_stuck_planning(database):
+    repository = DomainRepository()
+    project_id, repository_id, run_id = uuid4(), uuid4(), uuid4()
+    async with database.transaction() as session:
+        await repository.create_project(session, project_id=project_id, name="missing repo")
+        await repository.create_repository(
+            session,
+            repository_id=repository_id,
+            project_id=project_id,
+            source_path="/missing-autoswe-test-repository",
+            default_branch="main",
+        )
+        await repository.create_run(
+            session,
+            run_id=run_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            goal="Fix repository",
+            baseline_commit="a" * 40,
+        )
+    service = RunPlanningService(
+        database=database,
+        gateway=ScriptedGateway(responses=()),
+        memory=FakeMemoryPort(),
+        primary_model="scripted-model",
+        fallback_models=(),
+        limits=PlanLimits(
+            max_dynamic_tasks=4,
+            max_plan_depth=4,
+            max_total_budget_usd=10,
+            max_total_execution_seconds=1000,
+        ),
+    )
+    with pytest.raises(FileNotFoundError):
+        await service.plan_next()
+    async with database.sessions() as session:
+        assert (await session.get(RunRow, run_id)).state == "FAILED"
+        stage = await session.scalar(
+            select(RunStageAttemptRow).where(RunStageAttemptRow.run_id == run_id)
+        )
+        assert stage.status == "FAILED"
+        assert stage.ended_at is not None

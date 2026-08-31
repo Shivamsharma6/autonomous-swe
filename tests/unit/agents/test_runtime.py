@@ -130,6 +130,31 @@ async def test_bounded_schema_repair_records_invalid_and_valid_attempts() -> Non
     assert result.usage.cost_usd == pytest.approx(0.02)
 
 
+async def test_semantic_output_failure_is_repaired_inside_the_same_agent_loop() -> None:
+    gateway = ScriptedGateway(
+        responses=(
+            ScriptedResponse(response({"answer": "unsupported claim"})),
+            ScriptedResponse(response({"answer": "verified"})),
+        )
+    )
+
+    def require_evidence(output: VerifiedResult) -> None:
+        if output.answer != "verified":
+            raise ValueError("governed tool evidence is required")
+
+    runtime = AgentRuntime(
+        spec(),
+        gateway,
+        input_type=AgentInvocation,
+        output_type=VerifiedResult,
+        output_validator=require_evidence,
+    )
+    result = await runtime.run(invocation())
+    assert result.output.answer == "verified"
+    assert "governed tool evidence" in gateway.requests[1].messages[-1].content
+    assert result.attempts[0].validation_errors
+
+
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_transient_primary_failure_retries_same_model_then_fallback(monkeypatch) -> None:

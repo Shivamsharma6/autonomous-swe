@@ -220,7 +220,9 @@ class ToolGateway:
         for attempts in range(1, registered.spec.max_attempts + 1):
             try:
                 async with asyncio.timeout(registered.spec.timeout_seconds):
-                    raw_result = await registered.executor(arguments, context)
+                    raw_result = await registered.executor(
+                        arguments, context.model_copy(update={"tool_call_id": call.call_id})
+                    )
                 validated = registered.validate_result(raw_result)
                 output = cast(
                     dict[str, Any],
