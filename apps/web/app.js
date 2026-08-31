@@ -1,4 +1,4 @@
-import { api, setUnauthorizedHandler, getToken, setToken, clearToken, connectTaskSocket } from './js/api.js';
+import { api, setUnauthorizedHandler, getToken, setToken, clearToken, connectTaskSocket } from './js/api.js?v=20260831-clean-ui';
 import {
   el,
   terminalStates,
@@ -8,14 +8,13 @@ import {
   summarizeCounts,
   stateTone,
   copyToClipboard,
-} from './js/util.js';
-import { showToast } from './js/toast.js';
-import { initRunsBrowser, showRunsBrowser, hideRunsBrowser } from './js/runsBrowser.js';
-import { initPalette, openPalette } from './js/palette.js';
-import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js';
-import { renderSparkline, fetchHistory, pushLiveSample, getLiveHistory } from './js/sparkline.js';
-import { createVirtualList } from './js/virtualList.js';
-import { initTour } from './js/tour.js';
+  humanState,
+} from './js/util.js?v=20260831-clean-ui';
+import { showToast } from './js/toast.js?v=20260831-clean-ui';
+import { initRunsBrowser, showRunsBrowser, hideRunsBrowser, resetRunsBrowser } from './js/runsBrowser.js?v=20260831-clean-ui';
+import { initPalette, openPalette } from './js/palette.js?v=20260831-clean-ui';
+import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js?v=20260831-clean-ui';
+import { initTour } from './js/tour.js?v=20260831-clean-ui';
 
 (() => {
   'use strict';
@@ -38,38 +37,72 @@ import { initTour } from './js/tour.js';
     wsReconnectTimer: null,
     selectedTask: null,
     modelConfig: null,
-    historyCache: new Map(),
+    view: 'runs',
+    viewEpoch: 0,
+    runRequest: null,
+    currentRun: null,
+    socketTaskId: null,
+    registeredSignature: '',
+    creating: false,
+    taskView: 'list',
+    renderKeys: {},
+    repositoryVersion: 0,
+    authEpoch: 0,
+    artifactRequest: null,
+    approvalDecision: null,
   };
 
-  // Virtualized timeline — initialized lazily on first render
-  let timelineVirtual = null;
-  function ensureTimelineVirtual() {
-    if (timelineVirtual) return timelineVirtual;
-    const container = el('terminalScrollContainer');
-    if (!container) return null;
-    timelineVirtual = createVirtualList({
-      container,
-      rowHeight: 56,
-      overscan: 10,
-      renderRow: (event) => {
-        const item = document.createElement('li');
-        item.className = 'timeline-item';
-        const time = document.createElement('span');
-        time.className = 'timeline-time';
-        time.textContent = new Date(event.created_at).toLocaleTimeString();
-        const name = document.createElement('span');
-        name.className = 'timeline-event-name';
-        name.textContent = event.event_type;
-        const data = document.createElement('span');
-        data.className = 'timeline-data';
-        try {
-          data.textContent = JSON.stringify(event.payload).slice(0, 400);
-        } catch (_) { data.textContent = String(event.payload); }
-        item.append(time, name, data);
-        return item;
-      },
+  function feedback(id, message, success = false) {
+    const node = el(id);
+    node.textContent = message;
+    node.classList.toggle('hidden', !message);
+    node.classList.toggle('success', success);
+  }
+
+  function repositorySignature() {
+    return ['projectName', 'sourcePath', 'defaultBranch'].map(id => el(id).value.trim()).join('\n');
+  }
+
+  function stopRunUpdates() {
+    window.clearTimeout(state.pollTimer);
+    window.clearTimeout(state.wsReconnectTimer);
+    state.runRequest?.abort();
+    state.runRequest = null;
+    state.socketTaskId = null;
+    if (state.ws) {
+      const socket = state.ws;
+      state.ws = null;
+      socket.onclose = socket.onmessage = socket.onopen = socket.onerror = null;
+      socket.close();
+    }
+  }
+
+  function setView(view, runId = '', historyMode = 'push') {
+    state.viewEpoch += 1;
+    stopRunUpdates();
+    hideRunsBrowser();
+    state.view = view;
+    for (const id of ['taskDrawer', 'artifactDialog', 'approvalDialog']) if (el(id).open) el(id).close();
+    el('dashboard').setAttribute('aria-busy', 'false');
+    el('refreshRun').disabled = false;
+    for (const [id, name] of [['runsBrowserSection', 'runs'], ['onboardingSection', 'new'], ['dashboard', 'run']]) {
+      el(id).classList.toggle('hidden', view !== name);
+    }
+    document.querySelectorAll('[data-nav]').forEach(tab => {
+      const active = tab.dataset.nav === (view === 'run' ? 'runs' : view);
+      tab.classList.toggle('active', active);
+      if (active) tab.setAttribute('aria-current', 'page'); else tab.removeAttribute('aria-current');
     });
-    return timelineVirtual;
+    const title = { runs: 'All runs', new: 'New run', run: 'Run details' }[view];
+    el('workspaceLabel').textContent = title;
+    document.title = `AutoSWE · ${title}`;
+    const hash = view === 'run' ? `#run/${encodeURIComponent(runId)}` : `#${view}`;
+    if (historyMode !== 'none' && window.location.hash !== hash) window.history[historyMode === 'replace' ? 'replaceState' : 'pushState']({}, '', hash);
+    if (view === 'runs') showRunsBrowser();
+    if (historyMode === 'push') {
+      el('mainContent').focus({ preventScroll: true });
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    }
   }
 
   // Authentication Dialog Controls
@@ -87,7 +120,8 @@ import { initTour } from './js/tour.js';
 
   function getRecentRuns() {
     try {
-      return JSON.parse(localStorage.getItem(RECENT_RUNS_KEY)) || [];
+      const list = JSON.parse(localStorage.getItem(RECENT_RUNS_KEY));
+      return Array.isArray(list) ? list.filter(item => typeof item?.id === 'string' && typeof item?.goal === 'string') : [];
     } catch (_) {
       return [];
     }
@@ -127,7 +161,7 @@ import { initTour } from './js/tour.js';
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'recent-run-chip';
-      chip.innerHTML = `<span>#${run.id.slice(0, 8)}</span> <span style="opacity: 0.7;">· ${run.goal}</span>`;
+      chip.textContent = `${run.goal} · ${run.id.slice(0, 8)}`;
       chip.addEventListener('click', () => {
         el('runLookup').value = run.id;
         void loadRun(run.id);
@@ -151,41 +185,60 @@ import { initTour } from './js/tour.js';
 
       if (ready) {
         el('healthDot').className = 'status-dot ready';
-        el('healthText').textContent = 'Platform Ready';
+        el('healthText').textContent = 'Services connected';
       } else if (coreReady && unavailable.length === 1 && unavailable[0] === 'uams') {
         el('healthDot').className = 'status-dot ready';
-        el('healthText').textContent = 'Platform Ready (UAMS offline)';
+        el('healthText').textContent = 'Memory service offline';
       } else {
         el('healthDot').className = 'status-dot failed';
-        el('healthText').textContent = `Degraded: ${unavailable.join(', ') || 'dependencies'}`;
+        el('healthText').textContent = 'Some services unavailable';
+        el('healthStatus').title = `Unavailable: ${unavailable.join(', ') || 'dependencies'}`;
       }
     } catch (_) {
       el('healthDot').className = 'status-dot failed';
-      el('healthText').textContent = 'Control Plane Offline';
+      el('healthText').textContent = 'Services offline';
     }
   }
 
   // Restore Session Storage State
   function restoreIdentity() {
-    if (getToken()) {
-      el('authBtnText').textContent = 'Admin Connected';
-    }
-    if (state.projectId && state.repositoryId) {
-      const ident = el('projectIdentity');
-      if (ident) {
-        const textSpan = ident.querySelector('.identity-text');
-        if (textSpan) textSpan.textContent = `${state.projectName || 'Project'} · ${state.projectId}`;
-      }
-      el('startRun').disabled = false;
-    }
+    el('authBtnText').textContent = getToken() ? 'Workspace access' : 'Connect workspace';
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('autoswe.repositorySelection'));
+      if (saved?.project_id && saved?.repository_id && saved?.baseline_commit) applyRepository(saved);
+      else { state.projectId = ''; state.repositoryId = ''; }
+    } catch (_) { state.projectId = ''; state.repositoryId = ''; }
     renderRecentRuns();
-    if (state.runId) {
-      el('runLookup').value = state.runId;
-      void loadRun(state.runId);
-    }
-    if (!getToken()) {
-      window.setTimeout(openAuth, 300);
-    }
+    if (state.runId) el('runLookup').value = state.runId;
+  }
+
+  function applyRepository(body) {
+    state.projectId = body.project_id;
+    state.repositoryId = body.repository_id;
+    state.projectName = body.name;
+    for (const [key, value] of Object.entries({ projectId: body.project_id, repositoryId: body.repository_id, projectName: body.name })) sessionStorage.setItem(`autoswe.${key}`, value);
+    sessionStorage.setItem('autoswe.repositorySelection', JSON.stringify(body));
+    el('projectName').value = body.name;
+    el('sourcePath').value = body.source_path;
+    el('defaultBranch').value = body.default_branch;
+    el('baselineCommit').value = body.baseline_commit || '';
+    state.registeredSignature = repositorySignature();
+    el('projectIdentity').querySelector('.identity-text').textContent = `Connected · ${body.name} · ${body.default_branch}`;
+    el('projectIdentity').classList.add('connected');
+    el('startRun').disabled = state.creating || !body.baseline_commit;
+    el('launchHint').textContent = body.baseline_commit ? 'Ready to start. Review the goal before continuing.' : 'A valid baseline commit is required.';
+  }
+
+  function invalidateRepository() {
+    state.repositoryVersion += 1;
+    state.projectId = ''; state.repositoryId = ''; state.registeredSignature = '';
+    sessionStorage.removeItem('autoswe.repositorySelection');
+    ['projectId', 'repositoryId', 'projectName'].forEach(key => sessionStorage.removeItem(`autoswe.${key}`));
+    el('projectIdentity').classList.remove('connected');
+    el('projectIdentity').querySelector('.identity-text').textContent = 'Connect this repository before starting a run.';
+    el('startRun').disabled = true;
+    el('baselineCommit').value = '';
+    el('launchHint').textContent = 'Connect a repository to continue.';
   }
 
   async function readDirectoryFiles(dirHandle, pathPrefix = '', maxFiles = 300) {
@@ -214,33 +267,14 @@ import { initTour } from './js/tour.js';
     return files;
   }
 
-  async function onboardRepository(payload) {
+  async function onboardRepository(payload, version) {
+    if (version !== state.repositoryVersion) return null;
     const body = await api('/api/v1/projects/onboard', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    state.projectId = body.project_id;
-    state.repositoryId = body.repository_id;
-    state.projectName = body.name;
-    sessionStorage.setItem('autoswe.projectId', state.projectId);
-    sessionStorage.setItem('autoswe.repositoryId', state.repositoryId);
-    sessionStorage.setItem('autoswe.projectName', state.projectName);
-
-    el('projectName').value = body.name;
-    el('sourcePath').value = body.source_path;
-    el('defaultBranch').value = body.default_branch;
-    if (body.baseline_commit) {
-      el('baselineCommit').value = body.baseline_commit;
-    }
-
-    const ident = el('projectIdentity');
-    if (ident) {
-      const textSpan = ident.querySelector('.identity-text');
-      if (textSpan) {
-        textSpan.innerHTML = `<strong>✓ Ready</strong> · ${body.name} (${body.default_branch} · <code>${body.baseline_commit ? body.baseline_commit.slice(0, 8) : 'HEAD'}</code>)`;
-      }
-    }
-    el('startRun').disabled = false;
+    if (version !== state.repositoryVersion) return null;
+    applyRepository(body);
     return body;
   }
 
@@ -251,6 +285,8 @@ import { initTour } from './js/tour.js';
       try {
         const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
         if (!dirHandle) return;
+        invalidateRepository();
+        const version = state.repositoryVersion;
         const dirName = dirHandle.name;
         el('projectName').value = dirName;
         showToast(`Reading repository files from ${dirName}...`);
@@ -275,13 +311,15 @@ import { initTour } from './js/tour.js';
           folder_name: dirName,
           default_branch: branch,
           files: files,
-        });
+        }, version);
+        if (!onboardRes) return;
 
         showToast(`✓ "${dirName}" ready (${onboardRes.default_branch} · ${onboardRes.baseline_commit.slice(0, 8)})`);
         return;
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn('showDirectoryPicker error, falling back to input:', err);
+        feedback('projectFeedback', err.message);
+        return;
       }
     }
 
@@ -295,6 +333,8 @@ import { initTour } from './js/tour.js';
   async function handleFallbackDirPicker(event) {
     const files = event.target.files;
     if (!files || !files.length) return;
+    invalidateRepository();
+    const version = state.repositoryVersion;
     const firstFile = files[0];
     const pathParts = (firstFile.webkitRelativePath || '').split('/');
     if (pathParts.length > 1) {
@@ -323,7 +363,8 @@ import { initTour } from './js/tour.js';
           folder_name: dirName,
           default_branch: 'main',
           files: filePayloads,
-        });
+        }, version);
+        if (!onboardRes) return;
         showToast(`✓ "${dirName}" ready (${onboardRes.default_branch} · ${onboardRes.baseline_commit.slice(0, 8)})`);
       } catch (err) {
         showToast(err.message, true);
@@ -334,190 +375,192 @@ import { initTour } from './js/tour.js';
   // Register New Project Repository
   async function registerProject(event) {
     event.preventDefault();
+    const button = el('registerProjectBtn');
+    if (button.disabled) return;
+    button.disabled = true; button.textContent = 'Connecting…';
+    const signature = repositorySignature();
+    const version = ++state.repositoryVersion;
+    feedback('projectFeedback', '');
     try {
-      showToast('Registering repository...');
-      const body = await onboardRepository({
-        name: el('projectName').value.trim(),
-        source_path: el('sourcePath').value.trim(),
-        folder_name: el('sourcePath').value.trim(),
-        default_branch: el('defaultBranch').value.trim(),
+      const body = await api('/api/v1/projects/onboard', {
+        method: 'POST',
+        body: JSON.stringify({ name: el('projectName').value.trim(), source_path: el('sourcePath').value.trim(), folder_name: el('sourcePath').value.trim(), default_branch: el('defaultBranch').value.trim() }),
       });
-      showToast(`Repository "${body.name}" registered and ready.`);
-    } catch (error) {
-      showToast(error.message, true);
-    }
+      if (version !== state.repositoryVersion || signature !== repositorySignature()) { feedback('projectFeedback', 'Repository fields changed. Connect again to use the updated values.'); return; }
+      applyRepository(body);
+      feedback('projectFeedback', 'Repository connected. Describe the work in step 2.', true);
+      el('runGoal').focus();
+    } catch (error) { feedback('projectFeedback', error.message); }
+    finally { button.disabled = false; button.textContent = 'Connect repository'; }
   }
 
-  // Start Autonomous Mission Run
   async function startRun(event) {
     event.preventDefault();
-    const runBtn = el('startRun');
-    const originalText = runBtn.innerHTML;
-    runBtn.disabled = true;
-
+    if (state.creating) return;
+    if (!state.projectId || !state.repositoryId || state.registeredSignature !== repositorySignature()) {
+      feedback('runFeedback', 'Connect the repository in step 1 before starting.'); return;
+    }
+    const commitSha = el('baselineCommit').value.trim().toLowerCase();
+    const goal = el('runGoal').value.trim();
+    if (!/^[a-f0-9]{40,64}$/.test(commitSha) || !goal) {
+      feedback('runFeedback', 'Enter a goal and a valid full baseline commit.');
+      el('baselineCommit').closest('details').open = true;
+      return;
+    }
+    state.creating = true;
+    el('startRun').disabled = true;
+    el('startRun').textContent = 'Starting run…';
+    feedback('runFeedback', '');
+    const viewEpoch = state.viewEpoch;
     try {
-      if (!state.projectId || !state.repositoryId) {
-        showToast('Auto-provisioning repository...');
-        const onboardRes = await onboardRepository({
-          name: el('projectName').value.trim(),
-          source_path: el('sourcePath').value.trim(),
-          folder_name: el('sourcePath').value.trim(),
-          default_branch: el('defaultBranch').value.trim(),
-        });
-        if (!el('baselineCommit').value.trim()) {
-          el('baselineCommit').value = onboardRes.baseline_commit;
-        }
-      }
-
-      const commitSha = el('baselineCommit').value.trim().toLowerCase();
-      if (!commitSha || commitSha.length < 40) {
-        showToast('Baseline commit SHA must be a 40–64 char hex string.', true);
-        runBtn.disabled = false;
-        return;
-      }
-
-      showToast('Launching agentic mission...');
-      const goalText = el('runGoal').value.trim();
-      const body = await api('/api/v1/runs', {
-        method: 'POST',
-        body: JSON.stringify({
-          project_id: state.projectId,
-          repository_id: state.repositoryId,
-          goal: goalText,
-          baseline_commit: commitSha,
-        }),
-      });
-      state.runId = body.run_id;
-      sessionStorage.setItem('autoswe.runId', state.runId);
-      el('runLookup').value = state.runId;
-      saveRecentRun(state.runId, goalText);
-      showToast('Run launched. Architect agent is synthesizing the DAG.');
-      await loadRun(state.runId);
-    } catch (error) {
-      showToast(error.message, true);
-    } finally {
-      runBtn.disabled = false;
-      runBtn.innerHTML = originalText;
+      const body = await api('/api/v1/runs', { method: 'POST', body: JSON.stringify({ project_id: state.projectId, repository_id: state.repositoryId, goal, baseline_commit: commitSha }) });
+      saveRecentRun(body.run_id, goal);
+      showToast('Run started. Planning is underway.');
+      if (viewEpoch === state.viewEpoch) await loadRun(body.run_id);
+    } catch (error) { feedback('runFeedback', error.message); }
+    finally {
+      state.creating = false;
+      el('startRun').disabled = !state.projectId;
+      el('startRun').textContent = 'Start run →';
     }
   }
 
-  // Main Load Run Controller — resilient: dashboard opens as soon as the run itself loads,
-  // even if tasks/approvals/artifacts/events are slow or fail.
-  async function loadRun(runId) {
+  // Only the current view/request may apply results. Background polling never navigates.
+  async function loadRun(runId, { refresh = false, historyMode = 'push' } = {}) {
     const candidate = String(runId || '').trim();
-    if (!candidate) return;
-    state.runId = candidate;
-    sessionStorage.setItem('autoswe.runId', candidate);
-    window.clearTimeout(state.pollTimer);
-
-    let run;
-    try {
-      run = await api(`/api/v1/runs/${encodeURIComponent(candidate)}`);
-    } catch (error) {
-      el('streamStatusText').textContent = 'POLLING PAUSED';
-      el('liveStreamBadge').classList.remove('live');
-      showToast(error.message, true);
+    if (!candidate || (refresh && (state.view !== 'run' || state.runId !== candidate))) return;
+    if (refresh && document.hidden) {
+      state.pollTimer = window.setTimeout(() => void loadRun(candidate, { refresh: true }), 5000);
       return;
     }
-
-    // Optimistically switch to the mission view so clicks feel instant
-    saveRecentRun(candidate, run.goal);
-    hideRunsBrowser();
-    el('launchpadSection')?.classList.add('hidden');
-    document.querySelectorAll('[data-nav]').forEach((tab) => {
-      tab.classList.toggle('active', tab.dataset.nav === 'mission');
-    });
-    el('dashboard').classList.remove('hidden');
-    // Render once with whatever we have (empty task arrays) so the HUD appears immediately
-    renderRun(run);
-
-    const results = await Promise.allSettled([
-      api(`/api/v1/runs/${encodeURIComponent(candidate)}/tasks`),
-      api(`/api/v1/runs/${encodeURIComponent(candidate)}/approvals`),
-      api(`/api/v1/runs/${encodeURIComponent(candidate)}/artifacts`),
-      api(`/api/v1/runs/${encodeURIComponent(candidate)}/events?limit=500`),
-    ]);
-    const [tasksRes, approvalsRes, artifactsRes, eventsRes] = results;
-    state.tasks = tasksRes.status === 'fulfilled' ? (tasksRes.value || []) : [];
-    state.approvals = approvalsRes.status === 'fulfilled' ? (approvalsRes.value || []) : [];
-    state.artifacts = artifactsRes.status === 'fulfilled' ? (artifactsRes.value || []) : [];
-    state.events = eventsRes.status === 'fulfilled' ? (eventsRes.value || []) : [];
-    for (const res of results) {
-      if (res.status === 'rejected') showToast(res.reason.message, true);
+    if (!refresh) {
+      const different = state.currentRun?.run_id !== candidate;
+      setView('run', candidate, historyMode);
+      if (different) {
+        state.currentRun = null;
+        state.tasks = []; state.approvals = []; state.artifacts = []; state.events = [];
+        state.renderKeys = {};
+        el('runGoalTitle').textContent = 'Loading run…';
+        el('runStatusBadge').textContent = 'Loading';
+        el('runStatusBadge').className = 'status-badge';
+        el('runProjectName').textContent = '—';
+        el('runIdText').textContent = candidate;
+        for (const id of ['runState', 'stateDuration', 'planRevision', 'taskSummary', 'tokenTotal', 'tokenDetail', 'modelCost']) el(id).textContent = '—';
+        el('dagProgressBar').style.width = '0%';
+        for (const id of ['taskList', 'taskDag', 'approvalList', 'artifactList', 'eventList']) el(id).replaceChildren();
+        el('runFailureBanner')?.remove();
+        el('approvalsTabCount').textContent = ''; el('artifactsTabCount').textContent = '';
+        selectPanel('tasks');
+        el('taskList').innerHTML = '<div class="empty-state">Loading tasks…</div>';
+      }
     }
-
-    // Re-render with full data
-    renderRun(run);
-    setupWebSocket(run.project_id, candidate);
-
-    if (!terminalStates.has(run.state)) {
-      state.pollTimer = window.setTimeout(() => void loadRun(candidate), 3000);
+    state.runId = candidate;
+    el('runLookup').value = candidate;
+    window.clearTimeout(state.pollTimer);
+    state.runRequest?.abort();
+    const request = new AbortController();
+    state.runRequest = request;
+    const current = () => state.runRequest === request && !request.signal.aborted && state.view === 'run' && state.runId === candidate;
+    el('refreshRun').disabled = true;
+    el('dashboard').setAttribute('aria-busy', 'true');
+    feedback('runFeedbackBanner', '');
+    try {
+      const run = await api(`/api/v1/runs/${encodeURIComponent(candidate)}`, { signal: request.signal });
+      if (!current()) return;
+      state.currentRun = run;
+      sessionStorage.setItem('autoswe.runId', candidate);
+      if (!refresh) saveRecentRun(candidate, run.goal);
+      renderRun(run);
+      const resources = ['tasks', 'approvals', 'artifacts', 'events'];
+      const results = await Promise.allSettled(resources.map(resource => api(`/api/v1/runs/${encodeURIComponent(candidate)}/${resource}${resource === 'events' ? '?limit=500' : ''}`, { signal: request.signal })));
+      if (!current()) return;
+      const unavailable = [];
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') state[resources[index]] = resources[index] === 'events'
+          ? mergeEvents(state.events, result.value || []) : result.value || [];
+        else unavailable.push(resources[index]);
+      });
+      renderRun(run);
+      if (unavailable.length) feedback('runFeedbackBanner', `Could not update ${unavailable.join(', ')}. Previously loaded data is kept. Use Refresh to retry.`);
+      setupWebSocket(run.project_id, candidate);
+      if (!terminalStates.has(run.state)) state.pollTimer = window.setTimeout(() => void loadRun(candidate, { refresh: true }), 5000);
+    } catch (error) {
+      if (!current()) return;
+      feedback('runFeedbackBanner', `${error.message} Use Refresh to try again, or return to All runs.`);
+      el('streamStatusText').textContent = 'Update paused';
+      el('liveStreamBadge').classList.remove('live');
+      if (!state.currentRun) {
+        el('runGoalTitle').textContent = 'Run couldn’t be loaded';
+        el('runStatusBadge').textContent = 'Unavailable';
+        el('taskList').innerHTML = '<div class="empty-state">Run data is unavailable.</div>';
+      }
+      if (getToken()) state.pollTimer = window.setTimeout(() => void loadRun(candidate, { refresh: true }), 8000);
+    } finally {
+      if (current()) {
+        el('refreshRun').disabled = false;
+        el('dashboard').setAttribute('aria-busy', 'false');
+        state.runRequest = null;
+      }
     }
   }
 
-  // Live event streaming over the hardened subprotocol-authenticated socket,
-  // with exponential-backoff reconnect while the task stays active.
   let wsRetryDelay = 1000;
-
+  function eventKey(event) { return String(event.event_id || event.id || `${event.created_at}:${event.event_type}:${JSON.stringify(event.payload)}`); }
+  function mergeEvents(previous, incoming) {
+    const records = new Map([...previous, ...incoming].map(event => [eventKey(event), event]));
+    return [...records.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at) || eventKey(b).localeCompare(eventKey(a))).slice(0, 500);
+  }
   function setupWebSocket(projectId, runId) {
-    if (state.ws) {
-      state.ws.close();
-      state.ws = null;
-    }
+    const task = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED');
+    if (task?.id === state.socketTaskId && state.ws) return;
     window.clearTimeout(state.wsReconnectTimer);
-
-    const runningTask = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED');
-    if (!runningTask) {
-      el('streamStatusText').textContent = 'POLLING ACTIVE';
+    if (state.ws) { state.ws.onclose = state.ws.onmessage = state.ws.onopen = state.ws.onerror = null; state.ws.close(); }
+    state.ws = null; state.socketTaskId = null;
+    if (!task || terminalStates.has(state.currentRun?.state)) {
+      el('liveStreamBadge').classList.remove('live');
+      el('streamStatusText').textContent = terminalStates.has(state.currentRun?.state) ? 'Run finished' : 'Auto-updating';
       return;
     }
-
-    const handleEvent = (payload) => {
-      state.events.unshift(payload);
-      renderEvents(state.events);
-    };
-    const handleState = (status) => {
-      if (status === 'open') {
-        wsRetryDelay = 1000;
-        el('liveStreamBadge').classList.add('live');
-        el('streamStatusText').textContent = 'LIVE WEBSOCKET';
-      } else if (status === 'error') {
-        el('liveStreamBadge').classList.remove('live');
-        el('streamStatusText').textContent = 'POLLING FALLBACK';
-      } else if (status === 'close') {
-        state.ws = null;
-        if (!state.runId) return;
-        const stillActive = state.tasks.some(t => t.state === 'RUNNING' || t.state === 'LEASED');
-        if (stillActive && wsRetryDelay <= 8000) {
-          window.setTimeout(() => {
-            if (state.runId === runId) setupWebSocket(projectId, runId);
-          }, wsRetryDelay);
-          wsRetryDelay *= 2;
+    state.socketTaskId = task.id;
+    const valid = () => state.view === 'run' && state.runId === runId && state.socketTaskId === task.id;
+    state.ws = connectTaskSocket(projectId, task.id, {
+      onEvent(payload) {
+        if (!valid()) return;
+        if (state.events.some(event => eventKey(event) === eventKey(payload))) return;
+        state.events = mergeEvents(state.events, [payload]);
+        renderEvents(state.events);
+      },
+      onState(status) {
+        if (!valid()) return;
+        el('liveStreamBadge').classList.toggle('live', status === 'open');
+        if (status === 'open') { wsRetryDelay = 1000; el('streamStatusText').textContent = 'Live updates'; }
+        else el('streamStatusText').textContent = 'Auto-updating';
+        if (status === 'close') {
+          state.ws = null;
+          state.wsReconnectTimer = window.setTimeout(() => { if (valid()) setupWebSocket(projectId, runId); }, wsRetryDelay);
+          wsRetryDelay = Math.min(wsRetryDelay * 2, 8000);
         }
-      }
-    };
-
-    state.ws = connectTaskSocket(projectId, runningTask.id, { onEvent: handleEvent, onState: handleState });
+      },
+    });
   }
 
   // Render Dashboard
   function renderRun(run) {
-    el('onboardingSection').classList.add('hidden');
-    el('dashboard').classList.remove('hidden');
     el('runGoalTitle').textContent = run.goal;
     el('runIdText').textContent = run.run_id;
-    el('runProjectName').textContent = state.projectName || run.project_id.slice(0, 8);
+    el('runProjectName').textContent = run.project_name || run.project_id.slice(0, 8);
     
     // Status Badge
     const statusBadge = el('runStatusBadge');
-    statusBadge.textContent = run.state;
+    statusBadge.textContent = humanState(run.state);
     statusBadge.className = `status-badge ${run.state.toLowerCase()}`;
 
     // Metrics
-    el('runState').textContent = run.state;
+    el('runState').textContent = humanState(run.state);
     el('stateDuration').textContent = `${formatDuration(run.state_duration_seconds)} in current state`;
     el('planRevision').textContent = run.active_plan_revision === null ? 'Planning' : `r${run.active_plan_revision}`;
-    el('taskSummary').textContent = summarizeCounts(run.task_counts);
+    const counts = summarizeCounts(run.task_counts);
+    el('taskSummary').textContent = `${counts.done} / ${counts.total} complete`;
 
     // Calculate Task Progress Fill
     const taskCounts = run.task_counts || {};
@@ -540,72 +583,70 @@ import { initTour } from './js/tour.js';
           <div class="failure-icon">✕</div>
           <div class="failure-body">
             <h4>Planning failed — no tasks were created</h4>
-            <p>The architect's DAG was invalid (unsupported tools / missing final validation). With the 40k budget fix, retrying now usually succeeds — the planner will re-attempt with validation feedback.</p>
+            <p>This run stopped before a task plan was created. Review Activity for recorded errors and check model settings before starting again.</p>
           </div>
-          <button class="button primary" id="retryRunBtn" type="button">Retry with same goal</button>`;
+          <button class="button primary" id="retryRunBtn" type="button">Use this goal</button>`;
         dagPanel.prepend(banner);
         banner.querySelector('#retryRunBtn')?.addEventListener('click', () => {
           el('runGoal').value = run.goal;
-          el('baselineCommit').value = run.baseline_commit;
+          invalidateRepository();
+          el('projectName').value = run.project_name || '';
+          el('sourcePath').value = '';
           showLaunchpad();
           window.scrollTo({ top: 0, behavior: 'smooth' });
-          showToast('Goal restored — hit Launch Mission to retry');
+          showToast('Goal restored. Connect the correct repository before starting.');
         });
       }
     }
 
-    const totalTokens = (run.model_input_tokens || 0) + (run.model_output_tokens || 0);
-    {
-      const tokenEl = el('tokenTotal');
-      const newVal = totalTokens.toLocaleString();
-      if (tokenEl.textContent !== newVal) {
-        tokenEl.textContent = newVal;
-        tokenEl.classList.remove('pulse'); void tokenEl.offsetWidth; tokenEl.classList.add('pulse');
-        window.setTimeout(() => tokenEl.classList.remove('pulse'), 600);
-      }
-    }
-    el('tokenDetail').textContent = `${(run.model_input_tokens || 0).toLocaleString()} in · ${(run.model_output_tokens || 0).toLocaleString()} out`;
-    {
-      const costEl = el('modelCost');
-      const newVal = `$${Number(run.model_cost_usd || 0).toFixed(4)}`;
-      if (costEl.textContent !== newVal) {
-        costEl.textContent = newVal;
-        costEl.classList.remove('pulse'); void costEl.offsetWidth; costEl.classList.add('pulse');
-        window.setTimeout(() => costEl.classList.remove('pulse'), 600);
-      }
-    }
-
-    // --- Live sparkline history (HUD) ---
-    pushLiveSample(run.run_id, {
-      input_tokens: run.model_input_tokens,
-      output_tokens: run.model_output_tokens,
-      cost_usd: run.model_cost_usd,
-      model: '',
+    el('tokenTotal').textContent = ((run.model_input_tokens || 0) + (run.model_output_tokens || 0)).toLocaleString();
+    el('tokenDetail').textContent = `${(run.model_input_tokens || 0).toLocaleString()} input · ${(run.model_output_tokens || 0).toLocaleString()} output`;
+    el('modelCost').textContent = `$${Number(run.model_cost_usd || 0).toFixed(4)}`;
+    const groups = [
+      ['tasks', [run.state, state.tasks], () => { renderTaskList(state.tasks); if (state.taskView === 'graph') renderDAG(state.tasks); }],
+      ['approvals', state.approvals, () => renderApprovals(state.approvals)],
+      ['artifacts', state.artifacts, () => renderArtifacts(state.artifacts, run.project_id)],
+    ];
+    groups.forEach(([key, value, render]) => {
+      const signature = JSON.stringify(value);
+      if (state.renderKeys[key] !== signature) { render(); state.renderKeys[key] = signature; }
     });
-    const hudCostEl = el('costSparkline');
-    const hudTokenEl = el('tokenSparkline');
-    if (hudCostEl || hudTokenEl) {
-      const cached = state.historyCache.get(run.run_id);
-      const doRender = (samples) => {
-        const costSamples = samples.map((s) => ({ cost_usd: s.cost_usd }));
-        const tokenSamples = samples.map((s) => ({ cost_usd: (s.input_tokens || 0) + (s.output_tokens || 0) }));
-        if (hudCostEl) renderSparkline(hudCostEl, costSamples, { width: 100, height: 22, stroke: 'var(--accent-emerald)', fill: 'rgba(16,185,129,0.08)' });
-        if (hudTokenEl) renderSparkline(hudTokenEl, tokenSamples, { width: 100, height: 22, stroke: 'var(--accent-cyan)', fill: 'rgba(6,182,212,0.08)' });
-      };
-      if (cached) {
-        doRender(getLiveHistory(run.run_id, cached));
-      } else {
-        fetchHistory(run.run_id).then((samples) => {
-          state.historyCache.set(run.run_id, samples);
-          doRender(getLiveHistory(run.run_id, samples));
-        });
-      }
-    }
-
-    renderDAG(state.tasks);
-    renderApprovals(state.approvals);
-    renderArtifacts(state.artifacts, run.project_id);
+    el('approvalsTabCount').textContent = state.approvals.filter(a => a.status === 'PENDING').length || '';
+    el('artifactsTabCount').textContent = state.artifacts.length || '';
     renderEvents(state.events);
+  }
+
+  function emptyTasks() {
+    return state.currentRun && !terminalStates.has(state.currentRun.state)
+      ? 'The task plan is being prepared. Tasks will appear here when ready.'
+      : 'No tasks were created for this run.';
+  }
+
+  function renderTaskList(tasks) {
+    const root = el('taskList');
+    if (!tasks.length) { root.innerHTML = `<div class="empty-state">${emptyTasks()}</div>`; return; }
+    root.querySelector('.empty-state')?.remove();
+    const ids = new Set(tasks.map(t => t.id));
+    for (const row of [...root.children]) if (!ids.has(row.dataset.taskId)) row.remove();
+    tasks.forEach((task, index) => {
+      let button = [...root.children].find(row => row.dataset.taskId === task.id);
+      if (!button) {
+        button = document.createElement('button'); button.type = 'button'; button.className = 'task-list-row'; button.dataset.taskId = task.id;
+        button.addEventListener('click', () => { const latest = state.tasks.find(t => t.id === button.dataset.taskId); if (latest) openTaskDrawer(latest); });
+      }
+      const html = `<span class="task-number">${String(index + 1).padStart(2, '0')}</span><span><span class="task-list-name">${escapeHtml(task.title)}</span><span class="task-list-meta">${task.dependencies?.length ? `${task.dependencies.length} prerequisite task(s)` : 'No prerequisites'}</span></span><span class="state-pill tone-${stateTone(task.state)}"><span class="pill-dot"></span>${humanState(task.state)}</span><span class="task-list-type">${humanState(task.task_type)}</span><span aria-hidden="true">›</span>`;
+      if (button.innerHTML !== html) button.innerHTML = html;
+      if (root.children[index] !== button) root.insertBefore(button, root.children[index] || null);
+    });
+  }
+
+  function selectPanel(name) {
+    document.querySelectorAll('[data-panel]').forEach(tab => {
+      const active = tab.dataset.panel === name;
+      tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+      el(`panel-${tab.dataset.panel}`).classList.toggle('hidden', !active);
+    });
+    if (name === 'tasks' && state.taskView === 'graph') renderDAG(state.tasks);
   }
 
   // Topological DAG Layout & Stage Grouping Engine
@@ -618,7 +659,7 @@ import { initTour } from './js/tour.js';
     svg.replaceChildren();
 
     if (!tasks || !tasks.length) {
-      root.innerHTML = '<div class="empty-state"><div class="empty-spinner"></div><p>Architect agent is synthesizing the execution DAG...</p></div>';
+      root.innerHTML = `<div class="empty-state">${emptyTasks()}</div>`;
       return;
     }
 
@@ -657,14 +698,6 @@ import { initTour } from './js/tour.js';
       columns[rank].push(t);
     });
 
-    const levelNames = [
-      'Stage 1: Discovery & Research',
-      'Stage 2: Architecture & Plan',
-      'Stage 3: Implementation',
-      'Stage 4: Verification & Test',
-      'Stage 5: Review & Finalization'
-    ];
-
     // Render Columns & Task Cards
     columns.forEach((columnTasks, levelIdx) => {
       const colEl = document.createElement('div');
@@ -674,7 +707,7 @@ import { initTour } from './js/tour.js';
       colHeader.className = 'dag-column-header';
       
       const titleSpan = document.createElement('span');
-      titleSpan.textContent = levelNames[levelIdx] || `Stage ${levelIdx + 1}`;
+      titleSpan.textContent = `Stage ${levelIdx + 1}`;
       
       const countBadge = document.createElement('span');
       countBadge.className = 'brand-version-pill';
@@ -685,7 +718,8 @@ import { initTour } from './js/tour.js';
       colEl.append(colHeader);
 
       columnTasks.forEach(task => {
-        const node = document.createElement('article');
+        const node = document.createElement('button');
+        node.type = 'button';
         node.className = `task-node ${task.state.toLowerCase()}${isRunningState(task.state) ? ' is-running' : ''}`;
         node.id = `node-${task.id}`;
         node.dataset.taskId = task.id;
@@ -695,11 +729,11 @@ import { initTour } from './js/tour.js';
         
         const typeTag = document.createElement('span');
         typeTag.className = 'task-type-tag';
-        typeTag.textContent = task.task_type;
+        typeTag.textContent = humanState(task.task_type);
 
         const statusPill = document.createElement('span');
         statusPill.className = `status-badge ${task.state.toLowerCase()}`;
-        statusPill.textContent = task.state;
+        statusPill.textContent = humanState(task.state);
         header.append(typeTag, statusPill);
 
         const title = document.createElement('h4');
@@ -709,7 +743,7 @@ import { initTour } from './js/tour.js';
         const meta = document.createElement('div');
         meta.className = 'task-node-meta';
         const depsCount = task.dependencies ? task.dependencies.length : 0;
-        meta.innerHTML = `<span>${task.assigned_capability}</span><span>${depsCount ? `${depsCount} dep${depsCount > 1 ? 's' : ''}` : 'Root'}</span>`;
+        meta.innerHTML = `<span>${escapeHtml(task.assigned_capability)}</span><span>${depsCount ? `${depsCount} dep${depsCount > 1 ? 's' : ''}` : 'Root'}</span>`;
 
         node.append(header, title, meta);
         node.addEventListener('click', () => openTaskDrawer(task));
@@ -767,7 +801,7 @@ import { initTour } from './js/tour.js';
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', pathData);
         path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', isRunning ? 'url(#activeGrad)' : 'rgba(255, 255, 255, 0.15)');
+        path.setAttribute('stroke', isRunning ? 'url(#activeGrad)' : '#b8c7ce');
         path.setAttribute('stroke-width', isRunning ? '2.4' : '1.6');
         path.classList.add(isRunning ? 'live-edge' : 'idle-edge');
         svg.append(path);
@@ -783,7 +817,7 @@ import { initTour } from './js/tour.js';
     el('drawerTaskId').textContent = task.id;
     
     const stateEl = el('drawerTaskState');
-    stateEl.textContent = task.state;
+    stateEl.textContent = humanState(task.state);
     stateEl.className = `state-pill ${task.state.toLowerCase()}`;
 
     el('drawerTaskCapability').textContent = task.assigned_capability;
@@ -791,10 +825,10 @@ import { initTour } from './js/tour.js';
     el('drawerTaskDeps').textContent = task.dependencies && task.dependencies.length ? task.dependencies.join(', ') : 'None (Root)';
     el('drawerTaskRevision').textContent = `r${task.plan_revision}`;
 
-    el('drawerTaskGoal').textContent = task.goal || task.title;
+    el('drawerTaskGoal').textContent = task.description || task.goal || task.title;
 
     // Agent reasoning feed (handoff summaries) for this task.
-    void loadTaskIntel(state.projectId, task.id, el('drawerTaskIntel'));
+    void loadTaskIntel(state.currentRun?.project_id, task.id, el('drawerTaskIntel'));
 
     // Filter events for this task
     const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.id);
@@ -809,14 +843,14 @@ import { initTour } from './js/tour.js';
         item.className = 'timeline-item';
         item.innerHTML = `
           <span class="timeline-time">${new Date(evt.created_at).toLocaleTimeString()}</span>
-          <span class="timeline-event-name">${evt.event_type}</span>
-          <span class="timeline-data">${JSON.stringify(evt.payload)}</span>
+          <span class="timeline-event-name">${escapeHtml(evt.event_type)}</span>
+          <span class="timeline-data">${escapeHtml(JSON.stringify(evt.payload))}</span>
         `;
         eventsContainer.append(item);
       });
     }
 
-    el('taskDrawer').showModal();
+    if (!el('taskDrawer').open) el('taskDrawer').showModal();
   }
 
   // Render Governed Approval Queue
@@ -888,23 +922,34 @@ import { initTour } from './js/tour.js';
   }
 
   // Operator Approval Decision
-  async function decideApproval(approval, approved) {
-    const approver = window.prompt('Enter operator identity for the immutable audit log:');
-    if (!approver || !approver.trim()) return;
+  function decideApproval(approval, approved) {
+    state.approvalDecision = { approval, approved, runId: state.runId, viewEpoch: state.viewEpoch };
+    el('approvalTitle').textContent = approved ? `Approve ${approval.tool_name}?` : `Reject ${approval.tool_name}?`;
+    el('approvalDescription').textContent = `This decision applies only to the exact call ${approval.call_hash.slice(0, 16)}… and is recorded in the audit log.`;
+    el('confirmApproval').textContent = approved ? 'Approve exact call' : 'Reject call';
+    el('confirmApproval').disabled = false;
+    feedback('approvalFeedback', '');
+    el('approvalDialog').showModal();
+  }
 
+  async function submitApproval(event) {
+    event.preventDefault();
+    const decision = state.approvalDecision;
+    const approver = el('approvalOperator').value.trim();
+    if (!decision || !approver || el('confirmApproval').disabled) return;
+    const { approval, approved, runId, viewEpoch } = decision;
+    el('confirmApproval').disabled = true;
     try {
       await api(`/api/v1/approvals/${encodeURIComponent(approval.approval_id)}/decision`, {
-        method: 'POST',
-        body: JSON.stringify({
-          approved,
-          approver: approver.trim(),
-          expected_call_hash: approval.call_hash,
-        }),
+        method: 'POST', body: JSON.stringify({ approved, approver, expected_call_hash: approval.call_hash }),
       });
+      if (state.approvalDecision === decision) el('approvalDialog').close();
       showToast(approved ? 'Tool call approved.' : 'Tool call rejected.');
-      await loadRun(state.runId);
+      if (state.view === 'run' && state.runId === runId && state.viewEpoch === viewEpoch) await loadRun(runId, { refresh: true });
     } catch (error) {
-      showToast(error.message, true);
+      if (state.approvalDecision === decision) feedback('approvalFeedback', error.message);
+    } finally {
+      if (state.approvalDecision === decision) el('confirmApproval').disabled = false;
     }
   }
 
@@ -945,7 +990,10 @@ import { initTour } from './js/tour.js';
       };
 
       item.append(meta, previewBtn);
+      item.tabIndex = 0; item.setAttribute('role', 'button');
+      item.setAttribute('aria-label', `Preview ${art.media_type} file`);
       item.onclick = () => previewArtifact(projectId, art);
+      item.addEventListener('keydown', event => { if (event.target === item && ['Enter', ' '].includes(event.key)) { event.preventDefault(); void previewArtifact(projectId, art); } });
       root.append(item);
     });
   }
@@ -955,16 +1003,21 @@ import { initTour } from './js/tour.js';
     el('modalArtifactType').textContent = artifact.media_type;
     el('modalArtifactTitle').textContent = `Artifact ${artifact.artifact_id.slice(0, 8)}`;
     el('modalArtifactMeta').textContent = `SHA-256: ${artifact.sha256} • Size: ${formatBytes(artifact.size_bytes)}`;
-    el('artifactPreviewCode').textContent = 'Fetching and verifying object content...';
+    state.artifactRequest?.abort();
+    const request = new AbortController();
+    state.artifactRequest = request;
+    const current = () => state.artifactRequest === request && !request.signal.aborted && el('artifactDialog').open;
+    el('artifactPreviewCode').textContent = 'Loading file preview…';
     el('downloadArtifactBtn').onclick = () => downloadArtifact(projectId, artifact);
-    el('artifactDialog').showModal();
+    if (!el('artifactDialog').open) el('artifactDialog').showModal();
 
     try {
       const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal,
       });
       if (!response.ok) throw new Error(`Fetch failed (${response.status})`);
       const text = await response.text();
+      if (!current()) return;
       
       // Syntax-highlight diff additions / deletions
       if (artifact.media_type === 'DIFF' || text.startsWith('diff --git') || text.includes('@@ -')) {
@@ -982,6 +1035,7 @@ import { initTour } from './js/tour.js';
         el('artifactPreviewCode').textContent = text || '(Empty content)';
       }
     } catch (err) {
+      if (!current()) return;
       el('artifactPreviewCode').textContent = `Failed to preview artifact: ${err.message}`;
     }
   }
@@ -1019,70 +1073,33 @@ import { initTour } from './js/tour.js';
       return true;
     });
 
-    // Virtualized rendering for large audit trails (500+ events)
-    const vt = ensureTimelineVirtual();
-    if (vt && filtered.length > 40) {
-      vt.setItems(filtered);
-      // Hover pauses auto-scroll: track via data attribute
-      const container = el('terminalScrollContainer');
-      if (container && !container._virtualHoverBound) {
-        container._virtualHoverBound = true;
-        let paused = false;
-        container.addEventListener('mouseenter', () => { paused = true; container.dataset.paused = '1'; });
-        container.addEventListener('mouseleave', () => { paused = false; container.dataset.paused = '0'; });
-      }
-      return;
-    }
-
-    // Fallback: direct render for small lists (<40) or if virtual not ready
+    const signature = JSON.stringify([state.currentFilter, query, filtered]);
+    if (state.renderKeys.events === signature) return;
+    state.renderKeys.events = signature;
     const root = el('eventList');
-    if (!root) return;
-    // Ensure virtual viewport hidden when falling back
-    if (vt) {
-      const vp = document.querySelector('.virtual-viewport');
-      if (vp) vp.style.display = 'none';
-      root.style.display = '';
-    }
+    const expanded = new Set([...root.querySelectorAll('details[open]')].map(node => node.dataset.eventKey));
     root.replaceChildren();
-    if (!filtered.length) {
-      root.innerHTML = '<li class="timeline-empty">No matching events found in audit trail.</li>';
-      return;
-    }
-    // Show virtual content if previously hidden
-    if (vt) {
-      const vp = document.querySelector('.virtual-viewport');
-      if (vp) vp.style.display = '';
-    }
-    const frag = document.createDocumentFragment();
-    for (const event of filtered) {
-      const item = document.createElement('li');
-      item.className = 'timeline-item';
-      const time = document.createElement('span');
-      time.className = 'timeline-time';
-      time.textContent = new Date(event.created_at).toLocaleTimeString();
-      const name = document.createElement('span');
-      name.className = 'timeline-event-name';
-      name.textContent = event.event_type;
-      const data = document.createElement('span');
-      data.className = 'timeline-data';
-      const raw = JSON.stringify(event.payload);
-      data.textContent = raw.length > 400 ? `${raw.slice(0, 400)}…` : raw;
-      data.title = raw.length > 400 ? 'Click to copy full payload' : '';
-      if (raw.length > 400) {
-        data.style.cursor = 'pointer';
-        data.addEventListener('click', () => {
-          void copyToClipboard(raw);
-          showToast('Payload copied');
-        });
-      }
-      item.append(time, name, data);
-      frag.appendChild(item);
-    }
-    root.appendChild(frag);
+    if (!filtered.length) { root.innerHTML = '<li class="timeline-empty">No matching activity.</li>'; return; }
+    filtered.forEach((event, index) => {
+      const item = document.createElement('li'); item.className = 'timeline-item';
+      const details = document.createElement('details');
+      details.dataset.eventKey = eventKey(event);
+      details.open = expanded.has(details.dataset.eventKey);
+      const summary = document.createElement('summary');
+      const time = document.createElement('time'); time.className = 'timeline-time'; time.textContent = new Date(event.created_at).toLocaleTimeString();
+      const name = document.createElement('span'); name.className = 'timeline-event-name'; name.textContent = event.event_type;
+      summary.append(time, name);
+      const data = document.createElement('pre'); data.textContent = JSON.stringify(event.payload || {}, null, 2);
+      details.append(summary, data); item.append(details); root.append(item);
+    });
   }
 
   // Utility Formatters
   function openModelStudio() {
+    // API tokens are not login passwords; never reuse browser-autofilled values.
+    el('modelApiKey').value = '';
+    el('modelApiKey').type = 'password';
+    el('apiKeyStatusHint').textContent = 'Leave blank to retain a saved key for this endpoint. Changing the endpoint clears the old key.';
     if (state.modelConfig) {
       if (el('modelBaseUrl')) el('modelBaseUrl').value = state.modelConfig.base_url || '';
       if (el('primaryModelInput')) el('primaryModelInput').value = state.modelConfig.primary_model || '';
@@ -1090,13 +1107,12 @@ import { initTour } from './js/tour.js';
       if (el('modelTimeoutInput')) el('modelTimeoutInput').value = state.modelConfig.timeout_seconds || 300;
       if (el('modelTemperatureInput')) el('modelTemperatureInput').value = state.modelConfig.temperature || 0.0;
       if (state.modelConfig.has_api_key && el('apiKeyStatusHint')) {
-        el('apiKeyStatusHint').textContent = `Active Key: ${state.modelConfig.api_key_preview || 'Configured (Masked)'}`;
+        el('apiKeyStatusHint').textContent = 'A key is saved for this endpoint. Leave blank to keep it, or enter a replacement.';
       }
       populateModelDropdowns(state.modelConfig.fallback_models || [], state.modelConfig.primary_model);
     }
     if (el('modelTestCard')) el('modelTestCard').classList.add('hidden');
     if (!el('modelStudioDialog').open) el('modelStudioDialog').showModal();
-    void probeModels(false);
   }
 
   function closeModelStudio() {
@@ -1108,16 +1124,8 @@ import { initTour } from './js/tour.js';
     const model = config.primary_model || 'Unknown';
     const provider = config.provider_name || 'LLM';
     
-    let icon = '⚡';
-    if (provider.includes('OpenAI')) icon = '✨';
-    else if (provider.includes('OpenRouter') || provider.includes('Anthropic')) icon = '🧠';
-    else if (provider.includes('Ollama')) icon = '🦙';
-    else if (provider.includes('DeepSeek')) icon = '🐋';
-
     const topbarText = el('topbarModelName');
-    if (topbarText) {
-      topbarText.textContent = `${icon} ${model}`;
-    }
+    if (topbarText) topbarText.textContent = model;
 
     const providerLabel = el('launchpadProviderLabel');
     if (providerLabel) {
@@ -1126,105 +1134,47 @@ import { initTour } from './js/tour.js';
   }
 
   function populateModelDropdowns(models, selected) {
-    const cleanModels = Array.isArray(models) ? models : [];
-    const all = Array.from(new Set([selected, ...cleanModels, ...DEFAULT_MODELS].filter(Boolean)));
-
-    // 1. Launchpad select
-    const launchpadSelect = el('launchpadModelSelect');
-    if (launchpadSelect) {
-      launchpadSelect.innerHTML = '';
-      if (cleanModels.length) {
-        const groupDiscovered = document.createElement('optgroup');
-        groupDiscovered.label = 'Discovered / Available Models';
-        cleanModels.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = `⚡ ${m}`;
-          if (m === selected) opt.selected = true;
-          groupDiscovered.appendChild(opt);
-        });
-        launchpadSelect.appendChild(groupDiscovered);
-      }
-      const groupStandard = document.createElement('optgroup');
-      groupStandard.label = 'Standard & Frontier Models';
-      DEFAULT_MODELS.forEach(m => {
-        if (!cleanModels.includes(m)) {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          if (m === selected) opt.selected = true;
-          groupStandard.appendChild(opt);
-        }
-      });
-      launchpadSelect.appendChild(groupStandard);
-      if (selected) launchpadSelect.value = selected;
-    }
-
-    // 2. Modal Primary Model select
-    const primarySelect = el('primaryModelSelect');
-    if (primarySelect) {
-      primarySelect.innerHTML = '';
-      all.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        if (m === selected) opt.selected = true;
-        primarySelect.appendChild(opt);
-      });
-      const customOpt = document.createElement('option');
-      customOpt.value = '__custom__';
-      customOpt.textContent = '✏️ Custom Model Name...';
-      primarySelect.appendChild(customOpt);
-      if (selected) primarySelect.value = selected;
-    }
-
-    // 3. Modal Primary Model input text box
-    const primaryInput = el('primaryModelInput');
-    if (primaryInput && selected) {
-      primaryInput.value = selected;
-    }
-
-    // 4. Discovered chips container
-    const chipsContainer = el('discoveredModelsChips');
-    if (chipsContainer) {
-      chipsContainer.innerHTML = '';
-      if (cleanModels.length) {
-        cleanModels.forEach(m => {
-          const chip = document.createElement('button');
-          chip.type = 'button';
-          chip.className = 'preset-chip mini-chip';
-          chip.style.cssText = 'padding: 2px 8px; font-size: 0.72rem; cursor: pointer; border-radius: 12px;';
-          chip.textContent = m;
-          chip.addEventListener('click', () => {
-            if (primaryInput) primaryInput.value = m;
-            if (primarySelect) primarySelect.value = m;
-            if (launchpadSelect) launchpadSelect.value = m;
-            showToast(`Selected model: ${m}`);
-          });
-          chipsContainer.appendChild(chip);
-        });
-      } else {
-        chipsContainer.innerHTML = '<span style="font-size: 0.72rem; color: var(--text-muted);">Click "Discover Models" above to list models</span>';
-      }
-    }
+    const available = [...new Set([selected, ...(Array.isArray(models) ? models : [])].filter(Boolean))];
+    const launch = el('launchpadModelSelect');
+    launch.replaceChildren();
+    const current = document.createElement('option');
+    current.textContent = state.modelConfig?.primary_model || 'Model unavailable — check settings';
+    current.value = state.modelConfig?.primary_model || '';
+    launch.append(current);
+    const primary = el('primaryModelSelect'); primary.replaceChildren();
+    available.forEach(model => { const option = document.createElement('option'); option.value = model; option.textContent = model; primary.append(option); });
+    const custom = document.createElement('option'); custom.value = '__custom__'; custom.textContent = 'Enter a custom model'; primary.append(custom);
+    primary.value = selected || '__custom__';
+    if (selected) el('primaryModelInput').value = selected;
+    const chips = el('discoveredModelsChips'); chips.replaceChildren();
+    available.forEach(model => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'preset-chip'; button.textContent = model;
+      button.addEventListener('click', () => { el('primaryModelInput').value = model; primary.value = model; }); chips.append(button);
+    });
   }
 
   async function loadModelConfig() {
+    const authEpoch = state.authEpoch;
     try {
       const config = await api('/api/v1/models/config');
+      if (authEpoch !== state.authEpoch || !getToken()) return;
       state.modelConfig = config;
       updateModelBadge(config);
       populateModelDropdowns(config.fallback_models || [], config.primary_model);
-      void probeModels(false);
     } catch (_) {
+      if (authEpoch !== state.authEpoch || !getToken()) return;
       const topbarText = el('topbarModelName');
-      if (topbarText) topbarText.textContent = '⚡ Configure Models';
-      populateModelDropdowns([], 'gemma4:12b-mlx');
+      if (topbarText) topbarText.textContent = 'Settings unavailable';
+      populateModelDropdowns([], '');
     }
   }
 
   async function saveModelConfig(event) {
     event.preventDefault();
+    const button = el('modelStudioForm').querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    button.disabled = true;
+    const authEpoch = state.authEpoch;
     const payload = {
       base_url: el('modelBaseUrl').value.trim(),
       api_key: el('modelApiKey').value.trim(),
@@ -1243,13 +1193,16 @@ import { initTour } from './js/tour.js';
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      if (authEpoch !== state.authEpoch || !getToken()) return;
       state.modelConfig = updated;
       updateModelBadge(updated);
       populateModelDropdowns(updated.fallback_models || [], updated.primary_model);
       closeModelStudio();
       showToast(`✓ Active Model: ${updated.primary_model} (${updated.provider_name})`);
     } catch (err) {
-      showToast(err.message, true);
+      if (authEpoch === state.authEpoch && getToken()) showToast(err.message, true);
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -1355,12 +1308,15 @@ import { initTour } from './js/tour.js';
     const model = chip.dataset.model;
     const fallbacks = chip.dataset.fallbacks;
 
-    if (url) el('modelBaseUrl').value = url;
+    el('modelBaseUrl').value = url || '';
+    el('modelApiKey').value = ''; // Never carry credentials to a different provider.
     if (model) {
       el('primaryModelInput').value = model;
       if (el('primaryModelSelect')) el('primaryModelSelect').value = model;
     }
-    if (fallbacks) el('fallbackModelsInput').value = fallbacks;
+    el('fallbackModelsInput').value = fallbacks || '';
+    if (!model) el('primaryModelInput').value = '';
+    populateModelDropdowns([], model || '');
 
     if (chip.dataset.provider === 'ollama') {
       el('modelApiKey').value = '';
@@ -1375,7 +1331,6 @@ import { initTour } from './js/tour.js';
       el('apiKeyStatusHint').textContent = 'Enter your Groq API key (gsk_...).';
     }
 
-    void probeModels(false);
   }
 
   // Model Studio Event Listeners
@@ -1446,30 +1401,6 @@ import { initTour } from './js/tour.js';
     chip.addEventListener('click', () => handleProviderChipClick(chip));
   });
 
-  const launchpadModelSelect = el('launchpadModelSelect');
-  if (launchpadModelSelect) {
-    launchpadModelSelect.addEventListener('change', async (e) => {
-      const selectedModel = e.target.value;
-      if (!selectedModel || !state.modelConfig) return;
-      try {
-        const payload = {
-          ...state.modelConfig,
-          primary_model: selectedModel,
-          api_key: '', // Retain existing secret
-        };
-        const updated = await api('/api/v1/models/config', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-        state.modelConfig = updated;
-        updateModelBadge(updated);
-        showToast(`✓ Active Model switched to: ${selectedModel}`);
-      } catch (err) {
-        showToast(err.message, true);
-      }
-    });
-  }
-
   // Event Search Input
   const eventSearchInput = el('eventSearchInput');
   if (eventSearchInput) {
@@ -1484,65 +1415,49 @@ import { initTour } from './js/tour.js';
   el('closeArtifactModal').addEventListener('click', () => el('artifactDialog').close());
 
   // Timeline Filter Pills
-  el('timelineFilters').addEventListener('click', (e) => {
+    el('timelineFilters').addEventListener('click', (e) => {
     if (e.target.tagName === 'BUTTON') {
-      document.querySelectorAll('#timelineFilters .pill').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('#timelineFilters .pill').forEach(p => { p.classList.remove('active'); p.setAttribute('aria-pressed', 'false'); });
       e.target.classList.add('active');
+      e.target.setAttribute('aria-pressed', 'true');
       state.currentFilter = e.target.dataset.filter || 'ALL';
       renderEvents(state.events);
     }
   });
 
-  // Global Keyboard Shortcuts
-  window.addEventListener('keydown', (e) => {
-    const isInputActive = document.activeElement && 
-      (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA');
-
-    if ((e.key === '/' || (e.key === 'k' && (e.metaKey || e.ctrlKey))) && document.activeElement !== el('runLookup')) {
-      e.preventDefault();
-      el('runLookup').focus();
-      el('runLookup').select();
-    }
-    if (e.key === 'Escape') {
-      if (el('taskDrawer').open) el('taskDrawer').close();
-      if (el('artifactDialog').open) el('artifactDialog').close();
-      if (el('authDialog').open) el('authDialog').close();
-      if (el('modelStudioDialog').open) el('modelStudioDialog').close();
-    }
-    if (!isInputActive) {
-      if (e.key === '1') {
-        document.querySelectorAll('#timelineFilters .pill')[0]?.click();
-      } else if (e.key === '2') {
-        document.querySelectorAll('#timelineFilters .pill')[1]?.click();
-      } else if (e.key === '3') {
-        document.querySelectorAll('#timelineFilters .pill')[2]?.click();
-      } else if (e.key === '4') {
-        document.querySelectorAll('#timelineFilters .pill')[3]?.click();
-      }
-    }
-  });
-
   window.addEventListener('resize', () => {
-    if (state.tasks.length) drawDAGConnectors(state.tasks);
+    if (state.view === 'run' && state.taskView === 'graph') drawDAGConnectors(state.tasks);
   });
 
   // Event Listeners & Binding
   el('openAuth').addEventListener('click', openAuth);
 
   el('clearToken').addEventListener('click', () => {
+    state.authEpoch += 1;
+    invalidateRepository();
     clearToken();
     el('adminToken').value = '';
-    el('authBtnText').textContent = 'Admin Access';
+    el('authBtnText').textContent = 'Connect workspace';
+    stopRunUpdates(); resetRunsBrowser();
+    state.tasks = []; state.events = []; state.currentRun = null; state.runId = '';
+    state.modelConfig = null; populateModelDropdowns([], '');
+    el('topbarModelName').textContent = 'Connect to configure';
+    backToRuns();
     showToast('Session token cleared.');
     closeAuth();
   });
 
-  el('authForm').addEventListener('submit', () => {
+  el('authForm').addEventListener('submit', event => {
+    event.preventDefault();
+    state.authEpoch += 1;
+    state.repositoryVersion += 1;
     setToken(el('adminToken').value.trim());
-    el('authBtnText').textContent = 'Admin Connected';
+    el('authBtnText').textContent = 'Workspace access';
     showToast('Admin token saved for this session.');
     closeAuth();
-    if (state.runId) void loadRun(state.runId);
+    void loadModelConfig();
+    if (state.view === 'run') void loadRun(state.runId, { refresh: true });
+    else if (state.view === 'runs') showRunsBrowser();
   });
 
   el('browseFolderBtn').addEventListener('click', selectDirectory);
@@ -1555,7 +1470,7 @@ import { initTour } from './js/tour.js';
     void loadRun(el('runLookup').value);
   });
 
-  el('refreshRun').addEventListener('click', () => void loadRun(state.runId));
+  el('refreshRun').addEventListener('click', () => void loadRun(state.runId, { refresh: true }));
 
   el('copyRunId').addEventListener('click', async () => {
     if (!state.runId) return;
@@ -1598,15 +1513,6 @@ import { initTour } from './js/tour.js';
     });
   });
 
-  // Fill Sample SHA Helper Button
-  const fillSampleShaBtn = el('fillSampleSha');
-  if (fillSampleShaBtn) {
-    fillSampleShaBtn.addEventListener('click', () => {
-      el('baselineCommit').value = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
-      showToast('Filled sample commit SHA.');
-    });
-  }
-
   // Clear Recent Runs Button
   const clearRecentBtn = el('clearRecentRuns');
   if (clearRecentBtn) {
@@ -1618,27 +1524,15 @@ import { initTour } from './js/tour.js';
   }
 
   // View router: Runs Browser <-> Mission Console <-> Launchpad.
-  function showLaunchpad() {
-    hideRunsBrowser();
-    el('dashboard')?.classList.add('hidden');
-    el('launchpadSection')?.classList.remove('hidden');
-    document.querySelectorAll('[data-nav]').forEach((tab) => {
-      tab.classList.toggle('active', tab.dataset.nav === 'new');
-    });
-  }
-
-  function backToRuns() {
-    el('dashboard')?.classList.add('hidden');
-    el('launchpadSection')?.classList.add('hidden');
-    showRunsBrowser();
-  }
+  function showLaunchpad() { setView('new'); }
+  function backToRuns() { setView('runs'); }
 
   function paletteActions() {
     const items = [
-      { id: 'runs', title: 'Go to Runs Browser', icon: '▦', hint: 'overview', keywords: 'runs list missions browse', run: backToRuns },
-      { id: 'new', title: 'New Mission', icon: '＋', hint: 'launch', keywords: 'new run launch start goal create', run: showLaunchpad },
+      { id: 'runs', title: 'Go to all runs', icon: '▦', hint: 'overview', keywords: 'runs list missions browse', run: backToRuns },
+      { id: 'new', title: 'New run', icon: '＋', hint: 'launch', keywords: 'new run launch start goal create', run: showLaunchpad },
     ];
-    if (state.runId) {
+    if (state.view === 'run' && state.currentRun) {
       items.push({
         id: 'copyRun',
         title: 'Copy Run ID',
@@ -1658,6 +1552,8 @@ import { initTour } from './js/tour.js';
         keywords: 'cancel abort stop mission',
         run: async () => {
           try {
+            if (terminalStates.has(state.currentRun?.state)) { showToast('This run has already finished.'); return; }
+            if (!window.confirm('Cancel this run? Active work will stop. This cannot be undone.')) return;
             await api(`/api/v1/runs/${encodeURIComponent(state.runId)}/cancel`, { method: 'POST' });
             showToast('Cancellation requested — workers will wind down.');
           } catch (error) {
@@ -1665,7 +1561,7 @@ import { initTour } from './js/tour.js';
           }
         },
       });
-      if (state.projectId && state.tasks.length) {
+      if (state.currentRun?.project_id && state.tasks.length) {
         items.push({
           id: 'intel',
           title: 'Jump to Latest Task Reasoning',
@@ -1681,12 +1577,12 @@ import { initTour } from './js/tour.js';
     }
     for (const recent of getRecentRuns()) {
       items.push({
-        id: `run:${recent.runId}`,
-        title: `Open ${recent.goal || recent.runId}`.slice(0, 80),
+        id: `run:${recent.id}`,
+        title: `Open ${recent.goal || recent.id}`.slice(0, 80),
         icon: '▸',
-        hint: recent.runId.slice(0, 8),
-        keywords: `open run mission ${recent.runId}`,
-        run: () => { void loadRun(recent.runId); },
+        hint: recent.id.slice(0, 8),
+        keywords: `open run mission ${recent.id}`,
+        run: () => { void loadRun(recent.id); },
       });
     }
     items.push({
@@ -1710,23 +1606,66 @@ import { initTour } from './js/tour.js';
     });
   });
 
-  // Global fallback for inline card handlers (survives module load failures)
-  window.__openRun = (runId) => { void loadRun(runId); };
-
-  // Bootstrap
-  el('runsNewBtn')?.addEventListener('click', showLaunchpad);
-  initPalette(paletteActions);
-  setUnauthorizedHandler(openAuth);
-  initRunsBrowser({
-    onOpenRun: (runId) => { void loadRun(runId); },
-    onNewRun: showLaunchpad,
+  // One handler per action; native dialogs retain focus and Escape behavior.
+  document.querySelector('.skip-link').addEventListener('click', event => {
+    event.preventDefault();
+    el('mainContent').focus({ preventScroll: true });
+    el('mainContent').scrollIntoView({ block: 'start' });
   });
+  el('openCommandPalette').addEventListener('click', openPalette);
+  el('backToRuns').addEventListener('click', backToRuns);
+  el('closeAuth').addEventListener('click', closeAuth);
+  el('approvalForm').addEventListener('submit', submitApproval);
+  el('closeApproval').addEventListener('click', () => el('approvalDialog').close());
+  el('approvalDialog').addEventListener('close', () => { state.approvalDecision = null; });
+  el('artifactDialog').addEventListener('close', () => { state.artifactRequest?.abort(); state.artifactRequest = null; });
+  el('taskDrawer').addEventListener('close', () => clearTaskIntel(el('drawerTaskIntel')));
+  for (const id of ['projectName', 'sourcePath', 'defaultBranch']) el(id).addEventListener('input', invalidateRepository);
+  el('baselineCommit').addEventListener('invalid', () => { el('baselineCommit').closest('details').open = true; });
+  document.querySelectorAll('[data-panel]').forEach(tab => {
+    tab.addEventListener('click', () => selectPanel(tab.dataset.panel));
+    tab.addEventListener('keydown', event => {
+      const tabs = [...document.querySelectorAll('[data-panel]')];
+      let index = tabs.indexOf(tab);
+      if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') index = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = tabs.length - 1;
+      else return;
+      event.preventDefault(); selectPanel(tabs[index].dataset.panel); tabs[index].focus();
+    });
+  });
+  for (const [id, view] of [['taskListView', 'list'], ['taskGraphView', 'graph']]) el(id).addEventListener('click', () => {
+    state.taskView = view;
+    el('taskList').classList.toggle('hidden', view !== 'list');
+    el('dagViewport').classList.toggle('hidden', view !== 'graph');
+    el('taskListView').setAttribute('aria-pressed', String(view === 'list'));
+    el('taskGraphView').setAttribute('aria-pressed', String(view === 'graph'));
+    if (view === 'graph') renderDAG(state.tasks);
+  });
+  function restoreRoute() {
+    const hash = window.location.hash;
+    if (hash.startsWith('#run/')) {
+      let id;
+      try { id = decodeURIComponent(hash.slice(5)); } catch (_) { setView('runs', '', 'replace'); return; }
+      void loadRun(id, { historyMode: 'none' });
+    } else setView(hash === '#new' ? 'new' : 'runs', '', 'none');
+  }
+  window.addEventListener('popstate', restoreRoute);
+  window.addEventListener('hashchange', () => {
+    const expected = state.view === 'run' ? `#run/${encodeURIComponent(state.runId)}` : `#${state.view}`;
+    if (window.location.hash !== expected) restoreRoute();
+  });
+  el('runsNewBtn').addEventListener('click', showLaunchpad);
+  initPalette(paletteActions);
+  setUnauthorizedHandler(() => {
+    el('authBtnText').textContent = 'Connect workspace';
+  });
+  initRunsBrowser({ onOpenRun: runId => void loadRun(runId), onNewRun: showLaunchpad, onConnect: openAuth });
   initTour();
   void checkHealth();
-  window.setInterval(checkHealth, 15000);
+  window.setInterval(checkHealth, 30000);
   restoreIdentity();
-  void loadModelConfig();
-  if (!state.runId) {
-    backToRuns();
-  }
+  if (getToken()) void loadModelConfig();
+  restoreRoute();
 })();

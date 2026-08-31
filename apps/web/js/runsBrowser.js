@@ -1,265 +1,174 @@
-// Runs Browser: cross-project run overview with live status pills.
+import { api, getToken } from './api.js?v=20260831-clean-ui';
+import { el, escapeHtml, summarizeCounts, stateTone, timeAgo, formatCost, humanState } from './util.js?v=20260831-clean-ui';
 
-import { api } from './api.js';
-import { el, escapeHtml, summarizeCounts, stateTone, timeAgo, formatCost, relativeTimeShort } from './util.js';
-import { showToast } from './toast.js';
-import { renderSparkline, fetchHistory } from './sparkline.js';
-
-const FILTERS = [
-  { id: 'ALL', label: 'All' },
-  { id: 'ACTIVE', label: 'Active' },
-  { id: 'COMPLETED', label: 'Completed' },
-  { failed: true, id: 'FAILED', label: 'Failed' },
-];
-
-const ACTIVE_STATES = new Set(['PENDING', 'PLANNING', 'EXECUTING', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_MEMORY']);
-
-let currentFilter = 'ALL';
-let searchQuery = '';
+const FILTERS = [['ALL', 'All'], ['ACTIVE', 'Active'], ['COMPLETED', 'Completed'], ['FAILED', 'Failed'], ['CANCELLED', 'Cancelled']];
+const ACTIVE = new Set(['PENDING', 'PLANNING', 'EXECUTING', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_MEMORY']);
+let filter = 'ALL';
+let query = '';
 let rows = [];
-let pollTimer = null;
+let loaded = false;
 let visible = false;
-let hooks = { onOpenRun: () => {}, onNewRun: () => {} };
+let timer;
+let request;
+let hooks = {};
+const cards = new Map();
 
 function matches(run) {
-  if (currentFilter === 'ACTIVE' && !ACTIVE_STATES.has(run.state)) return false;
-  if (currentFilter === 'COMPLETED' && run.state !== 'COMPLETED') return false;
-  if (currentFilter === 'FAILED' && run.state !== 'FAILED') return false;
-  if (searchQuery) {
-    const needle = searchQuery.toLowerCase();
-    const haystack = `${run.goal} ${run.project_name || ''} ${run.run_id}`.toLowerCase();
-    if (!haystack.includes(needle)) return false;
-  }
-  return true;
+  if (filter === 'ACTIVE' && !ACTIVE.has(run.state)) return false;
+  if (filter !== 'ALL' && filter !== 'ACTIVE' && run.state !== filter) return false;
+  return `${run.goal} ${run.project_name || ''} ${run.run_id}`.toLowerCase().includes(query.toLowerCase());
 }
-
-function progressFor(run) {
+function rowContents(run) {
   const counts = summarizeCounts(run.task_counts);
-  if (!counts.total) return { pct: 0, label: 'planning' };
-  const pct = Math.round((counts.done / counts.total) * 100);
-  return { pct, label: `${counts.done}/${counts.total} tasks` };
+  const pct = counts.total ? Math.round(counts.done / counts.total * 100) : 0;
+  const project = run.project_name || `Project ${run.project_id?.slice(0, 8) || ''}`;
+  const progress = counts.total ? `${counts.done} / ${counts.total}` : run.state === 'PLANNING' ? 'Planning' : 'No tasks';
+  return `<div class="run-description"><span class="run-name">${escapeHtml(run.goal)}</span><span class="run-project"><span class="project-mark" aria-hidden="true">${escapeHtml(project[0])}</span>${escapeHtml(project)}</span></div>
+    <span class="state-pill tone-${stateTone(run.state)}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(humanState(run.state))}</span>
+    <div class="run-task-progress" aria-label="${counts.done} of ${counts.total} tasks complete">${progress}<div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div></div>
+    <span class="run-cost">${formatCost(run.model_cost_usd)}</span><time class="run-time" datetime="${escapeHtml(run.created_at)}" title="${escapeHtml(new Date(run.created_at).toLocaleString())}">${timeAgo(run.created_at)}</time>`;
 }
-
-function cardHtml(run) {
-  const tone = stateTone(run.state);
-  const progress = progressFor(run);
-  const active = ACTIVE_STATES.has(run.state);
-  return `
-    <article class="run-card" data-run-id="${escapeHtml(run.run_id)}" tabindex="0" role="button"
-             aria-label="Open run ${escapeHtml(run.goal)}" onclick="window.__openRun && window.__openRun('${escapeHtml(run.run_id)}')">
-      <header class="run-card-head">
-        <span class="state-pill tone-${tone}${active ? ' pulse' : ''}">
-          <span class="pill-dot"></span>${escapeHtml(run.state)}
-        </span>
-        <span class="run-card-time" title="${escapeHtml(run.created_at)}">${timeAgo(run.created_at)}</span>
-      </header>
-      <h3 class="run-card-goal">${escapeHtml(run.goal.length > 140 ? `${run.goal.slice(0, 140)}…` : run.goal)}</h3>
-      <div class="run-card-meta">
-        <span class="meta-chip" title="Project">${escapeHtml(run.project_name || 'Project')}</span>
-        <span class="meta-chip mono">rev ${escapeHtml(String(run.active_plan_revision ?? '—'))}</span>
-        <span class="meta-chip mono">${escapeHtml(relativeTimeShort(run.created_at))} old</span>
-      </div>
-      <div class="run-card-progress">
-        <div class="progress-track"><div class="progress-fill tone-${tone}" style="width:${progress.pct}%"></div></div>
-        <span class="progress-label">${progress.label}</span>
-      </div>
-      <div class="run-sparkline" data-run-id="${escapeHtml(run.run_id)}" title="Cost history"></div>
-      <footer class="run-card-foot">
-        <span class="foot-stat" title="Model tokens">
-          <span class="foot-icon">◈</span>${(run.model_input_tokens + run.model_output_tokens).toLocaleString()}
-        </span>
-        <span class="foot-stat" title="Cost">
-          <span class="foot-icon">$</span>${formatCost(run.model_cost_usd)}
-        </span>
-        <span class="foot-stat fail-stat${run.task_counts.FAILED ? ' has-fails' : ''}" title="Failed tasks">
-          <span class="foot-icon">⚑</span>${Number(run.task_counts.FAILED || 0)}
-        </span>
-        <button class="run-open-btn" type="button" data-run-id="${escapeHtml(run.run_id)}">Open →</button>
-      </footer>
-    </article>`;
-}
-
-function renderHero() {
-  const hero = el('runsHero');
-  if (!hero) return;
-  const active = rows.find((r) => ACTIVE_STATES.has(r.state));
-  if (!active) {
-    hero.classList.add('hidden');
-    hero.innerHTML = '';
-    return;
-  }
-  hero.classList.remove('hidden');
-  const prog = progressFor(active);
-  hero.innerHTML = `
-    <div class="runs-hero-card">
-      <span class="runs-hero-label"><i></i> Active Mission</span>
-      <h3 class="runs-hero-goal">${escapeHtml(active.goal.slice(0, 160))}</h3>
-      <div class="runs-hero-meta">
-        <span class="meta-chip">${escapeHtml(active.project_name || 'Project')}</span>
-        <span class="meta-chip mono">${escapeHtml(active.state)}</span>
-        <span class="meta-chip mono">${escapeHtml(timeAgo(active.created_at))}</span>
-      </div>
-      <div class="run-card-progress" style="margin-top:10px">
-        <div class="progress-track"><div class="progress-fill tone-${stateTone(active.state)}" style="width:${prog.pct}%"></div></div>
-        <span class="progress-label">${prog.label}</span>
-      </div>
-    </div>
-    <div class="runs-hero-card" style="display:flex;flex-direction:column;justify-content:center;gap:10px">
-      <div class="hud-header"><span class="hud-label">Live Fleet</span><span class="hud-icon">◈</span></div>
-      <div style="display:flex;gap:18px">
-        <div><div class="hud-main-val" style="font-size:1.4rem">${rows.filter((r) => ACTIVE_STATES.has(r.state)).length}</div><div class="hud-subtext">active</div></div>
-        <div><div class="hud-main-val" style="font-size:1.4rem">${rows.length}</div><div class="hud-subtext">total runs</div></div>
-        <div><div class="hud-main-val text-emerald" style="font-size:1.15rem">${formatCost(rows.reduce((s, r) => s + Number(r.model_cost_usd || 0), 0))}</div><div class="hud-subtext">fleet cost</div></div>
-      </div>
-    </div>`;
-}
-
-function renderTicker() {
-  const ticker = el('liveTicker');
-  const track = el('liveTickerTrack');
-  if (!ticker || !track) return;
-  if (!rows.length) { ticker.classList.add('hidden'); return; }
-  ticker.classList.remove('hidden');
-  const activeCount = rows.filter((r) => ACTIVE_STATES.has(r.state)).length;
-  const totalCost = formatCost(rows.reduce((s, r) => s + Number(r.model_cost_usd || 0), 0));
-  const segs = [
-    `${rows.length} missions`,
-    `${activeCount} active`,
-    `fleet cost ${totalCost}`,
-    `${rows.filter((r) => r.state === 'COMPLETED').length} shipped`,
-    `${rows.filter((r) => r.state === 'FAILED').length} failed`,
+function summary() {
+  const stats = [
+    ['Total runs', rows.length, 'Across your projects'],
+    ['In progress', rows.filter(r => ACTIVE.has(r.state)).length, 'Planning or executing'],
+    ['Completed', rows.filter(r => r.state === 'COMPLETED').length, 'Work finished'],
+    ['Needs attention', rows.filter(r => ['FAILED', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_MEMORY'].includes(r.state)).length, 'Failures or waiting for action'],
   ];
-  const html = segs.map((s) => `<span>● ${escapeHtml(s)}</span>`).join('');
-  track.innerHTML = html + html; // doubled for seamless loop
+  const html = stats.map(([label, value, detail]) => `<div class="summary-stat"><span class="summary-stat-label">${label}</span><strong class="summary-stat-value">${value}</strong><p class="summary-stat-detail">${detail}</p></div>`).join('');
+  if (el('runsSummary').innerHTML !== html) el('runsSummary').innerHTML = html;
 }
-
+function empty(title, message, action, label) {
+  const grid = el('runsGrid');
+  grid.innerHTML = `<div class="runs-empty"><div class="empty-glyph" aria-hidden="true">▤</div><h2>${title}</h2><p>${message}</p><button type="button" class="button primary" data-action="${action}">${label}</button></div>`;
+}
 function render() {
   const grid = el('runsGrid');
-  if (!grid) return;
+  summary();
+  if (!getToken()) {
+    el('runsCountLabel').textContent = 'Connect to see your runs';
+    empty('Your workspace, in one place', 'Connect with your admin token to see existing work and start a new run.', 'connect', 'Connect workspace');
+    return;
+  }
+  if (!loaded) return;
   const filtered = rows.filter(matches);
-  el('runsCountLabel').textContent = `${filtered.length} run${filtered.length === 1 ? '' : 's'}`;
-  renderHero();
-  renderTicker();
-
+  el('runsCountLabel').textContent = `${filtered.length} of ${rows.length} loaded runs${rows.length === 100 ? ' · showing the latest 100' : ''}`;
   if (!rows.length) {
-    grid.innerHTML = `
-      <div class="runs-empty">
-        <div class="empty-glyph">◇</div>
-        <h3>No engineering runs yet</h3>
-        <p>Launch your first mission from the console — AutoSWE plans a typed task DAG,
-           executes it with governed agents, and ships only verified work.</p>
-        <button class="button primary" id="runsEmptyCta" type="button">＋ New Mission</button>
-      </div>`;
-    el('runsEmptyCta')?.addEventListener('click', () => hooks.onNewRun());
+    empty('Ready for your first run?', 'Connect a repository and describe a change. You can follow its progress here.', 'new', 'Create a run');
     return;
   }
-
   if (!filtered.length) {
-    grid.innerHTML = `<div class="runs-empty slim"><div class="empty-glyph">∅</div><p>No runs match this filter.</p></div>`;
+    empty('No matching runs', 'Try another search or clear the filters to see all your runs.', 'clear', 'Clear filters');
     return;
   }
-
-  grid.innerHTML = filtered.map(cardHtml).join('');
-  // Lazy sparkline hydration — IntersectionObserver avoids thundering herd
-  const sparklines = grid.querySelectorAll('.run-sparkline[data-run-id]');
-  if ('IntersectionObserver' in window) {
-    const io = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const el2 = entry.target;
-        io.unobserve(el2);
-        const rid = el2.getAttribute('data-run-id');
-        fetchHistory(rid).then((samples) => renderSparkline(el2, samples, { width: 110, height: 26 }));
-      }
-    }, { rootMargin: '100px' });
-    sparklines.forEach((el2) => io.observe(el2));
-  } else {
-    sparklines.forEach((el2) => {
-      fetchHistory(el2.getAttribute('data-run-id')).then((samples) => renderSparkline(el2, samples, { width: 110, height: 26 }));
-    });
-  }
+  grid.querySelector('.runs-empty, .empty-state')?.remove();
+  const keep = new Set(filtered.map(r => r.run_id));
+  for (const child of [...grid.children]) if (!keep.has(child.dataset.rowId)) child.remove();
+  filtered.forEach((run, index) => {
+    let item = cards.get(run.run_id);
+    if (!item) {
+      item = document.createElement('div');
+      item.setAttribute('role', 'listitem');
+      item.dataset.rowId = run.run_id;
+      const link = document.createElement('a');
+      link.className = 'run-row';
+      link.href = `#run/${encodeURIComponent(run.run_id)}`;
+      link.dataset.runId = run.run_id;
+      item.append(link);
+      cards.set(run.run_id, item);
+    }
+    const link = item.firstElementChild;
+    const html = rowContents(run);
+    if (link.innerHTML !== html) link.innerHTML = html;
+    link.setAttribute('aria-label', `Open run: ${run.goal}`);
+    if (grid.children[index] !== item) grid.insertBefore(item, grid.children[index] || null);
+  });
+  for (const id of cards.keys()) if (!rows.some(r => r.run_id === id)) cards.delete(id);
 }
-
-async function refresh({ silent = false } = {}) {
+function selectFilter(value) {
+  filter = value;
+  el('runsFilters').querySelectorAll('button').forEach(button => {
+    const selected = button.dataset.filter === filter;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+}
+async function refresh() {
+  if (!visible) return;
+  if (!getToken()) { render(); return; }
+  request?.abort();
+  const current = new AbortController();
+  request = current;
+  el('runsRefresh').disabled = true;
+  el('runsGrid').setAttribute('aria-busy', 'true');
   try {
-    rows = await api('/api/v1/runs?limit=100');
+    const data = await api('/api/v1/runs?limit=100', { signal: current.signal });
+    if (request !== current || !visible || current.signal.aborted) return;
+    rows = data || [];
+    loaded = true;
+    el('runsFeedback').classList.add('hidden');
     render();
   } catch (error) {
-    if (!silent) showToast(error.message, true);
+    if (current.signal.aborted || request !== current || !visible) return;
+    el('runsFeedback').textContent = `Could not refresh runs. ${error.message} Use Refresh to try again.`;
+    el('runsFeedback').classList.remove('hidden');
+    if (!loaded) empty('Runs couldn’t be loaded', 'Check your connection and workspace access, then try again.', 'retry', 'Try again');
+  } finally {
+    if (request === current) {
+      request = null;
+      el('runsRefresh').disabled = false;
+      el('runsGrid').setAttribute('aria-busy', 'false');
+      schedule();
+    }
   }
 }
-
-function schedulePoll() {
-  window.clearTimeout(pollTimer);
-  if (!visible) return;
-  pollTimer = window.setTimeout(async () => {
-    if (visible) await refresh({ silent: true });
-    schedulePoll();
-  }, 4000);
+function schedule() {
+  window.clearTimeout(timer);
+  if (visible && getToken()) timer = window.setTimeout(() => {
+    if (document.hidden) schedule();
+    else void refresh();
+  }, 5000);
 }
-
-export function initRunsBrowser(options = {}) {
-  hooks = { ...hooks, ...options };
-  const bar = el('runsFilters');
-  if (bar) {
-    bar.innerHTML = FILTERS.map(
-      (filter) =>
-        `<button type="button" class="filter-chip${filter.id === currentFilter ? ' active' : ''}" data-filter="${filter.id}">${filter.label}</button>`
-    ).join('');
-    bar.querySelectorAll('.filter-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        currentFilter = chip.dataset.filter;
-        bar.querySelectorAll('.filter-chip').forEach((other) => other.classList.toggle('active', other === chip));
-        render();
-      });
-    });
-  }
-  el('runsSearch')?.addEventListener('input', (event) => {
-    searchQuery = event.target.value.trim();
-    render();
+export function initRunsBrowser(options) {
+  hooks = options;
+  el('runsFilters').innerHTML = FILTERS.map(([id, label]) => `<button class="filter-chip${id === filter ? ' active' : ''}" type="button" data-filter="${id}" aria-pressed="${id === filter}">${label}</button>`).join('');
+  el('runsFilters').addEventListener('click', event => {
+    const button = event.target.closest('[data-filter]');
+    if (button) { selectFilter(button.dataset.filter); render(); }
   });
-  el('runsRefresh')?.addEventListener('click', () => void refresh());
-  // Delegated open — works for cards added after render, and for the inner Open button
-  const gridEl = el('runsGrid');
-  if (gridEl && !gridEl._openBound) {
-    gridEl._openBound = true;
-    gridEl.addEventListener('click', (event) => {
-      const btn = event.target.closest('.run-open-btn');
-      if (btn && btn.dataset.runId) {
-        event.preventDefault();
-        hooks.onOpenRun(btn.dataset.runId);
-        return;
-      }
-      const card = event.target.closest('.run-card');
-      if (card && card.dataset.runId) {
-        hooks.onOpenRun(card.dataset.runId);
-      }
-    });
-    gridEl.addEventListener('keydown', (event) => {
-      const card = event.target.closest('.run-card');
-      if (!card || !card.dataset.runId) return;
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        hooks.onOpenRun(card.dataset.runId);
-      }
-    });
-  }
+  el('runsSearch').addEventListener('input', event => { query = event.target.value.trim(); render(); });
+  el('runsRefresh').addEventListener('click', () => void refresh());
+  el('runsGrid').addEventListener('click', event => {
+    const link = event.target.closest('[data-run-id]');
+    if (link) {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      hooks.onOpenRun(link.dataset.runId);
+      return;
+    }
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    if (action === 'connect') hooks.onConnect();
+    if (action === 'new') hooks.onNewRun();
+    if (action === 'retry') void refresh();
+    if (action === 'clear') { selectFilter('ALL'); query = ''; el('runsSearch').value = ''; render(); }
+  });
 }
-
 export function showRunsBrowser() {
   visible = true;
-  el('runsBrowserSection')?.classList.remove('hidden');
-  el('dashboard')?.classList.add('hidden');
-  el('launchpadSection')?.classList.add('hidden');
-  document.querySelectorAll('[data-nav]').forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.nav === 'runs');
-  });
+  render();
   void refresh();
-  schedulePoll();
 }
-
 export function hideRunsBrowser() {
   visible = false;
-  window.clearTimeout(pollTimer);
-  el('runsBrowserSection')?.classList.add('hidden');
+  window.clearTimeout(timer);
+  request?.abort();
+  request = null;
+  el('runsRefresh').disabled = false;
+  el('runsGrid').setAttribute('aria-busy', 'false');
+}
+export function resetRunsBrowser() {
+  hideRunsBrowser();
+  rows = []; loaded = false; cards.clear();
+  el('runsGrid').replaceChildren();
+  el('runsFeedback').classList.add('hidden');
 }

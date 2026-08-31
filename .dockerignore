@@ -1,0 +1,12 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+.pytest_cache
+.env
+runtime
+data
+logs
+artifacts
+.worktrees
+.compose-test-runtime

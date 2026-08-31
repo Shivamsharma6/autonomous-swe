@@ -1,6 +1,6 @@
 // Stacked toast notifications with severity styling.
 
-import { el } from './util.js';
+import { el } from './util.js?v=20260831-clean-ui';
 
 let host = null;
 

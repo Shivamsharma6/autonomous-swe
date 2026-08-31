@@ -55,6 +55,8 @@ export function stateTone(state) {
     case 'COMPLETED': return 'completed';
     case 'FAILED': return 'failed';
     case 'RUNNING': return 'running';
+    case 'EXECUTING': return 'running';
+    case 'PLANNING': return 'running';
     case 'LEASED': return 'running';
     case 'READY': return 'ready';
     case 'WAITING_FOR_APPROVAL': return 'warning';
@@ -62,6 +64,11 @@ export function stateTone(state) {
     case 'CANCELLED': return 'cancelled';
     default: return 'pending';
   }
+}
+
+export function humanState(state) {
+  const names = { WAITING_FOR_APPROVAL: 'Needs approval', WAITING_FOR_MEMORY: 'Waiting for memory', EXECUTING: 'In progress', PLANNING: 'Planning', LEASED: 'Starting' };
+  return names[state] || String(state || 'Unknown').toLowerCase().replaceAll('_', ' ').replace(/^./, c => c.toUpperCase());
 }
 
 export function relativeTimeShort(iso) {

@@ -48,7 +48,7 @@ export function renderSparkline(container, samples, opts = {}) {
 export async function fetchHistory(runId) {
   if (!runId) return [];
   try {
-    const { api } = await import('./api.js');
+    const { api } = await import('./api.js?v=20260831-clean-ui');
     const data = await api(`/api/v1/runs/${encodeURIComponent(runId)}/history?limit=200`);
     return data.samples || [];
   } catch (_) {

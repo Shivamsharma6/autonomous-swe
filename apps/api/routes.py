@@ -164,11 +164,15 @@ async def update_model_config(
     request: ModelConfigRequest,
     services: Services,
 ) -> ModelConfigResponse:
-    services.settings.model_base_url = _normalize_backend_url(request.base_url)
+    endpoint = _normalize_backend_url(request.base_url)
+    provider_changed = endpoint != _normalize_backend_url(services.settings.model_base_url)
+    services.settings.model_base_url = endpoint
     services.settings.model_primary = request.primary_model
     services.settings.model_fallbacks = request.fallback_models
     services.settings.model_timeout_seconds = request.timeout_seconds
-    if request.api_key:
+    # A blank key preserves credentials only for the same endpoint. Never send a
+    # previously saved provider's secret to a newly selected endpoint.
+    if request.api_key or provider_changed:
         services.settings.model_api_key = SecretStr(request.api_key)
     provider = _detect_provider(services.settings.model_base_url)
     api_key_str = services.settings.model_api_key.get_secret_value()

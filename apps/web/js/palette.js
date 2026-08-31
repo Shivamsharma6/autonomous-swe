@@ -1,6 +1,6 @@
 // Keyboard-first command palette (⌘K / /): fuzzy actions, runs, projects.
 
-import { el, escapeHtml } from './util.js';
+import { el, escapeHtml } from './util.js?v=20260831-clean-ui';
 
 let actions = [];
 let filtered = [];
@@ -8,6 +8,7 @@ let selectedIndex = 0;
 let dialog = null;
 let listEl = null;
 let inputEl = null;
+let getActions = () => [];
 
 function fuzzyScore(query, text) {
   const q = query.toLowerCase();
@@ -102,7 +103,7 @@ export function initPalette(registerActions) {
   listEl = el('paletteList');
   if (!dialog || !inputEl || !listEl) return;
 
-  actions = registerActions();
+  getActions = registerActions;
 
   inputEl.addEventListener('input', () => {
     selectedIndex = 0;
@@ -127,11 +128,11 @@ export function initPalette(registerActions) {
   });
 
   window.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
     const isK = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
     const isSlash = event.key === '/' && !event.target.closest('input, textarea, select, [contenteditable]');
     if (isK || isSlash) {
       event.preventDefault();
-      actions = registerActions();
       openPalette();
     }
   });
@@ -139,6 +140,7 @@ export function initPalette(registerActions) {
 
 export function openPalette() {
   if (!dialog) return;
+  actions = getActions();
   inputEl.value = '';
   selectedIndex = 0;
   renderList();

@@ -1,7 +1,7 @@
 // Agent reasoning feed for the task drawer: newest handoff summaries.
 
-import { api } from './api.js';
-import { escapeHtml, timeAgo } from './util.js';
+import { api } from './api.js?v=20260831-clean-ui';
+import { escapeHtml, timeAgo } from './util.js?v=20260831-clean-ui';
 
 const KIND_META = {
   context_handoff: { label: 'Handoff', icon: '⤷', tone: 'cyan' },

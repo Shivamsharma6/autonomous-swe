@@ -3,525 +3,110 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="AutoSWE Autonomous Engineering Control Plane & Task DAG Orchestrator">
-  <title>AutoSWE · Autonomous Engineering Plane</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <meta name="description" content="AutoSWE — a workspace for autonomous software engineering.">
+  <meta name="color-scheme" content="light">
+  <title>AutoSWE · Runs</title>
+  <link rel="stylesheet" href="styles.css?v=20260831-clean-ui">
 </head>
 <body>
-  <div class="ambient-glow" aria-hidden="true"></div>
-
+  <a class="skip-link" href="#mainContent">Skip to content</a>
   <div class="app-shell">
-    <!-- Top Navigation Bar (Codex Style Header) -->
-    <header class="topbar">
-      <div class="topbar-left">
-        <a class="brand" href="#" id="brandLogo" aria-label="AutoSWE Home">
-          <div class="brand-badge">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-              <path d="M5 3v4"/>
-              <path d="M19 17v4"/>
-              <path d="M3 5h4"/>
-              <path d="M17 19h4"/>
-            </svg>
-          </div>
-          <div class="brand-meta">
-            <div class="brand-title-row">
-              <span class="brand-title">AutoSWE</span>
-              <span class="brand-version-pill">v2.4</span>
-            </div>
-            <span class="brand-subtitle">Autonomous Engineering Plane</span>
-          </div>
-        </a>
-        <nav class="top-nav" aria-label="Primary">
-          <a href="#" data-nav="runs" class="active" title="Runs overview">Runs</a>
-          <a href="#" data-nav="new" title="Launch a new mission">New Mission</a>
-        </nav>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="#runs" id="brandLogo" aria-label="AutoSWE Home">
+        <span class="brand-badge" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 16 7-12 7 12M8 11h8M4 20h16"/></svg></span>
+        <span>AutoSWE<span class="brand-subtitle">Engineering workspace</span></span>
+      </a>
+      <span class="nav-label">Workspace</span>
+      <nav class="top-nav" aria-label="Primary">
+        <a href="#runs" data-nav="runs" class="active" aria-current="page"><span aria-hidden="true">▤</span> All runs</a>
+        <a href="#new" data-nav="new"><span aria-hidden="true">＋</span> New run</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <button id="modelStudioBtn" class="sidebar-button" type="button" aria-haspopup="dialog"><span aria-hidden="true">⚙</span><span>Model settings<small id="topbarModelName">Connect to configure</small></span></button>
+        <button id="tourHelpBtn" class="sidebar-button" type="button" aria-haspopup="dialog"><span aria-hidden="true">?</span> Quick guide</button>
+        <button id="openAuth" class="sidebar-button" type="button" aria-haspopup="dialog"><span aria-hidden="true"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg></span><span id="authBtnText">Connect workspace</span></button>
+        <div class="health-pill" id="healthStatus"><span id="healthDot" class="status-dot unknown"></span><span id="healthText">Checking services…</span></div>
       </div>
-
-      <!-- Quick Run Search Bar with Command Shortcut -->
-      <div class="topbar-search">
-        <form id="lookupForm" class="search-form">
-          <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
-          </svg>
-          <input id="runLookup" type="text" autocomplete="off" placeholder="Jump to Run ID... (Press / or ⌘K)" required>
-          <div class="search-actions">
-            <kbd class="cmd-shortcut">/</kbd>
-            <button class="button mini-search-btn" type="submit">Open</button>
-          </div>
-        </form>
-      </div>
-
-      <!-- System Telemetry & Operator Controls -->
-      <div class="topbar-right">
-        <button id="tourHelpBtn" class="button ghost icon-btn" type="button" title="Guided tour (first run)" aria-label="Start guided tour">?</button>
-        <button id="modelStudioBtn" class="button ghost model-button" type="button" aria-haspopup="dialog" title="Configure LLM Models & Providers">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-          </svg>
-          <span id="topbarModelName">Model: Loading...</span>
-        </button>
-
-        <div class="health-pill" id="healthStatus" title="Control plane health status & active services">
-          <span id="healthDot" class="status-dot unknown"></span>
-          <span id="healthText" class="health-label">Checking health</span>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="breadcrumb"><span>Workspace</span><span aria-hidden="true">/</span><strong id="workspaceLabel">All runs</strong></div>
+        <div class="topbar-actions">
+          <form id="lookupForm" class="search-form"><label class="sr-only" for="runLookup">Open a run by ID</label><input id="runLookup" type="text" autocomplete="off" placeholder="Open a run by ID…" required><button class="button ghost" type="submit">Open</button></form>
+          <button id="openCommandPalette" class="button ghost command-button" type="button" aria-label="Search commands" aria-haspopup="dialog">⌘ <span>Commands</span><kbd>⌘K</kbd></button>
         </div>
-
-        <button id="openAuth" class="button ghost auth-button" type="button" aria-haspopup="dialog" title="Configure Operator Admin Token">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-          </svg>
-          <span id="authBtnText">Admin Access</span>
-        </button>
-      </div>
-    </header>
-
-    <!-- Main Workspace -->
-    <main class="main-content">
-      <!-- Runs Browser: cross-project mission overview -->
-      <section id="runsBrowserSection" class="section-container runs-browser-section hidden" aria-live="polite">
-        <header class="runs-header">
-          <div>
-            <h2 class="runs-title">Missions</h2>
-            <p class="runs-subtitle">Every engineering run across your projects — live status, cost, and progress.</p>
+      </header>
+      <main class="main-content" id="mainContent" tabindex="-1">
+        <section id="runsBrowserSection" class="section-container runs-browser-section" aria-labelledby="runsTitle">
+          <header class="page-header"><div><div class="eyebrow">YOUR WORKSPACE</div><h1 id="runsTitle">All runs</h1><p>Start work, follow progress, and review what’s ready.</p></div><button id="runsNewBtn" class="button primary" type="button">＋ New run</button></header>
+          <div id="runsSummary" class="runs-summary" aria-label="Run summary"></div>
+          <div class="runs-list-panel">
+            <div class="runs-toolbar"><div class="filter-chips" id="runsFilters" aria-label="Filter runs by status"></div><div class="runs-controls"><label class="sr-only" for="runsSearch">Search runs</label><input id="runsSearch" type="search" placeholder="Search goals or projects…" autocomplete="off"><button id="runsRefresh" class="button ghost icon-btn" type="button" aria-label="Refresh runs" title="Refresh runs">↻</button></div></div>
+            <div id="runsFeedback" class="inline-feedback hidden" role="status"></div>
+            <div class="run-list-heading" aria-hidden="true"><span>Run / project</span><span>Status</span><span>Tasks</span><span>Cost</span><span>Created</span></div>
+            <div id="runsGrid" class="runs-grid" role="list" aria-label="Runs"><div class="empty-state">Loading runs…</div></div>
+            <div class="list-footer"><span id="runsCountLabel" role="status"></span><span>Updates automatically while this view is open</span></div>
           </div>
-          <div class="runs-controls">
-            <input id="runsSearch" type="search" class="runs-search" placeholder="Filter by goal, project, or ID…" autocomplete="off">
-            <button id="runsRefresh" class="button ghost icon-btn" type="button" title="Refresh runs">⟳</button>
-            <button id="runsNewBtn" class="button primary" type="button">＋ New Mission</button>
+        </section>
+
+        <section id="onboardingSection" class="section-container launchpad-section hidden" aria-labelledby="newRunTitle">
+          <header class="page-header"><div><div class="eyebrow">LET’S GET TO WORK</div><h1 id="newRunTitle">New run</h1><p>Choose a repository, then describe the outcome you need.</p></div></header>
+          <div class="launchpad-grid">
+            <section class="card launchpad-card"><div class="card-header"><span class="step-num">1</span><div><h2>Connect a repository</h2><p>Choose the code this run will work on.</p></div></div>
+              <form id="projectForm" class="workspace-form">
+                <div class="form-group"><label for="projectName">Project name</label><input id="projectName" required maxlength="300" placeholder="e.g. Checkout service"></div>
+                <div class="form-group"><div class="label-row"><label for="sourcePath">Repository folder</label><button id="browseFolderBtn" class="button ghost mini-btn" type="button">Browse folder</button></div><input id="dirPickerFallback" type="file" webkitdirectory directory multiple hidden><input id="sourcePath" required placeholder="e.g. checkout-service"><span class="field-hint">Use a folder in <code>runtime/imports/</code>, or browse to import a copy.</span></div>
+                <div class="form-group"><label for="defaultBranch">Branch</label><input id="defaultBranch" value="main" required placeholder="main"></div>
+                <button id="registerProjectBtn" class="button secondary full-width" type="submit">Connect repository</button>
+                <div id="projectIdentity" class="identity-card"><span class="identity-text">No repository connected yet.</span></div>
+                <p id="projectFeedback" class="form-feedback hidden" role="status"></p>
+              </form>
+            </section>
+            <section class="card launchpad-card"><div class="card-header"><span class="step-num">2</span><div><h2>Describe the work</h2><p>Be specific about what success looks like.</p></div></div>
+              <form id="runForm" class="workspace-form">
+                <div class="form-group"><label for="runGoal">What would you like to accomplish?</label><textarea id="runGoal" rows="7" required placeholder="Describe the change, the expected behavior, and how it should be tested…"></textarea><span class="field-hint">Include constraints and acceptance criteria to help the agents stay on track.</span></div>
+                <details class="advanced-settings"><summary>Baseline &amp; model</summary><div class="form-group"><label for="baselineCommit">Baseline commit</label><input id="baselineCommit" minlength="40" maxlength="64" pattern="[a-fA-F0-9]{40,64}" placeholder="Detected when you connect a repository"><span class="field-hint">Use the detected commit, or enter an existing full commit hash.</span></div><div class="form-group"><div class="label-row"><label for="launchpadModelSelect">Workspace model</label><button id="quickConfigModelBtn" class="button ghost mini-btn" type="button">Settings</button></div><select id="launchpadModelSelect" disabled><option>Connect to view model</option></select><span class="field-hint" id="launchpadProviderLabel">Model settings apply across the workspace.</span></div></details>
+                <p id="runFeedback" class="form-feedback hidden" role="status"></p>
+                <button id="startRun" class="button primary full-width launch-btn" type="submit" disabled>Start run <span aria-hidden="true">→</span></button>
+                <p id="launchHint" class="field-hint">Connect a repository to continue.</p>
+                <div class="governance-disclosure"><span aria-hidden="true">◇</span><span>Agents work in an isolated sandbox. High-risk actions still require your approval.</span></div>
+              </form>
+            </section>
           </div>
-        </header>
-        <div id="runsHero" class="runs-hero hidden"></div>
-        <div id="liveTicker" class="live-ticker hidden" aria-live="polite">
-          <span class="live-ticker-dot" aria-hidden="true"></span>
-          <div class="live-ticker-track" id="liveTickerTrack"></div>
-        </div>
-        <div class="runs-toolbar">
-          <div class="filter-chips" id="runsFilters"></div>
-          <span id="runsCountLabel" class="runs-count-label"></span>
-        </div>
-        <div id="runsGrid" class="runs-grid">
-          <div class="runs-skeletons">
-            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
-            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
-            <div class="run-card skeleton"><div class="skeleton-line w40"></div><div class="skeleton-line w90"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div></div>
+          <div id="recentRunsContainer" class="recent-runs-card hidden"><div class="recent-runs-header"><h2>Recently opened</h2><button id="clearRecentRuns" class="button ghost mini-btn" type="button">Clear history</button></div><div id="recentRunsList" class="recent-runs-list"></div></div>
+        </section>
+
+        <section id="dashboard" class="dashboard-section hidden" aria-labelledby="runGoalTitle">
+          <button id="backToRuns" class="button ghost back-button" type="button">← All runs</button>
+          <div id="runFeedbackBanner" class="inline-feedback hidden" role="status"></div>
+          <header class="dashboard-header-card"><div class="dashboard-title-group"><span id="runStatusBadge" class="status-badge">Loading</span><h1 id="runGoalTitle" class="run-headline">Loading run…</h1><div class="run-meta-pills"><span id="runProjectName">—</span><span aria-hidden="true">/</span><code id="runIdText"></code><button id="copyRunId" class="button ghost icon-btn" title="Copy run ID" aria-label="Copy run ID" type="button">⧉</button></div></div><div class="dashboard-controls"><div id="liveStreamBadge" class="stream-beacon"><span class="beacon-dot"></span><span id="streamStatusText">Loading…</span></div><button id="refreshRun" class="button secondary" type="button">↻ Refresh</button><button id="newRunBtn" class="button ghost" type="button">New run</button></div></header>
+          <div class="telemetry-hud-grid">
+            <div class="hud-card"><span class="hud-label">Status</span><span id="runState" class="hud-main-val">—</span><span id="stateDuration" class="hud-subtext">—</span></div>
+            <div class="hud-card"><span class="hud-label">Task progress <span id="planRevision"></span></span><span id="taskSummary" class="hud-main-val">—</span><div class="hud-progress-bar"><div id="dagProgressBar" class="hud-progress-fill"></div></div></div>
+            <div class="hud-card"><span class="hud-label">Tokens used</span><span id="tokenTotal" class="hud-main-val">—</span><span id="tokenDetail" class="hud-subtext">—</span></div>
+            <div class="hud-card"><span class="hud-label">Model cost</span><span id="modelCost" class="hud-main-val">—</span><span class="hud-subtext">Recorded usage in USD</span></div>
           </div>
-        </div>
-      </section>
-
-      <!-- Workflow Initiation Section (Mission Control Launchpad) -->
-      <section id="onboardingSection" class="section-container launchpad-section">
-        <!-- Hero Mission Banner -->
-        <div class="hero-banner">
-          <div class="hero-banner-content">
-            <div class="hero-badge">
-              <span class="pulse-beacon"></span>
-              <span>DURABLE DAG ENGINE · DOCKER SANDBOX · GOVERNED ACTIONS</span>
-            </div>
-            <h1 class="hero-headline">Autonomous Software Engineering Studio</h1>
-            <p class="hero-subtext">
-              Synthesize multi-agent task DAGs, execute code in isolated Docker runners with fine-grained tool governance, and observe live agent trajectories in real-time.
-            </p>
+          <div class="detail-tabs" role="tablist" aria-label="Run details"><button id="tab-tasks" role="tab" aria-selected="true" aria-controls="panel-tasks" data-panel="tasks" type="button">Tasks</button><button id="tab-activity" role="tab" aria-selected="false" aria-controls="panel-activity" data-panel="activity" tabindex="-1" type="button">Activity</button><button id="tab-approvals" role="tab" aria-selected="false" aria-controls="panel-approvals" data-panel="approvals" tabindex="-1" type="button">Approvals <span id="approvalsTabCount"></span></button><button id="tab-artifacts" role="tab" aria-selected="false" aria-controls="panel-artifacts" data-panel="artifacts" tabindex="-1" type="button">Files <span id="artifactsTabCount"></span></button></div>
+          <div class="control-plane-layout">
+            <section id="panel-tasks" role="tabpanel" aria-labelledby="tab-tasks" class="card dag-canvas-panel"><div class="panel-header"><div><h2 class="panel-title">Tasks</h2><p class="panel-subtitle">Select a task to see its details and agent updates.</p></div><div class="segmented-control" aria-label="Task view"><button type="button" id="taskListView" aria-pressed="true">List</button><button type="button" id="taskGraphView" aria-pressed="false">Graph</button></div></div><div id="taskList" class="task-list"></div><div class="dag-viewport hidden" id="dagViewport"><svg id="dagSvgConnections" class="dag-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg><div id="taskDag" class="task-dag-container"></div></div></section>
+            <section id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" class="card terminal-panel hidden"><div class="panel-header"><div><h2 class="panel-title">Activity</h2><p class="panel-subtitle">Recorded activity, up to 500 events. Expand an event to inspect its payload.</p></div></div><div class="terminal-controls"><label class="sr-only" for="eventSearchInput">Search activity</label><input id="eventSearchInput" type="search" placeholder="Search events…"><div class="filter-pills" id="timelineFilters"><button class="pill active" data-filter="ALL" type="button" aria-pressed="true">All</button><button class="pill" data-filter="TASK" type="button" aria-pressed="false">Tasks</button><button class="pill" data-filter="TOOL" type="button" aria-pressed="false">Tools</button><button class="pill" data-filter="APPROVAL" type="button" aria-pressed="false">Approvals</button></div></div><div class="terminal-container" id="terminalScrollContainer"><ol id="eventList" class="timeline-list"></ol></div></section>
+            <section id="panel-approvals" role="tabpanel" aria-labelledby="tab-approvals" class="card approvals-panel hidden"><div class="panel-header"><div><h2 class="panel-title">Approvals</h2><p class="panel-subtitle">Review high-risk actions before they execute.</p></div><span id="pendingApprovalsCount" class="badge-count hidden">0</span></div><div id="approvalList" class="stack-container"></div></section>
+            <section id="panel-artifacts" role="tabpanel" aria-labelledby="tab-artifacts" class="card artifacts-panel hidden"><div class="panel-header"><div><h2 class="panel-title">Files</h2><p class="panel-subtitle">Inspect and download outputs produced by this run.</p></div></div><div id="artifactList" class="stack-container"></div></section>
           </div>
-          <div class="hero-stats">
-            <div class="hero-stat-item">
-              <span class="stat-num">100%</span>
-              <span class="stat-desc">Transactional DAG State</span>
-            </div>
-            <div class="hero-stat-item">
-              <span class="stat-num">&lt;2ms</span>
-              <span class="stat-desc">Redis Stream Latency</span>
-            </div>
-            <div class="hero-stat-item">
-              <span class="stat-num">Zero</span>
-              <span class="stat-desc">Ungoverned Side Effects</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Recent Runs Bar (If present) -->
-        <div id="recentRunsContainer" class="recent-runs-card hidden">
-          <div class="recent-runs-header">
-            <span class="recent-runs-title">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-              </svg>
-              Recent Engineering Runs
-            </span>
-            <button id="clearRecentRuns" class="button ghost link-btn" type="button">Clear</button>
-          </div>
-          <div id="recentRunsList" class="recent-runs-chips"></div>
-        </div>
-
-        <!-- Launchpad Forms Grid -->
-        <div class="launchpad-grid">
-          <!-- Step 1: Repository Intelligence & Import -->
-          <div class="card launchpad-card">
-            <div class="card-header">
-              <div class="step-num">01</div>
-              <div class="header-text-group">
-                <h2 class="card-title">Repository Environment</h2>
-                <p class="card-subtitle">Select repository folder inside governed import boundary.</p>
-              </div>
-            </div>
-
-            <form id="projectForm" class="workspace-form">
-              <div class="form-group">
-                <label for="projectName">Project Identifier</label>
-                <div class="input-wrapper">
-                  <input id="projectName" type="text" value="Production Showcase" required maxlength="300" placeholder="e.g. Core Payment Engine">
-                </div>
-              </div>
-
-              <div class="form-group">
-                <div class="label-row">
-                  <label for="sourcePath">Source Repository Path</label>
-                  <button id="browseFolderBtn" class="button outline mini-btn" type="button" title="Select repository folder from file picker">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                    </svg>
-                    <span>Browse Folder...</span>
-                  </button>
-                  <input type="file" id="dirPickerFallback" webkitdirectory directory multiple style="position: fixed; top: -9999px; left: -9999px; opacity: 0; width: 1px; height: 1px; pointer-events: none;">
-                </div>
-                <div class="input-wrapper">
-                  <input id="sourcePath" type="text" value="/Users/shivamsharma/projects/autonomous-swe/runtime/imports/showcase" required placeholder="showcase or /Users/.../runtime/imports/repo">
-                </div>
-                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Must be a folder located inside <code>runtime/imports/</code></span>
-              </div>
-
-              <div class="form-group">
-                <label for="defaultBranch">Default Branch</label>
-                <div class="input-wrapper">
-                  <input id="defaultBranch" type="text" value="main" required placeholder="main">
-                </div>
-              </div>
-
-              <button class="button secondary full-width submit-btn" type="submit">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
-                </svg>
-                <span>Register Repository Target</span>
-              </button>
-
-              <div id="projectIdentity" class="identity-card">
-                <div class="identity-icon">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 8 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-                </div>
-                <span class="identity-text">No project registered in this session.</span>
-              </div>
-            </form>
-          </div>
-
-          <!-- Step 2: Goal Prompting & Launch -->
-          <div class="card launchpad-card">
-            <div class="card-header">
-              <div class="step-num">02</div>
-              <div class="header-text-group">
-                <h2 class="card-title">Launch Autonomous Mission</h2>
-                <p class="card-subtitle">The Architect agent decomposes this into dynamic, typed tasks.</p>
-              </div>
-            </div>
-
-            <!-- Prompt Preset Chips -->
-            <div class="prompt-presets-bar">
-              <span class="preset-label">Goal Presets:</span>
-              <div class="preset-chips">
-                <button type="button" class="preset-chip" data-goal="Implement a resilient webhook retry mechanism with exponential backoff, jitter, dead-letter queue, and comprehensive pytest unit tests." data-title="Webhook Retry">
-                  ⚡ Webhook Retry
-                </button>
-                <button type="button" class="preset-chip" data-goal="Perform full security hardening: validate input bounds, sanitize file path traversal vulnerabilities, and add regression tests." data-title="Security Audit">
-                  🔒 Security Audit
-                </button>
-                <button type="button" class="preset-chip" data-goal="Refactor data persistence layer with connection pooling, structured logging, and migration benchmarks." data-title="Refactor & Tests">
-                  🛠️ Refactor
-                </button>
-                <button type="button" class="preset-chip" data-goal="Fix race condition in concurrent task worker lease renewal and add asynchronous stress test suite." data-title="Bugfix">
-                  🐛 Bugfix
-                </button>
-              </div>
-            </div>
-
-            <form id="runForm" class="workspace-form">
-              <div class="form-group">
-                <label for="runGoal">Engineering Specification & Objectives</label>
-                <div class="input-wrapper">
-                  <textarea id="runGoal" rows="4" required placeholder="Describe the feature, bugfix, or refactoring in detail (e.g. Implement resilient webhook retry mechanism with exponential backoff, unit tests, and metrics)..."></textarea>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <div class="label-row">
-                  <label for="baselineCommit">Baseline Git Commit SHA</label>
-                  <button id="fillSampleSha" class="button ghost mini-btn" type="button" title="Fill sample 40-char SHA">Fill Sample SHA</button>
-                </div>
-                <div class="input-wrapper">
-                  <input id="baselineCommit" type="text" required minlength="40" maxlength="64" value="29195d2730a8a28c632ef1f426fcfbc5e0753d58" placeholder="40–64 character SHA-1/SHA-256 commit hash">
-                </div>
-                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Git commit SHA from which the agent branches (auto-detected via Browse Folder or <code>git rev-parse HEAD</code>)</span>
-              </div>
-
-              <div class="form-group">
-                <div class="label-row">
-                  <label for="launchpadModelSelect">Intelligence Engine (LLM Model)</label>
-                  <button id="quickConfigModelBtn" class="button outline mini-btn" type="button" title="Configure endpoints, API keys, and models">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    <span>Custom LLM / Keys...</span>
-                  </button>
-                </div>
-                <div class="input-wrapper">
-                  <select id="launchpadModelSelect" class="styled-select">
-                    <option value="">Detecting model...</option>
-                  </select>
-                </div>
-                <span class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">Provider: <span id="launchpadProviderLabel" style="color: var(--accent-cyan);">Detecting...</span></span>
-              </div>
-
-              <button id="startRun" class="button primary full-width launch-btn" type="submit">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                <span>Launch Autonomous Run</span>
-              </button>
-
-              <div class="governance-disclosure">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg>
-                <span>High-risk tool invocations and git pushes are governed by mandatory operator approvals.</span>
-              </div>
-            </form>
-          </div>
-        </div>
-      </section>
-
-      <!-- Active Mission Control Dashboard Section -->
-      <section id="dashboard" class="dashboard-section hidden" aria-live="polite">
-        <!-- Dashboard Top Control Header -->
-        <div class="dashboard-header-card card">
-          <div class="dashboard-title-group">
-            <div class="status-and-title">
-              <span id="runStatusBadge" class="status-badge running">RUNNING</span>
-              <h2 id="runGoalTitle" class="run-headline">Mission Execution</h2>
-            </div>
-            <div class="run-meta-pills">
-              <div class="meta-pill">
-                <span class="meta-key">RUN ID</span>
-                <code id="runIdText" class="code-val"></code>
-                <button id="copyRunId" class="button ghost icon-btn" title="Copy Run ID" type="button">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                </button>
-              </div>
-              <div class="meta-pill">
-                <span class="meta-key">PROJECT</span>
-                <span id="runProjectName" class="meta-val">—</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="dashboard-controls">
-            <div id="liveStreamBadge" class="stream-beacon live" title="Real-time event streaming state">
-              <span class="beacon-dot"></span>
-              <span id="streamStatusText">LIVE WEBSOCKET</span>
-            </div>
-            <button id="refreshRun" class="button ghost control-btn" type="button" title="Refresh state from API">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-              <span>Refresh</span>
-            </button>
-            <button id="newRunBtn" class="button outline control-btn" type="button" title="Launch a new engineering run">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              <span>New Mission</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Telemetry HUD Grid -->
-        <div class="telemetry-hud-grid">
-          <div class="hud-card">
-            <div class="hud-header">
-              <span class="hud-label">Workflow State</span>
-              <span class="hud-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-              </span>
-            </div>
-            <div class="hud-value-row">
-              <span id="runState" class="hud-main-val">—</span>
-            </div>
-            <span id="stateDuration" class="hud-subtext">—</span>
-          </div>
-
-          <div class="hud-card">
-            <div class="hud-header">
-              <span class="hud-label">Plan & Task Progress</span>
-              <span class="hud-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/></svg>
-              </span>
-            </div>
-            <div class="hud-value-row">
-              <span id="planRevision" class="hud-main-val">—</span>
-            </div>
-            <span id="taskSummary" class="hud-subtext">No tasks</span>
-            <div class="hud-progress-bar">
-              <div id="dagProgressBar" class="hud-progress-fill" style="width: 0%;"></div>
-            </div>
-          </div>
-
-          <div class="hud-card">
-            <div class="hud-header">
-              <span class="hud-label">Model Token Telemetry</span>
-              <span class="hud-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-              </span>
-            </div>
-            <div class="hud-value-row">
-              <span id="tokenTotal" class="hud-main-val">0</span>
-            </div>
-            <span id="tokenDetail" class="hud-subtext">0 in · 0 out</span>
-            <div id="tokenSparkline" class="hud-sparkline" aria-hidden="true"></div>
-          </div>
-
-          <div class="hud-card">
-            <div class="hud-header">
-              <span class="hud-label">Authoritative Cost</span>
-              <span class="hud-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-              </span>
-            </div>
-            <div class="hud-value-row">
-              <span id="modelCost" class="hud-main-val text-emerald">$0.0000</span>
-            </div>
-            <span class="hud-subtext">Precision USD accounting</span>
-            <div id="costSparkline" class="hud-sparkline" aria-hidden="true"></div>
-          </div>
-        </div>
-
-        <!-- Main Dashboard View: Topological DAG & Governance Side Deck -->
-        <div class="control-plane-layout">
-          <!-- Dynamic Task DAG Visualizer -->
-          <div class="card dag-canvas-panel">
-            <div class="panel-header">
-              <div class="panel-title-group">
-                <h3 class="panel-title">Dynamic Task DAG</h3>
-                <p class="panel-subtitle">Topologically ranked multi-stage agent execution graph with live telemetry.</p>
-              </div>
-              <div class="dag-legend">
-                <span class="legend-item"><span class="legend-dot pending"></span>Pending</span>
-                <span class="legend-item"><span class="legend-dot ready"></span>Ready</span>
-                <span class="legend-item"><span class="legend-dot running"></span>Running</span>
-                <span class="legend-item"><span class="legend-dot completed"></span>Completed</span>
-                <span class="legend-item"><span class="legend-dot failed"></span>Failed</span>
-              </div>
-            </div>
-            
-            <div class="dag-viewport" id="dagViewport">
-              <svg id="dagSvgConnections" class="dag-svg" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                  <linearGradient id="activeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stop-color="#06b6d4" />
-                    <stop offset="100%" stop-color="#38bdf8" />
-                  </linearGradient>
-                </defs>
-              </svg>
-              <div id="taskDag" class="task-dag-container">
-                <div class="empty-state">
-                  <div class="empty-spinner"></div>
-                  <p>Architect agent is synthesizing the execution DAG...</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Side Columns: Governed Approvals & Verified Artifacts -->
-          <div class="side-deck-stack">
-            <!-- Governed Approval Queue -->
-            <div class="card approvals-panel">
-              <div class="panel-header">
-                <div class="panel-title-group">
-                  <h3 class="panel-title">Governed Approvals</h3>
-                  <p class="panel-subtitle">Expiring gates for high-risk tool execution.</p>
-                </div>
-                <span id="pendingApprovalsCount" class="badge-count hidden">0</span>
-              </div>
-              <div id="approvalList" class="stack-container empty-state">No pending approvals.</div>
-            </div>
-
-            <!-- Verified Artifacts Explorer -->
-            <div class="card artifacts-panel">
-              <div class="panel-header">
-                <div class="panel-title-group">
-                  <h3 class="panel-title">Verified Artifacts</h3>
-                  <p class="panel-subtitle">Content-addressed objects with SHA-256 integrity.</p>
-                </div>
-              </div>
-              <div id="artifactList" class="stack-container empty-state">No artifacts generated yet.</div>
-            </div>
-          </div>
-
-          <!-- Immutable Audit Console (Terminal View) -->
-          <div class="card terminal-panel">
-            <div class="panel-header terminal-header">
-              <div class="terminal-title-area">
-                <div class="terminal-lights">
-                  <span class="light red"></span>
-                  <span class="light yellow"></span>
-                  <span class="light green"></span>
-                </div>
-                <div>
-                  <h3 class="panel-title">Immutable Audit Trail</h3>
-                  <p class="panel-subtitle">State transitions, agent turns, tool invocations, and cryptographic signatures.</p>
-                </div>
-              </div>
-
-              <div class="terminal-controls">
-                <!-- Search Filter Input -->
-                <div class="terminal-search">
-                  <input id="eventSearchInput" type="text" placeholder="Filter events (type, tool, payload)...">
-                </div>
-                <!-- Filter Pills -->
-                <div class="filter-pills" id="timelineFilters">
-                  <button class="pill active" data-filter="ALL" type="button">All Events</button>
-                  <button class="pill" data-filter="TASK" type="button">Tasks</button>
-                  <button class="pill" data-filter="TOOL" type="button">Tools</button>
-                  <button class="pill" data-filter="APPROVAL" type="button">Approvals</button>
-                </div>
-              </div>
-            </div>
-
-            <div class="terminal-container" id="terminalScrollContainer">
-              <ol id="eventList" class="timeline-list">
-                <li class="timeline-empty">No events recorded in audit log.</li>
-              </ol>
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <!-- Footer -->
-    <footer class="app-footer">
-      <div class="footer-left">
-        <span class="footer-brand">AutoSWE Control Plane</span>
-        <span class="meta-dot">•</span>
-        <span class="footer-tech">PostgreSQL & Redis Streams Engine</span>
-      </div>
-      <div class="footer-right">
-        <span class="footer-boundary">Isolated Docker Sandbox Boundary</span>
-      </div>
-    </footer>
+        </section>
+      </main>
+      <footer class="app-footer"><span>AutoSWE</span><span>Plan. Build. Verify.</span></footer>
+    </div>
   </div>
-
-  <!-- Slide-Over Task Inspector Drawer -->
-  <!-- Command palette (⌘K) -->
   <dialog id="paletteDialog" class="palette-dialog" aria-label="Command palette">
     <div class="palette-card">
       <div class="palette-input-row">
         <span class="palette-glyph">⌘</span>
         <input id="paletteInput" type="text" autocomplete="off" spellcheck="false"
-               placeholder="Search actions, runs, projects…">
+               aria-label="Search commands" placeholder="Search commands and recent runs…">
         <kbd class="palette-esc">esc</kbd>
       </div>
-      <div id="paletteList" class="palette-list" role="listbox"></div>
+      <div id="paletteList" class="palette-list" role="group" aria-label="Commands"></div>
       <footer class="palette-footer">
         <span><kbd>↑↓</kbd> navigate</span>
         <span><kbd>↵</kbd> run</span>
@@ -544,11 +129,11 @@
 
       <div class="drawer-body">
         <div class="drawer-section">
-          <h4 class="drawer-section-title">Status & Assignment</h4>
+          <h4 class="drawer-section-title">Task details</h4>
           <div class="detail-grid">
             <div class="detail-cell"><span class="detail-label">Task ID</span><code id="drawerTaskId" class="code-val-cyan"></code></div>
             <div class="detail-cell"><span class="detail-label">State</span><span id="drawerTaskState" class="state-pill"></span></div>
-            <div class="detail-cell"><span class="detail-label">Assigned Capability</span><span id="drawerTaskCapability" class="detail-val"></span></div>
+            <div class="detail-cell"><span class="detail-label">Assigned role</span><span id="drawerTaskCapability" class="detail-val"></span></div>
             <div class="detail-cell"><span class="detail-label">Priority</span><span id="drawerTaskPriority" class="detail-val"></span></div>
             <div class="detail-cell full-width-cell"><span class="detail-label">Dependencies</span><span id="drawerTaskDeps" class="detail-val"></span></div>
             <div class="detail-cell"><span class="detail-label">Plan Revision</span><span id="drawerTaskRevision" class="detail-val"></span></div>
@@ -556,18 +141,18 @@
         </div>
 
         <div class="drawer-section">
-          <h4 class="drawer-section-title">Goal & Specification</h4>
+          <h4 class="drawer-section-title">Description</h4>
           <div id="drawerTaskGoal" class="markdown-preview"></div>
 
       <!-- Agent reasoning feed (handoff summaries) -->
       <div class="drawer-subsection">
-        <h4 class="subsection-title">Agent Reasoning</h4>
+        <h4 class="subsection-title">Agent updates</h4>
         <div id="drawerTaskIntel" class="task-intel-container hidden"></div>
       </div>
         </div>
 
         <div class="drawer-section">
-          <h4 class="drawer-section-title">Correlated Task Telemetry</h4>
+          <h4 class="drawer-section-title">Task activity</h4>
           <div id="drawerTaskEvents" class="task-events-list">
             <p class="empty-text">No direct activity recorded for this task.</p>
           </div>
@@ -595,7 +180,7 @@
       <div class="modal-footer">
         <button id="downloadArtifactBtn" class="button primary" type="button">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span>Download Object</span>
+          <span>Download file</span>
         </button>
       </div>
     </div>
@@ -606,22 +191,23 @@
     <form id="authForm" method="dialog" class="modal-card auth-dialog-card">
       <div class="modal-header">
         <div>
-          <div class="type-badge">SECURITY CONFIGURATION</div>
-          <h3 id="authTitle" class="modal-title">Operator Admin Bearer Token</h3>
-          <p class="modal-subtitle">Stored in browser session storage for authenticated REST API and WebSocket streaming.</p>
+          <div class="type-badge">WORKSPACE ACCESS</div>
+          <h3 id="authTitle" class="modal-title">Connect to your workspace</h3>
+          <p class="modal-subtitle">Enter your admin token to view runs and start work. It stays in this browser session.</p>
         </div>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label for="adminToken">Admin Token (min 32 characters)</label>
+          <label for="adminToken">Admin token</label>
           <div class="input-wrapper">
             <input id="adminToken" type="password" minlength="32" autocomplete="current-password" required placeholder="Enter AUTOSWE_ADMIN_TOKEN">
           </div>
         </div>
       </div>
       <div class="modal-footer">
+        <button id="closeAuth" class="button ghost" type="button">Cancel</button>
         <button id="clearToken" class="button ghost" type="button">Clear</button>
-        <button class="button primary" value="save" type="submit">Save Session Token</button>
+        <button class="button primary" value="save" type="submit">Connect workspace</button>
       </div>
     </form>
   </dialog>
@@ -631,9 +217,9 @@
     <div class="modal-card model-studio-card">
       <div class="modal-header">
         <div>
-          <div class="type-badge">INTELLIGENCE CONFIGURATION</div>
-          <h3 id="modelStudioTitle" class="modal-title">LLM Model & Provider Studio</h3>
-          <p class="modal-subtitle">Connect Local Ollama, Frontier APIs (OpenAI, Claude, DeepSeek, Groq), or any custom OpenAI-compatible endpoint.</p>
+          <div class="type-badge">SETTINGS</div>
+          <h3 id="modelStudioTitle" class="modal-title">Model settings</h3>
+          <p class="modal-subtitle">Choose a provider and model for all new work. Changes apply across the workspace.</p>
         </div>
         <button id="closeModelStudio" class="button ghost icon-btn" type="button" aria-label="Close modal">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -643,7 +229,7 @@
       <div class="modal-body model-studio-body">
         <!-- Quick Provider Presets -->
         <div class="form-group">
-          <label class="section-sublabel">Provider Presets:</label>
+          <label class="section-sublabel">Provider</label>
           <div class="provider-preset-chips">
             <button type="button" class="preset-chip provider-chip active" data-provider="ollama" data-url="http://host.docker.internal:11434/v1" data-model="gemma4:12b-mlx" data-fallbacks="qwen3.6:35b-a3b-coding-nvfp4">
               🦙 Local Ollama
@@ -668,7 +254,7 @@
 
         <form id="modelStudioForm" class="model-form">
           <div class="form-group">
-            <label for="modelBaseUrl">OpenAI-Compatible Base URL Endpoint</label>
+            <label for="modelBaseUrl">Provider base URL</label>
             <div class="input-wrapper">
               <input id="modelBaseUrl" type="url" required placeholder="e.g. http://host.docker.internal:11434/v1 or https://api.openai.com/v1">
             </div>
@@ -678,16 +264,16 @@
           <div class="form-group">
             <label for="modelApiKey">Provider API Key</label>
             <div class="input-wrapper password-input-wrapper">
-              <input id="modelApiKey" type="password" autocomplete="off" placeholder="Leave empty for local Ollama / enter sk-... for cloud providers">
-              <button id="toggleApiKeyVisibility" class="button ghost mini-btn toggle-eye" type="button" title="Toggle visibility">👁️</button>
+              <input id="modelApiKey" type="password" autocomplete="new-password" placeholder="Leave empty for local Ollama / enter sk-... for cloud providers">
+              <button aria-label="Show or hide API key" id="toggleApiKeyVisibility" class="button ghost mini-btn toggle-eye" type="button" title="Toggle visibility">👁️</button>
             </div>
-            <span id="apiKeyStatusHint" class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">API key is securely stored in memory.</span>
+            <span id="apiKeyStatusHint" class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">Leave blank to retain a saved key for the same endpoint.</span>
           </div>
 
           <div class="form-row-2">
             <div class="form-group">
               <div class="label-row">
-                <label for="primaryModelSelect">Primary Agent Model</label>
+                <label for="primaryModelSelect">Primary model</label>
                 <button id="probeModelsBtn" class="button outline mini-btn" type="button" title="Probe endpoint for available models">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                   <span>Discover Models</span>
@@ -699,7 +285,7 @@
                 </select>
               </div>
               <div class="input-wrapper" style="margin-top: 6px;">
-                <input id="primaryModelInput" type="text" required placeholder="Or type custom model name (e.g. gemma4:12b-mlx)">
+                <input aria-label="Custom model name" id="primaryModelInput" type="text" required placeholder="Or type custom model name (e.g. gemma4:12b-mlx)">
               </div>
             </div>
 
@@ -752,9 +338,9 @@
     </div>
   </dialog>
 
-  <!-- Toast Notification -->
-  <div id="toast" class="toast-notification hidden" role="status" aria-live="assertive"></div>
-
-  <script type="module" src="app.js"></script>
+  <dialog id="approvalDialog" class="modal-dialog" aria-labelledby="approvalTitle"><form id="approvalForm" class="modal-card"><div class="modal-header"><div><div class="eyebrow">REVIEW ACTION</div><h2 id="approvalTitle">Confirm decision</h2><p id="approvalDescription" class="modal-subtitle"></p></div><button id="closeApproval" class="button ghost icon-btn" type="button" aria-label="Close approval">×</button></div><div class="modal-body"><div class="form-group"><label for="approvalOperator">Your operator identity</label><input id="approvalOperator" required maxlength="200" placeholder="Name recorded in the audit log" autocomplete="name"></div><p id="approvalFeedback" class="form-feedback hidden" role="status"></p></div><div class="modal-footer"><button id="confirmApproval" class="button primary" type="submit">Confirm</button></div></form></dialog>
+  <dialog id="helpDialog" class="modal-dialog" aria-labelledby="helpTitle"><div class="modal-card"><div class="modal-header"><div><div class="eyebrow">QUICK GUIDE</div><h2 id="helpTitle">A clear path from goal to result</h2></div><button id="closeHelp" class="button ghost icon-btn" type="button" aria-label="Close guide">×</button></div><div class="modal-body help-steps"><section><span class="step-num">1</span><div><h3>Connect your workspace</h3><p>Use your admin token, then check Model settings before starting work.</p></div></section><section><span class="step-num">2</span><div><h3>Start a run</h3><p>Connect a repository and describe the change. Include the behavior you expect and how to verify it.</p></div></section><section><span class="step-num">3</span><div><h3>Review the result</h3><p>Follow tasks, inspect activity, review pending approvals, and download files from the run.</p></div></section><p class="field-hint"><kbd>⌘K</kbd> or <kbd>Ctrl K</kbd> opens commands. <kbd>Esc</kbd> closes a dialog.</p></div></div></dialog>
+  <div id="toast" class="hidden"></div>
+  <script type="module" src="app.js?v=20260831-clean-ui"></script>
 </body>
 </html>
