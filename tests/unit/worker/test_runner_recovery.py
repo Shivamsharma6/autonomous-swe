@@ -3,27 +3,29 @@ from unittest.mock import AsyncMock
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from apps.worker.runner import RedisDispatchInbox, WorkerService
+from apps.worker.runner import RedisDispatchInbox, WorkerOutcome, WorkerService
+from tests.unit.worker.test_runner_concurrency import dispatch_record
 
 
 async def test_worker_recovers_after_transport_or_task_failure():
     stop = asyncio.Event()
-    worker = WorkerService(inbox=AsyncMock(), executor=AsyncMock(), block_ms=1)
-    calls = 0
+    failed, successful = dispatch_record(), dispatch_record()
+    inbox = AsyncMock()
+    inbox.read.side_effect = [RedisConnectionError("Redis unavailable"), (failed,), (successful,)]
+    executor = AsyncMock()
 
-    async def process_once():
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RedisConnectionError("Redis unavailable")
-        if calls == 2:
+    async def execute(message):
+        if str(message.task_id) == failed.payload["task_id"]:
             raise RuntimeError("one task failed")
         stop.set()
-        return 1
+        return WorkerOutcome.COMPLETED
 
-    worker.process_once = process_once
+    executor.execute.side_effect = execute
+    worker = WorkerService(inbox=inbox, executor=executor, block_ms=1)
     await asyncio.wait_for(worker.run(stop), timeout=3)
-    assert calls == 3
+    assert inbox.read.await_count == 3
+    assert executor.execute.await_count == 2
+    inbox.acknowledge.assert_awaited_once_with(successful)
 
 
 async def test_inbox_recreates_consumer_group_after_redis_loss():

@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from redis.asyncio import Redis
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from messaging.consumer import DeliveryConsumer, DeliveryOutcome, DeliveryRetryPolicy
 from messaging.redis_streams import RedisStreamRecord, RedisStreamsTransport
@@ -17,8 +18,26 @@ from tests.integration.messaging.helpers import event_payload, seed_task
 
 @pytest.mark.asyncio
 async def test_concurrent_failures_increment_one_canonical_delivery_record(
-    database: Any, redis_client: Redis
+    database: Any, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Force both transactions to observe a missing delivery before proceeding.
+    # SELECT FOR UPDATE cannot lock a row that has not been created yet. The
+    # reusable barrier also admits both handlers before retry deferral is stored.
+    missing_delivery = asyncio.Barrier(2)
+    original_scalar = AsyncSession.scalar
+
+    async def synchronize_missing_delivery(
+        session: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        result = await original_scalar(session, statement, *args, **kwargs)
+        descriptions = getattr(statement, "column_descriptions", ())
+        if result is None and any(
+            column.get("entity") is ConsumerDeliveryRow for column in descriptions
+        ):
+            await asyncio.wait_for(missing_delivery.wait(), timeout=5)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "scalar", synchronize_missing_delivery)
     ids = await seed_task(database)
     event_id = uuid4()
     payload = event_payload(ids, event_id)
@@ -30,28 +49,39 @@ async def test_concurrent_failures_increment_one_canonical_delivery_record(
         topic="agent-events",
         payload=payload,
     )
-    consumer = DeliveryConsumer(
-        database,
-        transport,
-        stream="agent-events",
-        group="workers",
-        consumer="worker-a",
-        retry_policy=DeliveryRetryPolicy(jitter=False),
-    )
+    consumers = [
+        DeliveryConsumer(
+            database,
+            transport,
+            stream="agent-events",
+            group="workers",
+            consumer=worker,
+            retry_policy=DeliveryRetryPolicy(jitter=False),
+        )
+        for worker in ("worker-a", "worker-b")
+    ]
 
     async def fail(_: Any, __: dict[str, Any]) -> None:
         raise TimeoutError("temporary failure")
 
+    now = datetime.now(UTC)
     outcomes = await asyncio.gather(
-        consumer.process(record, fail),
-        consumer.process(record, fail),
+        *(consumer.process(record, fail, now=now) for consumer in consumers)
     )
 
     assert outcomes == [DeliveryOutcome.RETRY, DeliveryOutcome.RETRY]
     async with database.transaction() as session:
-        delivery = await session.scalar(select(ConsumerDeliveryRow))
-    assert delivery is not None
+        deliveries = (await session.scalars(select(ConsumerDeliveryRow))).all()
+        receipts = await session.scalar(select(func.count()).select_from(ConsumerReceiptRow))
+    assert len(deliveries) == 1
+    delivery = deliveries[0]
     assert delivery.attempts == 2
+    assert delivery.consumer == "workers"
+    assert delivery.event_id == event_id
+    assert delivery.status == "RETRY"
+    assert delivery.next_attempt_at == now + timedelta(seconds=2)
+    assert delivery.last_error == "temporary failure"
+    assert receipts == 0
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,123 @@
+{
+  "captured_at_utc": "2026-08-31T17:56:28.099635+00:00",
+  "source": "Read-only database verification after real UI actions",
+  "runs": [
+    {
+      "id": "78d5fb2f-568e-4878-8163-036821efeb32",
+      "state": "FAILED",
+      "created_at": "2026-08-31 17:31:00.676333+00:00",
+      "state_entered_at": "2026-08-31 17:34:54.675375+00:00",
+      "cancellation_requested_at": null,
+      "task_count": 0,
+      "model_calls": [
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 5278,
+          "output_tokens": 2238,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 4800,
+          "output_tokens": 2301,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 6842,
+          "output_tokens": 2288,
+          "failure_class": null,
+          "validation_errors": []
+        }
+      ],
+      "stage_attempts": [
+        {
+          "stage": "architect",
+          "status": "FAILED",
+          "started_at": "2026-08-31 17:31:00.933881+00:00",
+          "ended_at": "2026-08-31 17:34:54.675375+00:00"
+        }
+      ]
+    },
+    {
+      "id": "de793018-4eb8-4eb8-a0c2-7e9623949667",
+      "state": "FAILED",
+      "created_at": "2026-08-31 17:40:16.161985+00:00",
+      "state_entered_at": "2026-08-31 17:45:03.660153+00:00",
+      "cancellation_requested_at": null,
+      "task_count": 0,
+      "model_calls": [
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 7633,
+          "output_tokens": 2384,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 6340,
+          "output_tokens": 2232,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 8193,
+          "output_tokens": 2818,
+          "failure_class": null,
+          "validation_errors": []
+        }
+      ],
+      "stage_attempts": [
+        {
+          "stage": "architect",
+          "status": "FAILED",
+          "started_at": "2026-08-31 17:40:16.370989+00:00",
+          "ended_at": "2026-08-31 17:45:03.660153+00:00"
+        }
+      ]
+    },
+    {
+      "id": "95e97bd3-abc5-4701-8922-f9693492de5a",
+      "state": "CANCELLED",
+      "created_at": "2026-08-31 17:46:01.909722+00:00",
+      "state_entered_at": "2026-08-31 17:48:41.886451+00:00",
+      "cancellation_requested_at": "2026-08-31 17:48:41.886451+00:00",
+      "task_count": 0,
+      "model_calls": [
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 4595,
+          "output_tokens": 773,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 10707,
+          "output_tokens": 1216,
+          "failure_class": null,
+          "validation_errors": []
+        },
+        {
+          "model": "nemotron-3.5-lightning:30b-mlx",
+          "input_tokens": 4134,
+          "output_tokens": 572,
+          "failure_class": null,
+          "validation_errors": []
+        }
+      ],
+      "stage_attempts": [
+        {
+          "stage": "architect",
+          "status": "FAILED",
+          "started_at": "2026-08-31 17:46:01.964499+00:00",
+          "ended_at": "2026-08-31 17:48:58.281149+00:00"
+        }
+      ]
+    }
+  ]
+}

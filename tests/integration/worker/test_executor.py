@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -10,10 +11,11 @@ from sqlalchemy import select
 
 from apps.dispatcher.main import DispatchMessage
 from apps.worker.executor import DispatchedTaskExecutor, TaskExecutionContext
-from apps.worker.runner import WorkerOutcome
+from apps.worker.runner import RedisDispatchInbox, WorkerOutcome, WorkerService
 from domain.enums import GraphExecutionState, RiskLevel, TaskStatus, TaskType
 from domain.models import BudgetPolicy, TaskSpec
 from execution.scheduler.service import ConcurrencyPolicy, SchedulerService
+from messaging.redis_streams import RedisStreamsTransport
 from persistence.repositories import DomainRepository
 from persistence.tables import GraphExecutionRow, LeaseRow, ReservationRow, TaskAttemptRow, TaskRow
 from workflows.state import NodeExecutionRequest, NodeExecutionResult
@@ -34,7 +36,7 @@ class RecordingNodeExecutor:
         )
 
 
-async def _seed_claim(database):  # type: ignore[no-untyped-def]
+async def _seed_claim(database, *, max_parallel=2):  # type: ignore[no-untyped-def]
     repository = DomainRepository()
     project_id = uuid4()
     repository_id = uuid4()
@@ -86,8 +88,8 @@ async def _seed_claim(database):  # type: ignore[no-untyped-def]
     scheduler = SchedulerService(
         database=database,
         policy=ConcurrencyPolicy(
-            max_parallel_tasks=2,
-            max_parallel_tasks_per_project=2,
+            max_parallel_tasks=max_parallel,
+            max_parallel_tasks_per_project=max_parallel,
             max_model_concurrency=2,
             max_sandbox_concurrency=2,
         ),
@@ -213,3 +215,84 @@ async def test_preparation_failure_releases_the_started_task_lease(database, fai
             await session.scalar(select(LeaseRow).where(LeaseRow.task_id == message.task_id))
             is None
         )
+
+
+async def test_worker_starts_and_heartbeats_every_simultaneously_leased_task(
+    database, redis_client, monkeypatch
+) -> None:
+    pairs = [await _seed_claim(database, max_parallel=3) for _ in range(3)]
+    messages = [message for message, _ in pairs]
+    scheduler = pairs[-1][1]
+    original_expiry = max(datetime.fromisoformat(message.expires_at) for message in messages)
+    all_started = asyncio.Event()
+    all_renewed = asyncio.Event()
+    release = asyncio.Event()
+    started = set()
+    renewed = set()
+    heartbeat_time = None
+    original_heartbeat = scheduler.heartbeat
+
+    async def heartbeat(*, task_id, owner, token):
+        result = await original_heartbeat(
+            task_id=task_id, owner=owner, token=token, now=heartbeat_time
+        )
+        if heartbeat_time is not None and result:
+            renewed.add(task_id)
+            if len(renewed) == 3:
+                all_renewed.set()
+        return result
+
+    monkeypatch.setattr(scheduler, "heartbeat", heartbeat)
+
+    async def factory(context):
+        started.add(context.task_id)
+        if len(started) == 3:
+            all_started.set()
+        await release.wait()
+        return RecordingNodeExecutor()
+
+    @asynccontextmanager
+    async def checkpointer():
+        yield InMemorySaver()
+
+    executor = DispatchedTaskExecutor(
+        database=database, scheduler=scheduler, node_executor_factory=factory,
+        checkpointer_factory=checkpointer, production_graph=False,
+        agent_spec_hash="f" * 64, heartbeat_seconds=0.02,
+    )
+    transport = RedisStreamsTransport(redis_client)
+    inbox = RedisDispatchInbox(transport, group="lease-regression", consumer="worker-test")
+    await inbox.setup()
+    for message in messages:
+        await transport.publish(
+            "task-dispatch", message.lease_token, message.model_dump(mode="json")
+        )
+    stop = asyncio.Event()
+    running = asyncio.create_task(WorkerService(
+        inbox=inbox, executor=executor, max_concurrency=3, block_ms=1,
+    ).run(stop))
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=3)
+        # Advance only the scheduler's injected clock. Every execution must have
+        # its own heartbeat before the original 30-second-style lease expires.
+        heartbeat_time = original_expiry - timedelta(seconds=1)
+        await asyncio.wait_for(all_renewed.wait(), timeout=3)
+        assert await scheduler.reclaim_expired(now=original_expiry + timedelta(seconds=1)) == 0
+        async with database.sessions() as session:
+            rows = (await session.scalars(select(TaskRow))).all()
+            assert len(rows) == 3
+            assert all(row.state is TaskStatus.RUNNING for row in rows)
+        stop.set()
+        release.set()
+        await asyncio.wait_for(running, timeout=5)
+        async with database.sessions() as session:
+            rows = (await session.scalars(select(TaskRow))).all()
+            assert all(row.state is TaskStatus.COMPLETED for row in rows)
+            assert (await session.scalars(select(LeaseRow))).all() == []
+        assert await redis_client.xpending_range(
+            "task-dispatch", "lease-regression", min="-", max="+", count=10
+        ) == []
+    finally:
+        release.set()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)

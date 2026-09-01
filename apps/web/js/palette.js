@@ -1,6 +1,7 @@
 // Keyboard-first command palette (⌘K / /): fuzzy actions, runs, projects.
 
 import { el, escapeHtml } from './util.js?v=20260831-clean-ui';
+import { showDialog, closeDialog } from './dialogs.js?v=20260831-clean-ui';
 
 let actions = [];
 let filtered = [];
@@ -89,7 +90,7 @@ function renderList() {
 function execute(index) {
   const entry = filtered[index];
   if (!entry) return;
-  dialog.close();
+  closeDialog(dialog);
   try {
     entry.action.run();
   } catch (error) {
@@ -124,7 +125,7 @@ export function initPalette(registerActions) {
     }
   });
   dialog.addEventListener('click', (event) => {
-    if (event.target === dialog) dialog.close();
+    if (event.target === dialog) closeDialog(dialog);
   });
 
   window.addEventListener('keydown', (event) => {
@@ -144,5 +145,5 @@ export function openPalette() {
   inputEl.value = '';
   selectedIndex = 0;
   renderList();
-  if (!dialog.open) dialog.showModal();
+  showDialog(dialog, inputEl);
 }

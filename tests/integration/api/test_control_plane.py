@@ -95,6 +95,124 @@ async def _notify(_: object) -> None:
     return None
 
 
+async def test_saved_model_settings_survive_a_new_api_instance(database, tmp_path):
+    first = services(database, tmp_path)
+    payload = {
+        "base_url": "http://ollama.test:11434/v1",
+        "primary_model": "selected-local-model",
+        "fallback_models": ["local-fallback"],
+        "timeout_seconds": 187,
+        "temperature": 0.4,
+        "api_key": "private-provider-key-for-this-test",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(first)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        saved = await client.post("/api/v1/models/config", json=payload)
+        assert saved.status_code == 200
+        assert payload["api_key"] not in saved.text
+    second = services(database, tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(second)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        response = await client.get("/api/v1/models/config")
+        assert response.status_code == 200
+        for field in (
+            "base_url", "primary_model", "fallback_models", "timeout_seconds", "temperature",
+        ):
+            assert response.json()[field] == payload[field]
+        assert response.json()["has_api_key"] is True
+        assert payload["api_key"] not in response.text
+
+
+async def test_new_run_keeps_its_model_snapshot_when_workspace_settings_change(database, tmp_path):
+    from persistence.tables import RunRow
+
+    configured = services(database, tmp_path)
+    repo = configured.settings.repository_import_root / "snapshot-test"
+    repo.mkdir()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(configured)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        project = (await client.post("/api/v1/projects", json={
+            "name": "Model snapshot", "source_path": str(repo),
+        })).json()
+        old = {"base_url": "http://first-model.test/v1", "primary_model": "first-model",
+               "timeout_seconds": 92, "temperature": 0.3, "fallback_models": ["backup"]}
+        assert (await client.post("/api/v1/models/config", json=old)).status_code == 200
+        started = await client.post("/api/v1/runs", json={
+            **project, "goal": "Test run configuration", "baseline_commit": "a" * 40,
+        })
+        assert started.status_code == 202
+        run_id = UUID(started.json()["run_id"])
+        assert (await client.post("/api/v1/models/config", json={
+            "base_url": "http://second-model.test/v1", "primary_model": "second-model",
+        })).status_code == 200
+        async with database.sessions() as session:
+            row = await session.get(RunRow, run_id)
+            snapshot = getattr(row, "model_configuration", None)
+            assert snapshot is not None, "new runs must capture durable model configuration"
+            for field, value in old.items():
+                assert snapshot[field] == value
+        public_run = await client.get(f"/api/v1/runs/{run_id}")
+        assert "model_configuration" not in public_run.json()
+
+
+async def test_onboard_missing_repository_does_not_scaffold_or_create_records(database, tmp_path):
+    from persistence.tables import ProjectRow
+
+    configured = services(database, tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(configured)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        response = await client.post("/api/v1/projects/onboard", json={
+            "name": "Missing", "folder_name": "not-present", "default_branch": "main",
+        })
+    assert response.status_code == 422
+    assert not (configured.settings.repository_import_root / "not-present").exists()
+    async with database.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(ProjectRow)) == 0
+
+
+@pytest.mark.parametrize(
+    "bad_path", ["../escape.py", "/absolute.py", ".git/config", "a/../../escape.py"],
+)
+async def test_onboard_invalid_uploaded_paths_reject_entire_import(database, tmp_path, bad_path):
+    configured = services(database, tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(configured)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        response = await client.post("/api/v1/projects/onboard", json={
+            "name": "Import", "folder_name": "uploaded", "default_branch": "main",
+            "files": [{"path": "README.md", "content": "Safe"},
+                      {"path": bad_path, "content": "Untrusted"}],
+        })
+    assert response.status_code == 422
+    assert not (configured.settings.repository_import_root / "uploaded").exists()
+
+
+async def test_onboard_upload_cannot_overwrite_existing_repository(database, tmp_path):
+    configured = services(database, tmp_path)
+    target = configured.settings.repository_import_root / "existing"
+    target.mkdir()
+    (target / "README.md").write_text("Original")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(configured)), base_url="http://test",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as client:
+        response = await client.post("/api/v1/projects/onboard", json={
+            "name": "Import", "folder_name": "existing", "default_branch": "main",
+            "files": [{"path": "README.md", "content": "Overwritten"}],
+        })
+    assert response.status_code == 409
+    assert (target / "README.md").read_text() == "Original"
+
+
 def authorization() -> dict[str, str]:
     return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 

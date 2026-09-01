@@ -10,21 +10,102 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
-from agents.base import AgentAttemptRecord, AgentInvocation, AgentRuntime, UsageRecorder
-from agents.gateway import ModelGateway
+from agents.base import (
+    AgentAttemptRecord,
+    AgentInvocation,
+    AgentRunResult,
+    AgentRuntime,
+    StructuredOutputExhausted,
+    UsageRecorder,
+)
+from agents.configuration import ModelRuntimeFactory
+from agents.gateway import FailureClass, GatewayError, ModelGateway
 from agents.specs import AgentRole, build_agent_specs
 from domain.enums import RiskLevel, RunStatus, TaskStatus, TaskType
 from domain.events import require_run_transition
-from domain.models import PlanLimits, TaskPlan
-from domain.task_policy import planner_execution_contract
+from domain.models import PlanLimits, TaskPlan, TaskSpec
+from domain.task_policy import (
+    TASK_CAPABILITY_NAMES,
+    TASK_REQUIRED_TOOLS,
+    planner_execution_contract,
+)
 from execution.repositories import RepositoryAdapterRegistry
 from knowledge.memory.port import MemoryPort
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import ModelCallRow, RepositoryRow, RunRow, RunStageAttemptRow, utc_now
-from planning.validator import TaskPlanValidator
+from planning.validator import TaskPlanValidator, ValidationIssue
 
 RepositoryContextProvider = Callable[[str], dict[str, Any]]
+_OWNERSHIP_POLL_SECONDS = 0.25
+
+
+class InvalidTaskPlan(ValueError):
+    def __init__(self, issues: tuple[ValidationIssue, ...]) -> None:
+        self.issues = issues
+        reasons = ", ".join(
+            f"{issue['code']}:{issue['message']}" for issue in _validation_feedback(issues)
+        )
+        super().__init__(f"architect produced an invalid task DAG: {reasons}")
+
+
+class PlanningOwnershipLost(RuntimeError):
+    pass
+
+
+def _validation_feedback(issues: tuple[ValidationIssue, ...]) -> list[dict[str, Any]]:
+    # These validator messages include arbitrary model-selected text. Keep
+    # actionable policy guidance without publishing those values to Activity.
+    safe_messages = {
+        "UNSUPPORTED_TOOL": "Use only registered tools listed in allowed_tools.",
+        "REPOSITORY_PATH_ESCAPE": "Use paths within the managed repository.",
+    }
+    return [
+        {
+            "code": issue.code,
+            "message": safe_messages.get(issue.code, issue.message),
+            "task_id": str(issue.task_id) if issue.task_id is not None else None,
+        }
+        for issue in issues[:50]
+    ]
+
+
+def _failure_details(error: Exception | None) -> dict[str, Any]:
+    # Provider exceptions can include credentials, URLs and response bodies.
+    # Classify them; never serialize raw exception text into prompts or events.
+    if isinstance(error, InvalidTaskPlan):
+        return {
+            "error_code": "INVALID_TASK_PLAN",
+            "message": "The generated task plan still violates execution policy after repair.",
+            "validation_issues": _validation_feedback(error.issues),
+            "validation_issue_count": len(error.issues),
+        }
+    if isinstance(error, StructuredOutputExhausted):
+        return {
+            "error_code": "INVALID_MODEL_OUTPUT",
+            "message": "The planning model did not return a valid task plan. Check model support.",
+        }
+    if isinstance(error, GatewayError):
+        if error.failure_class is FailureClass.TIMEOUT:
+            return {
+                "error_code": "MODEL_TIMEOUT",
+                "message": (
+                    "The planning model timed out. Check provider availability "
+                    "and timeout settings."
+                ),
+            }
+        return {
+            "error_code": "MODEL_PROVIDER_ERROR",
+            "message": (
+                "The planning model provider failed. Check connection, credentials "
+                "and model support."
+            ),
+            "failure_class": error.failure_class.value,
+        }
+    return {
+        "error_code": "PLANNING_ERROR",
+        "message": "Planning could not finish. Inspect dispatcher diagnostics before retrying.",
+    }
 
 
 class RunStageUsageRecorder(UsageRecorder):
@@ -80,9 +161,11 @@ class RunPlanningService:
         repository_context: RepositoryContextProvider | None = None,
         repository: DomainRepository | None = None,
         stale_after: timedelta = timedelta(seconds=30),
+        model_factory: ModelRuntimeFactory | None = None,
     ) -> None:
         self._database = database
         self._gateway = gateway
+        self._model_factory = model_factory
         self._memory = memory
         self._limits = limits
         self._repository_context = repository_context or default_repository_context
@@ -104,9 +187,12 @@ class RunPlanningService:
         if claimed is None:
             return None
         run, repository, stage_attempt_id, fence_started_at = claimed
+        configured = (
+            self._model_factory.resolve(run.model_configuration) if self._model_factory else None
+        )
         runtime = AgentRuntime(
-            self._spec,
-            self._gateway,
+            configured.apply_spec(self._spec) if configured else self._spec,
+            configured.gateway if configured else self._gateway,
             input_type=AgentInvocation,
             output_type=TaskPlan,
             memory=self._memory,
@@ -116,6 +202,8 @@ class RunPlanningService:
             ),
         )
         last_error: Exception | None = None
+        previous_candidate: TaskPlan | None = None
+        validation_issues: tuple[ValidationIssue, ...] = ()
         try:
             repository_context = await asyncio.to_thread(
                 self._repository_context, repository.source_path
@@ -125,6 +213,7 @@ class RunPlanningService:
                 run.id,
                 stage_attempt_id=stage_attempt_id,
                 fence_started_at=fence_started_at,
+                repository_context_failed=True,
             )
             raise
         base_payload: dict[str, object] = {
@@ -139,10 +228,15 @@ class RunPlanningService:
             "allowed_tools": sorted(self._validator.allowed_tools),
             "task_execution_contract": planner_execution_contract(),
             "platform_limits": self._limits.model_dump(mode="json"),
+            "max_risk_ceiling": self._validator.max_risk_ceiling.value,
             "repository": repository_context,
             "requirements": (
                 "Create the smallest sufficient typed DAG. Independent tasks should "
-                "have no artificial dependencies. Every task needs testable acceptance "
+                "have no artificial dependencies. Tasks that run tests against newly "
+                "implemented behavior must depend on that implementation so they receive "
+                "its code, rather than testing an unchanged baseline. Keep tightly coupled "
+                "edits together instead of assigning duplicate changes to parallel tasks. "
+                "Every task needs testable acceptance "
                 "criteria, bounded budgets, and only registered tools from allowed_tools. "
                 "The DAG must end in exactly one VALIDATION task that transitively depends "
                 "on every other task. Use only the task types needed for this goal; "
@@ -152,14 +246,22 @@ class RunPlanningService:
             ),
         }
         for attempt in range(3):
+            if not await self._is_current_owner(run.id, stage_attempt_id, fence_started_at):
+                return None
             try:
                 payload: dict[str, object] = dict(base_payload)
                 if last_error is not None:
-                    payload["previous_attempt_errors"] = str(last_error)
-                    # Surface validator issues explicitly so the model can repair
-                    if isinstance(last_error, ValueError) and "invalid task DAG" in str(last_error):
-                        payload["repair_hint"] = str(last_error)
-                result = await runtime.run(
+                    payload["previous_attempt_errors"] = _failure_details(last_error)
+                if previous_candidate is not None:
+                    payload["previous_candidate"] = previous_candidate.model_dump(mode="json")
+                    payload["validation_issues"] = _validation_feedback(validation_issues)
+                    payload["repair_hint"] = (
+                        "Repair previous_candidate using validation_issues. Preserve task IDs, "
+                        "valid tasks and dependencies unless a reported issue requires changing "
+                        "them. Return the complete repaired plan; do not regenerate unrelated work."
+                    )
+                result = await self._run_while_owned(
+                    runtime,
                     AgentInvocation(
                         trace_id=f"run:{run.id}:stage:architect:attempt:{attempt}",
                         run_id=run.id,
@@ -170,7 +272,8 @@ class RunPlanningService:
                         baseline_commit=run.baseline_commit,
                         goal=run.goal,
                         input_payload=payload,
-                    )
+                    ),
+                    fence_started_at=fence_started_at,
                 )
                 plan = result.output.model_copy(
                     update={
@@ -181,7 +284,7 @@ class RunPlanningService:
                         "revision": 1,
                         "limits": self._limits,
                         "tasks": tuple(
-                            task.model_copy(
+                            self._assign_required_tools(task).model_copy(
                                 update={
                                     "project_id": run.project_id,
                                     "repository_id": run.repository_id,
@@ -192,29 +295,21 @@ class RunPlanningService:
                         ),
                     }
                 )
+                previous_candidate = plan
                 self._validate_scope(plan, run)
                 validation = self._validator.validate(plan)
+                validation_issues = validation.issues
                 if not validation.valid:
-                    reasons = ", ".join(
-                        f"{issue.code}:{issue.message}" for issue in validation.issues
-                    )
-                    last_error = ValueError(f"architect produced an invalid task DAG: {reasons}")
-                    if attempt == 2:
-                        raise last_error
-                    continue
-                try:
-                    self._require_integration_sink(plan)
-                except ValueError as sink_error:
-                    last_error = sink_error
-                    if attempt == 2:
-                        raise
-                    continue
+                    raise InvalidTaskPlan(validation_issues)
+                self._require_integration_sink(plan)
                 await self._persist_plan(
                     plan,
                     stage_attempt_id=stage_attempt_id,
                     fence_started_at=fence_started_at,
                 )
                 return plan
+            except PlanningOwnershipLost:
+                return None
             except Exception as error:
                 last_error = error
                 if attempt == 2:
@@ -222,6 +317,8 @@ class RunPlanningService:
                         run.id,
                         stage_attempt_id=stage_attempt_id,
                         fence_started_at=fence_started_at,
+                        error=error,
+                        attempts=attempt + 1,
                     )
                     raise
                 # Retry with validation error feedback
@@ -232,8 +329,78 @@ class RunPlanningService:
             run.id,
             stage_attempt_id=stage_attempt_id,
             fence_started_at=fence_started_at,
+            error=last_error,
+            attempts=3,
         )
         raise last_error
+
+    async def _run_while_owned(
+        self,
+        runtime: AgentRuntime[TaskPlan],
+        invocation: AgentInvocation,
+        *,
+        fence_started_at: datetime,
+    ) -> AgentRunResult[TaskPlan]:
+        # Scope cancellation around the whole runtime, including model admission,
+        # HTTP calls and retry backoff. Cancelling its task propagates through the
+        # gateway's awaited HTTP task without creating a separate gateway watcher.
+        operation = asyncio.create_task(runtime.run(invocation))
+        ownership = asyncio.create_task(
+            self._watch_planning_owner(invocation.run_id, invocation.attempt_id, fence_started_at)
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {operation, ownership}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if ownership in done:
+                await ownership
+                raise PlanningOwnershipLost("run is no longer owned by the planning stage")
+            return await operation
+        finally:
+            # Also drain both children on caller cancellation and provider/poll
+            # failures. No old runtime may retain a model slot or keep retrying.
+            for task in (operation, ownership):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(operation, ownership, return_exceptions=True)
+
+    async def _watch_planning_owner(
+        self, run_id: UUID, stage_attempt_id: UUID, fence_started_at: datetime
+    ) -> None:
+        while await self._is_current_owner(  # noqa: ASYNC110 - ownership changes in other processes
+            run_id, stage_attempt_id, fence_started_at
+        ):
+            await asyncio.sleep(_OWNERSHIP_POLL_SECONDS)
+
+    def _assign_required_tools(self, task: TaskSpec) -> TaskSpec:
+        # The model does not decide whether an assigned stage can execute its
+        # mandatory operations. Fill only its static, registered requirements;
+        # keep unknown tools and invalid capability/risk selections for rejection.
+        if task.assigned_capability not in TASK_CAPABILITY_NAMES[task.task_type]:
+            return task
+        missing = (TASK_REQUIRED_TOOLS[task.task_type] & self._validator.allowed_tools) - set(
+            task.allowed_tools
+        )
+        return task.model_copy(update={"allowed_tools": (*task.allowed_tools, *sorted(missing))})
+
+    async def _is_current_owner(
+        self, run_id: UUID, stage_attempt_id: UUID, fence_started_at: datetime
+    ) -> bool:
+        async with self._database.sessions() as session:
+            return bool(
+                await session.scalar(
+                    select(RunRow.id)
+                    .join(RunStageAttemptRow, RunStageAttemptRow.run_id == RunRow.id)
+                    .where(
+                        RunRow.id == run_id,
+                        RunRow.state == RunStatus.PLANNING.value,
+                        RunRow.cancellation_requested_at.is_(None),
+                        RunStageAttemptRow.id == stage_attempt_id,
+                        RunStageAttemptRow.status == "RUNNING",
+                        RunStageAttemptRow.started_at == fence_started_at,
+                    )
+                )
+            )
 
     async def _claim_run(
         self,
@@ -266,13 +433,19 @@ class RunPlanningService:
                 run.state = RunStatus.PLANNING.value
                 run.state_entered_at = now
             attempt_id = uuid5(NAMESPACE_URL, f"run-stage:{run.id}:architect")
+            configured = (
+                self._model_factory.resolve(run.model_configuration)
+                if self._model_factory
+                else None
+            )
+            spec = configured.apply_spec(self._spec) if configured else self._spec
             await session.execute(
                 insert(RunStageAttemptRow)
                 .values(
                     id=attempt_id,
                     run_id=run.id,
                     stage="architect",
-                    agent_spec_hash=self._spec.spec_hash,
+                    agent_spec_hash=spec.spec_hash,
                     status="RUNNING",
                     started_at=now,
                 )
@@ -297,15 +470,19 @@ class RunPlanningService:
             run = await session.scalar(
                 select(RunRow).where(RunRow.id == plan.run_id).with_for_update()
             )
-            if run is None or run.state != RunStatus.PLANNING.value:
-                raise RuntimeError("run is no longer owned by the planning stage")
+            if (
+                run is None
+                or run.state != RunStatus.PLANNING.value
+                or run.cancellation_requested_at is not None
+            ):
+                raise PlanningOwnershipLost("run is no longer owned by the planning stage")
             existing = await session.scalar(
                 select(RunStageAttemptRow).where(RunStageAttemptRow.id == stage_attempt_id)
             )
-            if existing is None:
-                raise RuntimeError("planning attempt disappeared")
+            if existing is None or existing.run_id != run.id or existing.status != "RUNNING":
+                raise PlanningOwnershipLost("planning attempt is no longer running")
             if existing.started_at != fence_started_at:
-                raise RuntimeError("planning stage was taken over by another dispatcher")
+                raise PlanningOwnershipLost("planning stage was taken over by another dispatcher")
             await self._repository.create_plan_revision(
                 session,
                 run_id=run.id,
@@ -361,21 +538,66 @@ class RunPlanningService:
         *,
         stage_attempt_id: UUID,
         fence_started_at: datetime,
+        error: Exception | None = None,
+        attempts: int = 0,
+        repository_context_failed: bool = False,
     ) -> None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
             run = await session.scalar(select(RunRow).where(RunRow.id == run_id).with_for_update())
             attempt = await session.get(RunStageAttemptRow, stage_attempt_id)
-            if attempt is not None and attempt.started_at != fence_started_at:
+            if (
+                run is None
+                or run.state != RunStatus.PLANNING.value
+                or run.cancellation_requested_at is not None
+                or attempt is None
+                or attempt.run_id != run.id
+                or attempt.status != "RUNNING"
+                or attempt.started_at != fence_started_at
+            ):
                 return
-            if run is not None and run.state == RunStatus.PLANNING.value:
-                require_run_transition(RunStatus(run.state), RunStatus.FAILED)
-                await self._record_run_duration(session, run, exited_at=now)
-                run.state = RunStatus.FAILED.value
-                run.state_entered_at = now
-            if attempt is not None:
-                attempt.status = "FAILED"
-                attempt.ended_at = now
+            require_run_transition(RunStatus(run.state), RunStatus.FAILED)
+            await self._record_run_duration(session, run, exited_at=now)
+            run.state = RunStatus.FAILED.value
+            run.state_entered_at = now
+            attempt.status = "FAILED"
+            attempt.ended_at = now
+            details = _failure_details(error)
+            if repository_context_failed:
+                details = {
+                    "error_code": "REPOSITORY_CONTEXT_ERROR",
+                    "message": (
+                        "Planning could not inspect the repository. Check its path, access "
+                        "permissions and supported project files before retrying."
+                    ),
+                }
+            payload = {
+                "run_id": str(run.id),
+                "stage": "architect",
+                "stage_attempt_id": str(attempt.id),
+                "attempts": attempts,
+                **details,
+            }
+            event_id = uuid5(
+                NAMESPACE_URL,
+                f"run-planning-failed:{run.id}:{attempt.id}:{fence_started_at.isoformat()}",
+            )
+            await self._repository.append_audit(
+                session,
+                event_id=event_id,
+                event_type="run.planning_failed",
+                aggregate_type="run",
+                aggregate_id=run.id,
+                payload=payload,
+                correlation_id=run.id,
+                causation_id=attempt.id,
+            )
+            await self._repository.enqueue_event(
+                session,
+                event_id=event_id,
+                topic="run-state",
+                payload=payload,
+            )
 
     async def _record_run_duration(self, session: Any, run: RunRow, *, exited_at: datetime) -> None:
         await self._repository.record_state_duration(

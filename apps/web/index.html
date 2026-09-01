@@ -32,11 +32,12 @@
       <header class="topbar">
         <div class="breadcrumb"><span>Workspace</span><span aria-hidden="true">/</span><strong id="workspaceLabel">All runs</strong></div>
         <div class="topbar-actions">
-          <form id="lookupForm" class="search-form"><label class="sr-only" for="runLookup">Open a run by ID</label><input id="runLookup" type="text" autocomplete="off" placeholder="Open a run by ID…" required><button class="button ghost" type="submit">Open</button></form>
+          <form id="lookupForm" class="search-form"><label class="sr-only" for="runLookup">Open a run by ID</label><input id="runLookup" type="text" autocomplete="off" aria-describedby="lookupFeedback" placeholder="Open a run by ID…" required><button class="button ghost" type="submit">Open</button></form>
           <button id="openCommandPalette" class="button ghost command-button" type="button" aria-label="Search commands" aria-haspopup="dialog">⌘ <span>Commands</span><kbd>⌘K</kbd></button>
         </div>
       </header>
       <main class="main-content" id="mainContent" tabindex="-1">
+        <p id="lookupFeedback" class="inline-feedback hidden" role="status"></p>
         <section id="runsBrowserSection" class="section-container runs-browser-section" aria-labelledby="runsTitle">
           <header class="page-header"><div><div class="eyebrow">YOUR WORKSPACE</div><h1 id="runsTitle">All runs</h1><p>Start work, follow progress, and review what’s ready.</p></div><button id="runsNewBtn" class="button primary" type="button">＋ New run</button></header>
           <div id="runsSummary" class="runs-summary" aria-label="Run summary"></div>
@@ -79,7 +80,7 @@
         <section id="dashboard" class="dashboard-section hidden" aria-labelledby="runGoalTitle">
           <button id="backToRuns" class="button ghost back-button" type="button">← All runs</button>
           <div id="runFeedbackBanner" class="inline-feedback hidden" role="status"></div>
-          <header class="dashboard-header-card"><div class="dashboard-title-group"><span id="runStatusBadge" class="status-badge">Loading</span><h1 id="runGoalTitle" class="run-headline">Loading run…</h1><div class="run-meta-pills"><span id="runProjectName">—</span><span aria-hidden="true">/</span><code id="runIdText"></code><button id="copyRunId" class="button ghost icon-btn" title="Copy run ID" aria-label="Copy run ID" type="button">⧉</button></div></div><div class="dashboard-controls"><div id="liveStreamBadge" class="stream-beacon"><span class="beacon-dot"></span><span id="streamStatusText">Loading…</span></div><button id="refreshRun" class="button secondary" type="button">↻ Refresh</button><button id="newRunBtn" class="button ghost" type="button">New run</button></div></header>
+          <header class="dashboard-header-card"><div class="dashboard-title-group"><span id="runStatusBadge" class="status-badge">Loading</span><h1 id="runGoalTitle" class="run-headline">Loading run…</h1><div class="run-meta-pills"><span id="runProjectName">—</span><span aria-hidden="true">/</span><code id="runIdText"></code><button id="copyRunId" class="button ghost icon-btn" title="Copy run ID" aria-label="Copy run ID" type="button">⧉</button></div></div><div class="dashboard-controls"><div id="liveStreamBadge" class="stream-beacon"><span class="beacon-dot"></span><span id="streamStatusText">Loading…</span></div><button id="refreshRun" class="button secondary" type="button">↻ Refresh</button><button id="cancelRun" class="button danger hidden" type="button" aria-haspopup="dialog">Cancel run</button><button id="newRunBtn" class="button ghost" type="button">New run</button></div></header>
           <div class="telemetry-hud-grid">
             <div class="hud-card"><span class="hud-label">Status</span><span id="runState" class="hud-main-val">—</span><span id="stateDuration" class="hud-subtext">—</span></div>
             <div class="hud-card"><span class="hud-label">Task progress <span id="planRevision"></span></span><span id="taskSummary" class="hud-main-val">—</span><div class="hud-progress-bar"><div id="dagProgressBar" class="hud-progress-fill"></div></div></div>
@@ -200,14 +201,15 @@
         <div class="form-group">
           <label for="adminToken">Admin token</label>
           <div class="input-wrapper">
-            <input id="adminToken" type="password" minlength="32" autocomplete="current-password" required placeholder="Enter AUTOSWE_ADMIN_TOKEN">
+            <input id="adminToken" type="password" minlength="32" autocomplete="current-password" aria-describedby="authFeedback" required placeholder="Enter AUTOSWE_ADMIN_TOKEN">
           </div>
         </div>
+        <p id="authFeedback" class="form-feedback hidden" role="status"></p>
       </div>
       <div class="modal-footer">
         <button id="closeAuth" class="button ghost" type="button">Cancel</button>
         <button id="clearToken" class="button ghost" type="button">Clear</button>
-        <button class="button primary" value="save" type="submit">Connect workspace</button>
+        <button id="connectWorkspace" class="button primary" value="save" type="submit">Connect workspace</button>
       </div>
     </form>
   </dialog>
@@ -231,7 +233,7 @@
         <div class="form-group">
           <label class="section-sublabel">Provider</label>
           <div class="provider-preset-chips">
-            <button type="button" class="preset-chip provider-chip active" data-provider="ollama" data-url="http://host.docker.internal:11434/v1" data-model="gemma4:12b-mlx" data-fallbacks="qwen3.6:35b-a3b-coding-nvfp4">
+            <button type="button" class="preset-chip provider-chip" data-provider="ollama" data-url="http://host.docker.internal:11434/v1" data-model="" data-fallbacks="">
               🦙 Local Ollama
             </button>
             <button type="button" class="preset-chip provider-chip" data-provider="openai" data-url="https://api.openai.com/v1" data-model="gpt-4o" data-fallbacks="gpt-4o-mini,o3-mini">
@@ -270,6 +272,7 @@
             <span id="apiKeyStatusHint" class="field-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">Leave blank to retain a saved key for the same endpoint.</span>
           </div>
 
+          <p id="modelDiscoveryStatus" class="form-feedback hidden" role="status" aria-live="polite"></p>
           <div class="form-row-2">
             <div class="form-group">
               <div class="label-row">
@@ -281,7 +284,7 @@
               </div>
               <div class="input-wrapper">
                 <select id="primaryModelSelect" class="styled-select">
-                  <option value="">Discovering models...</option>
+                  <option value="__custom__">Enter a custom model</option>
                 </select>
               </div>
               <div class="input-wrapper" style="margin-top: 6px;">
@@ -338,6 +341,13 @@
     </div>
   </dialog>
 
+  <dialog id="cancelRunDialog" class="modal-dialog" aria-labelledby="cancelRunTitle" aria-describedby="cancelRunDescription">
+    <form id="cancelRunForm" class="modal-card">
+      <div class="modal-header"><div><div class="eyebrow">STOP ACTIVE WORK</div><h2 id="cancelRunTitle">Cancel this run?</h2></div><button id="closeCancelRun" class="button ghost icon-btn" type="button" aria-label="Close cancellation">×</button></div>
+      <div class="modal-body"><p id="cancelRunDescription"></p><p id="cancelRunFeedback" class="form-feedback hidden" role="status"></p></div>
+      <div class="modal-footer"><button id="keepRun" class="button secondary" type="button">Keep running</button><button id="confirmCancelRun" class="button danger" type="submit">Cancel run</button></div>
+    </form>
+  </dialog>
   <dialog id="approvalDialog" class="modal-dialog" aria-labelledby="approvalTitle"><form id="approvalForm" class="modal-card"><div class="modal-header"><div><div class="eyebrow">REVIEW ACTION</div><h2 id="approvalTitle">Confirm decision</h2><p id="approvalDescription" class="modal-subtitle"></p></div><button id="closeApproval" class="button ghost icon-btn" type="button" aria-label="Close approval">×</button></div><div class="modal-body"><div class="form-group"><label for="approvalOperator">Your operator identity</label><input id="approvalOperator" required maxlength="200" placeholder="Name recorded in the audit log" autocomplete="name"></div><p id="approvalFeedback" class="form-feedback hidden" role="status"></p></div><div class="modal-footer"><button id="confirmApproval" class="button primary" type="submit">Confirm</button></div></form></dialog>
   <dialog id="helpDialog" class="modal-dialog" aria-labelledby="helpTitle"><div class="modal-card"><div class="modal-header"><div><div class="eyebrow">QUICK GUIDE</div><h2 id="helpTitle">A clear path from goal to result</h2></div><button id="closeHelp" class="button ghost icon-btn" type="button" aria-label="Close guide">×</button></div><div class="modal-body help-steps"><section><span class="step-num">1</span><div><h3>Connect your workspace</h3><p>Use your admin token, then check Model settings before starting work.</p></div></section><section><span class="step-num">2</span><div><h3>Start a run</h3><p>Connect a repository and describe the change. Include the behavior you expect and how to verify it.</p></div></section><section><span class="step-num">3</span><div><h3>Review the result</h3><p>Follow tasks, inspect activity, review pending approvals, and download files from the run.</p></div></section><p class="field-hint"><kbd>⌘K</kbd> or <kbd>Ctrl K</kbd> opens commands. <kbd>Esc</kbd> closes a dialog.</p></div></div></dialog>
   <div id="toast" class="hidden"></div>

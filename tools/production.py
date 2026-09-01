@@ -4,11 +4,11 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
-from pydantic import Field
+from pydantic import Field, StringConstraints, model_validator
 
 from domain.enums import RiskLevel
 from domain.models import ContractModel
@@ -40,7 +40,7 @@ class ReadFileArguments(ContractModel):
 class ReadFileResult(ContractModel):
     schema_version: Literal["1.0"] = "1.0"
     path: str
-    content: str
+    content: Annotated[str, StringConstraints(strip_whitespace=False)]
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
     sandbox_execution_id: UUID
@@ -69,7 +69,7 @@ class SearchCodeResult(ContractModel):
 class ApplyPatchArguments(ContractModel):
     schema_version: Literal["1.0"] = "1.0"
     path: str = Field(min_length=1, max_length=1_024)
-    content: str = Field(max_length=250_000)
+    content: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(max_length=250_000)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -82,9 +82,44 @@ class ApplyPatchResult(ContractModel):
 
 
 class RunChecksArguments(ContractModel):
+    model_config = {"hide_input_in_errors": True}
+
     schema_version: Literal["1.0"] = "1.0"
-    operation: Literal["lint", "typecheck", "targeted_test", "full_test", "build"]
-    target: str | None = Field(default=None, max_length=1_024)
+    operation: Literal["lint", "typecheck", "targeted_test", "full_test", "build"] = Field(
+        description=(
+            "Choose a fixed repository check. Only targeted_test accepts a target; "
+            "lint, typecheck, full_test and build require target=null."
+        )
+    )
+    target: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1_024,
+        description=(
+            "For targeted_test, supply one discovered test file relative to the repository, "
+            "not a directory, shell command or extra flags. For every other operation use null. "
+            'Examples: {"operation":"full_test","target":null}; '
+            '{"operation":"targeted_test","target":"tests/test_example.py"}.'
+        ),
+    )
+
+    @model_validator(mode="after")
+    def operation_target_contract(self) -> Self:
+        # Validate before adapter inspection or sandbox dispatch, using the same
+        # authoritative command contract that the fixed adapter allowlist uses.
+        try:
+            CommandRequest(kind=CommandKind(self.operation), target=self.target)
+        except ValueError as error:
+            if self.operation == "targeted_test":
+                raise ValueError(
+                    "targeted_test requires a discovered test file such as tests/test_example.py; "
+                    "use full_test with target=null for the whole suite."
+                ) from error
+            raise ValueError(
+                f"{self.operation} requires target=null; use targeted_test with a discovered "
+                "test file for a single test."
+            ) from error
+        return self
 
 
 class RunChecksResult(ContractModel):
@@ -359,7 +394,7 @@ class ProductionToolSet:
         encoded = base64.b64encode(values.content.encode()).decode("ascii")
         chunks = tuple(
             encoded[index : index + 3_500] for index in range(0, len(encoded), 3_500)
-        ) or ("",)
+        )
         result = await self._generic(
             "apply_patch",
             CommandSpec(

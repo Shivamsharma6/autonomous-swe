@@ -10,7 +10,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from redis.asyncio import Redis
 
-from agents.gateway import OpenAICompatibleGateway, ProviderCapabilities
+from agents.configuration import ModelRuntimeFactory
 from apps.dispatcher.background import EventConsumptionLoop, RetentionLoop
 from domain.models import ContractModel, PlanLimits
 from execution.sandbox.worktrees import GitWorktreeManager
@@ -211,20 +211,8 @@ async def run_dispatcher() -> None:
         token=settings.uams_token.get_secret_value(),
         timeout=settings.uams_timeout_seconds,
     )
-    declared = (
-        ProviderCapabilities.all_supported()
-        if settings.model_capability_mode == "declared"
-        else None
-    )
-    model = OpenAICompatibleGateway(
-        base_url=settings.model_base_url,
-        api_key=settings.model_api_key.get_secret_value(),
-        max_concurrency=settings.max_model_concurrency,
-        input_cost_per_million=settings.model_input_cost_per_million,
-        cached_input_cost_per_million=settings.model_cached_input_cost_per_million,
-        output_cost_per_million=settings.model_output_cost_per_million,
-        default_capabilities=declared,
-    )
+    model_factory = ModelRuntimeFactory(settings)
+    model = model_factory.resolve(None).gateway
     transport = RedisStreamsTransport(redis)
     repository = DomainRepository()
     scheduler = SchedulerService(
@@ -251,6 +239,7 @@ async def run_dispatcher() -> None:
         planner=RunPlanningService(
             database=database,
             gateway=model,
+            model_factory=model_factory,
             memory=memory,
             primary_model=settings.model_primary,
             fallback_models=tuple(settings.model_fallbacks),
@@ -266,6 +255,7 @@ async def run_dispatcher() -> None:
         finalizer=RunFinalizationService(
             database=database,
             gateway=model,
+            model_factory=model_factory,
             memory=memory,
             artifacts=artifacts,
             scheduler=scheduler,
@@ -357,7 +347,7 @@ async def run_dispatcher() -> None:
             publish_task_dispatch(),
         )
     finally:
-        await model.close()
+        await model_factory.close()
         await memory.close()
         await redis.aclose()
         await database.dispose()

@@ -112,25 +112,30 @@ class DeliveryConsumer:
         self, record: RedisStreamRecord, *, error: Exception, now: datetime
     ) -> int:
         async with self._database.transaction() as session:
-            delivery = await session.scalar(
-                select(ConsumerDeliveryRow)
-                .where(
-                    ConsumerDeliveryRow.consumer == self._group,
-                    ConsumerDeliveryRow.event_id == record.event_id,
-                )
-                .with_for_update()
-            )
-            if delivery is None:
-                delivery = ConsumerDeliveryRow(
+            # A missing row cannot be protected by SELECT FOR UPDATE. Upsert
+            # the counter atomically and hold its row lock through retry/DLQ state.
+            last_error = str(error)[:20_000]
+            result = await session.execute(
+                insert(ConsumerDeliveryRow)
+                .values(
                     consumer=self._group,
                     event_id=record.event_id,
                     topic=record.topic,
+                    attempts=1,
+                    last_error=last_error,
+                    updated_at=now,
                 )
-                session.add(delivery)
-                await session.flush()
-            delivery.attempts += 1
-            delivery.last_error = str(error)[:20_000]
-            delivery.updated_at = now
+                .on_conflict_do_update(
+                    constraint="uq_consumer_event_delivery",
+                    set_={
+                        "attempts": ConsumerDeliveryRow.attempts + 1,
+                        "last_error": last_error,
+                        "updated_at": now,
+                    },
+                )
+                .returning(ConsumerDeliveryRow)
+            )
+            delivery = result.scalar_one()
             if delivery.attempts >= self._retry_policy.max_attempts:
                 delivery.status = "DEAD_LETTERED"
                 delivery.next_attempt_at = now

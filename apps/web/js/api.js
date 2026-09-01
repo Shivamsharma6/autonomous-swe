@@ -20,8 +20,7 @@ export function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY);
 }
 
-export async function api(path, options = {}) {
-  const token = getToken();
+export async function api(path, options = {}, token = getToken()) {
   if (!token) {
     if (onUnauthorized) onUnauthorized();
     throw new Error('Operator authentication is required.');
@@ -33,7 +32,7 @@ export async function api(path, options = {}) {
   }
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401) {
-    if (onUnauthorized) onUnauthorized();
+    if (onUnauthorized && token === getToken()) onUnauthorized();
     throw new Error('Admin token was rejected by server.');
   }
   if (!response.ok) {

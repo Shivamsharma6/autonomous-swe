@@ -51,6 +51,24 @@ def request(*, timeout: float = 1.0) -> ModelRequest:
     )
 
 
+async def test_provider_errors_do_not_echo_credentials_into_service_errors():
+    secret = "synthetic-credential-not-for-use"  # noqa: S105 - synthetic regression credential
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"error": {
+            "message": f"Incorrect API key provided: {secret}",
+        }})
+    )) as client:
+        gateway = OpenAICompatibleGateway(
+            base_url="http://model.test/v1", api_key=secret, max_concurrency=1,
+            client=client, default_capabilities=ProviderCapabilities.all_supported(),
+        )
+        with pytest.raises(GatewayError) as caught:
+            await gateway.complete(request())
+    assert secret not in str(caught.value)
+    assert "401" in str(caught.value)
+    assert caught.value.failure_class == FailureClass.PERMANENT
+
+
 @pytest.mark.asyncio
 async def test_openai_wire_uses_strict_schema_native_tools_usage_and_trace() -> None:
     seen: list[dict[str, Any]] = []

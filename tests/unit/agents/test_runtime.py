@@ -463,3 +463,56 @@ def test_only_required_declarative_roles_are_instantiated() -> None:
         AgentRole.RESEARCHER: "researcher",
         AgentRole.VALIDATION: "validation",
     }
+
+
+@pytest.mark.parametrize("failure_class", [FailureClass.TIMEOUT, FailureClass.PERMANENT])
+async def test_retry_accounting_ordinals_are_unique_without_consuming_turn_budget(
+    monkeypatch, failure_class
+):
+    monkeypatch.setattr("agents.base._RETRY_BACKOFF_BASE", 0)
+    gateway = ScriptedGateway(
+        responses=(
+            ScriptedResponse(error=GatewayError("retry this request", failure_class=failure_class)),
+            ScriptedResponse(response({"answer": "verified"})),
+        )
+    )
+    runtime = AgentRuntime(
+        spec(turn_budget=1),
+        gateway,
+        input_type=AgentInvocation,
+        output_type=VerifiedResult,
+    )
+    request = invocation()
+
+    result = await runtime.run(request)
+
+    assert result.output.answer == "verified"
+    assert [attempt.turn for attempt in result.attempts] == [1, 2]
+    assert [attempt.failure_class for attempt in result.attempts] == [failure_class, None]
+    assert result.trace_id == request.trace_id
+    assert all(attempt.trace_id == request.trace_id for attempt in result.attempts)
+    assert result.usage.total_tokens == 15
+    assert result.usage.cost_usd == pytest.approx(0.01)
+
+
+async def test_retry_then_schema_repair_uses_one_continuous_accounting_sequence(monkeypatch):
+    monkeypatch.setattr("agents.base._RETRY_BACKOFF_BASE", 0)
+    gateway = ScriptedGateway(
+        responses=(
+            ScriptedResponse(error=GatewayError("timeout", failure_class=FailureClass.TIMEOUT)),
+            ScriptedResponse(response({"answer": ""})),
+            ScriptedResponse(response({"answer": "verified"})),
+        )
+    )
+    runtime = AgentRuntime(
+        spec(turn_budget=2),
+        gateway,
+        input_type=AgentInvocation,
+        output_type=VerifiedResult,
+    )
+
+    result = await runtime.run(invocation())
+
+    assert [attempt.turn for attempt in result.attempts] == [1, 2, 3]
+    assert result.attempts[1].validation_errors
+    assert result.usage.total_tokens == 30

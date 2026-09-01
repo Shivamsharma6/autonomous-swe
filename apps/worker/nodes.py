@@ -13,12 +13,15 @@ from sqlalchemy.dialects.postgresql import insert
 
 from agents.base import (
     AgentAttemptRecord,
+    AgentBudgetExceeded,
     AgentInvocation,
     AgentRuntime,
+    StructuredOutputExhausted,
     ToolDispatcher,
     UsageRecorder,
 )
-from agents.gateway import ModelGateway, ToolCall, ToolDefinition
+from agents.gateway import GatewayError, ModelGateway, ToolCall, ToolDefinition
+from agents.specs import AgentRole, build_agent_specs
 from domain.enums import RiskLevel, TaskStatus
 from domain.messages import ContextHandoff
 from domain.models import AgentSpec, ContractModel, ToolCallRequest
@@ -283,6 +286,9 @@ class ProductionNodeExecutor:
         self._risk_ceiling = risk_ceiling
         self._primary_model = primary_model
         self._fallback_models = fallback_models
+        self._agent_specs = build_agent_specs(
+            primary_model=primary_model, fallback_models=fallback_models
+        )
         self._artifacts = artifacts
         self._repository = repository or DomainRepository()
         self._usage = PostgresUsageRecorder(database)
@@ -376,7 +382,9 @@ class ProductionNodeExecutor:
             tool_grants=tool_names,
             maximum_risk=self._risk_ceiling,
             memory_policy="verified-external-uams-context",
-            token_budget=20_000,
+            # Count repeated prompt tokens while allowing a normal multi-file
+            # tool exchange to finish within the same bound as other agents.
+            token_budget=self._agent_specs[AgentRole(role)].token_budget,
             cost_budget_usd=2.0,
             turn_budget=12,
             wall_time_seconds=900,
@@ -439,9 +447,11 @@ class ProductionNodeExecutor:
                         default_repository_context, str(self._tool_set.worktree)
                     ),
                     "execution_requirements": (
+                        "Complete only the assigned task and current node, not parallel tasks. "
                         "Use repository-relative paths, e.g. src/app.py; use '.' for search_code. "
                         "Read real source before investigating. Mutation stages must "
-                        "call apply_patch. Test stages must call run_tests. Only report "
+                        "call apply_patch before returning final output. "
+                        "Test stages must call run_tests. Only report "
                         "changed paths and verification backed by successful tool results. "
                         "Recall summarizes supplied context only; "
                         "it must not claim to have read files, changed code, or run tests. "
@@ -567,13 +577,35 @@ class ProductionNodeExecutor:
                 .where(WorkflowNodeExecutionRow.idempotency_key == request.idempotency_key)
                 .with_for_update()
             )
-            if row is not None and row.status != "COMPLETED":
+            if row is not None and row.status == "RUNNING":
+                now = utc_now()
+                details = _node_failure_details(error)
                 row.status = "FAILED"
                 row.result = {
                     "error_type": type(error).__name__,
-                    "error": str(SecretRedactor().redact(str(error)))[:4_000],
+                    "error": details["message"],
+                    **details,
                 }
-                row.completed_at = utc_now()
+                row.completed_at = now
+                payload = {
+                    "run_id": str(request.run_id),
+                    "task_id": str(request.task_id),
+                    "attempt_id": str(request.attempt_id),
+                    "node": request.node_name,
+                    **details,
+                }
+                event_id = uuid5(
+                    NAMESPACE_URL, f"{request.idempotency_key}:failed:{now.isoformat()}"
+                )
+                await self._repository.append_audit(
+                    session, event_id=event_id, event_type="task.node_failed",
+                    aggregate_type="task", aggregate_id=request.task_id,
+                    payload=payload, correlation_id=request.run_id,
+                    causation_id=request.attempt_id,
+                )
+                await self._repository.enqueue_event(
+                    session, event_id=event_id, topic="task-state", payload=payload,
+                )
 
     def _tool_definition(self, name: str) -> ToolDefinition:
         registered = self._registry.resolve(name, "1.0")
@@ -582,6 +614,35 @@ class ProductionNodeExecutor:
             description=f"Governed AutoSWE {name} operation in the isolated task worktree.",
             input_schema=registered.argument_schema,
         )
+
+
+def _node_failure_details(error: Exception) -> dict[str, str]:
+    # Provider errors and validation inputs may contain secrets or private source.
+    # Publish classifications and recovery guidance rather than exception bodies.
+    if isinstance(error, AgentBudgetExceeded):
+        return {
+            "error_code": "AGENT_BUDGET_EXCEEDED",
+            "message": "The agent exhausted its budget before finishing. Reduce task scope "
+            "or use a more efficient model before retrying.",
+        }
+    if isinstance(error, StructuredOutputExhausted):
+        return {
+            "error_code": "INVALID_MODEL_OUTPUT",
+            "message": "The model could not produce valid output backed by tool evidence. "
+            "Inspect tool results and model support before retrying.",
+        }
+    if isinstance(error, GatewayError):
+        return {
+            "error_code": "MODEL_PROVIDER_ERROR",
+            "message": "The model provider failed. Check the model, connection, credentials "
+            "and inference timeout before retrying.",
+            "failure_class": error.failure_class.value,
+        }
+    return {
+        "error_code": "TASK_EXECUTION_ERROR",
+        "message": "The task stage failed. Inspect tool results and worker diagnostics "
+        "before retrying.",
+    }
 
 
 def validate_tool_evidence(

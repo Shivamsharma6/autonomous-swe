@@ -139,7 +139,8 @@ def create_production_app() -> FastAPI:
             return False
 
     async def model_ready() -> bool:
-        return bool(settings.model_primary and settings.model_base_url)
+        configuration = await services.model_settings.load()
+        return bool(configuration.primary_model and configuration.base_url)
 
     async def no_op_cancel(_: object) -> None:
         return None

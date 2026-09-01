@@ -17,7 +17,9 @@ class Database:
     def __init__(self, url: str, *, echo: bool = False) -> None:
         if not url.startswith("postgresql+asyncpg://"):
             raise ValueError("the domain database must use postgresql+asyncpg")
-        self.engine: AsyncEngine = create_async_engine(url, echo=echo, pool_pre_ping=True)
+        self.engine: AsyncEngine = create_async_engine(
+            url, echo=echo, pool_pre_ping=True, hide_parameters=True
+        )
         self.sessions = async_sessionmaker(
             self.engine,
             class_=AsyncSession,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from redis.asyncio import Redis
 
-from agents.gateway import OpenAICompatibleGateway, ProviderCapabilities
+from agents.configuration import ModelRuntimeFactory
 from apps.worker.executor import DispatchedTaskExecutor, TaskExecutionContext
 from apps.worker.nodes import ProductionNodeExecutor
 from apps.worker.runner import RedisDispatchInbox, WorkerService, install_worker_signal_handlers
@@ -23,6 +23,7 @@ from observability.tracing import configure_telemetry
 from persistence.artifacts import ArtifactService, ArtifactStore
 from persistence.database import Database
 from persistence.repositories import DomainRepository
+from persistence.tables import RunRow
 from policies.risk.policy_engine import risk_exceeds
 from tools.production import ProductionToolSet, SandboxManagerClient
 from workflows.checkpoints import postgres_checkpointer
@@ -38,20 +39,7 @@ async def run_worker() -> None:
         token=settings.uams_token.get_secret_value(),
         timeout=settings.uams_timeout_seconds,
     )
-    declared = (
-        ProviderCapabilities.all_supported()
-        if settings.model_capability_mode == "declared"
-        else None
-    )
-    model = OpenAICompatibleGateway(
-        base_url=settings.model_base_url,
-        api_key=settings.model_api_key.get_secret_value(),
-        max_concurrency=settings.max_model_concurrency,
-        input_cost_per_million=settings.model_input_cost_per_million,
-        cached_input_cost_per_million=settings.model_cached_input_cost_per_million,
-        output_cost_per_million=settings.model_output_cost_per_million,
-        default_capabilities=declared,
-    )
+    model_factory = ModelRuntimeFactory(settings)
     sandbox = SandboxManagerClient(
         base_url=settings.sandbox_manager_url,
         token=settings.admin_token.get_secret_value(),
@@ -75,6 +63,11 @@ async def run_worker() -> None:
     )
 
     async def node_executor_factory(context: TaskExecutionContext) -> ProductionNodeExecutor:
+        async with database.sessions() as session:
+            run = await session.get(RunRow, context.run_id)
+        if run is None:
+            raise LookupError(f"run {context.run_id} does not exist")
+        configured_model = model_factory.resolve(run.model_configuration)
         source = Path(context.source_path)
         worktree = await asyncio.to_thread(
             worktrees.create_task_worktree,
@@ -104,7 +97,7 @@ async def run_worker() -> None:
         return ProductionNodeExecutor(
             database=database,
             memory=memory,
-            model_gateway=model,
+            model_gateway=configured_model.gateway,
             tool_set=tool_set,
             project_id=context.project_id,
             repository_id=context.repository_id,
@@ -116,8 +109,8 @@ async def run_worker() -> None:
                 if risk_exceeds(context.risk_ceiling, settings.max_risk_ceiling)
                 else context.risk_ceiling
             ),
-            primary_model=settings.model_primary,
-            fallback_models=tuple(settings.model_fallbacks),
+            primary_model=configured_model.primary_model,
+            fallback_models=configured_model.fallback_models,
             artifacts=artifacts,
             repository=repository,
         )
@@ -131,8 +124,6 @@ async def run_worker() -> None:
         agent_spec_hash=canonical_sha256(
             {
                 "engine": "production-task-subgraphs@1.0",
-                "primary_model": settings.model_primary,
-                "fallback_models": settings.model_fallbacks,
             }
         ),
     )
@@ -151,10 +142,12 @@ async def run_worker() -> None:
         sqlalchemy_engine=database.engine,
     )
     try:
-        await WorkerService(inbox=inbox, executor=executor).run(stop)
+        await WorkerService(
+            inbox=inbox, executor=executor, max_concurrency=settings.max_parallel_tasks
+        ).run(stop)
     finally:
         await sandbox.close()
-        await model.close()
+        await model_factory.close()
         await memory.close()
         await redis.aclose()
         await database.dispose()

@@ -15,6 +15,7 @@ from knowledge.memory.port import MemoryPort
 from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactService
 from persistence.database import Database
+from persistence.model_settings import ModelConfiguration, ModelSettingsStore
 from persistence.repositories import DomainRepository
 from tools.approval import ApprovalService
 
@@ -76,6 +77,12 @@ class ControlPlaneServices:
     readiness: ReadinessChecks
     database_repository: DomainRepository = field(default_factory=DomainRepository)
     close_callbacks: tuple[CloseCallback, ...] = field(default_factory=tuple)
+    model_settings: ModelSettingsStore = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.model_settings = ModelSettingsStore(
+            self.database, ModelConfiguration.from_settings(self.settings)
+        )
 
     async def close(self) -> None:
         for callback in reversed(self.close_callbacks):

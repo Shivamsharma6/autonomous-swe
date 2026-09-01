@@ -68,7 +68,9 @@ class AgentAttemptRecord(ContractModel):
     task_id: UUID
     attempt_id: UUID
     agent_spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    turn: int = Field(ge=1)
+    turn: int = Field(
+        ge=1, description="Model request ordinal within the invocation, including retries"
+    )
     model: str
     trace_id: str
     provider_request_id: str | None = None
@@ -206,7 +208,13 @@ class AgentRuntime[OutputT: BaseModel]:
         transient_failures = 0
 
         turn = 1
+        request_number = 0
         while turn <= self.spec.turn_budget:
+            # Accounting counts every outbound attempt, while the logical turn
+            # budget excludes transport retries and model fallbacks. Recorders
+            # use this ordinal in their idempotency keys; reusing a budget turn
+            # would discard a success after a timeout recorded zero usage.
+            request_number += 1
             model = models[min(model_index, len(models) - 1)]
             request = ModelRequest(
                 trace_id=invocation.trace_id,
@@ -225,7 +233,7 @@ class AgentRuntime[OutputT: BaseModel]:
                     task_id=invocation.task_id,
                     attempt_id=invocation.attempt_id,
                     agent_spec_hash=self.spec.spec_hash,
-                    turn=turn,
+                    turn=request_number,
                     model=model,
                     trace_id=invocation.trace_id,
                     usage=ModelUsage(),
@@ -264,7 +272,7 @@ class AgentRuntime[OutputT: BaseModel]:
             total_cost += response.usage.cost_usd
 
             if response.tool_calls:
-                attempt = self._attempt(invocation, turn, response)
+                attempt = self._attempt(invocation, request_number, response)
                 attempts.append(attempt)
                 await self._usage_recorder.record(attempt)
                 self._check_budget(total_input + total_output, total_cost)
@@ -280,7 +288,9 @@ class AgentRuntime[OutputT: BaseModel]:
                     self._output_validator(output)
             except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as error:
                 errors = _validation_messages(error)
-                attempt = self._attempt(invocation, turn, response, validation_errors=errors)
+                attempt = self._attempt(
+                    invocation, request_number, response, validation_errors=errors
+                )
                 attempts.append(attempt)
                 await self._usage_recorder.record(attempt)
                 self._check_budget(total_input + total_output, total_cost)
@@ -306,7 +316,7 @@ class AgentRuntime[OutputT: BaseModel]:
                 turn += 1
                 continue
 
-            attempt = self._attempt(invocation, turn, response)
+            attempt = self._attempt(invocation, request_number, response)
             attempts.append(attempt)
             await self._usage_recorder.record(attempt)
             self._check_budget(total_input + total_output, total_cost)
@@ -378,7 +388,7 @@ class AgentRuntime[OutputT: BaseModel]:
     def _attempt(
         self,
         invocation: AgentInvocation,
-        turn: int,
+        request_number: int,
         response: ModelResponse,
         *,
         validation_errors: tuple[str, ...] = (),
@@ -388,7 +398,7 @@ class AgentRuntime[OutputT: BaseModel]:
             task_id=invocation.task_id,
             attempt_id=invocation.attempt_id,
             agent_spec_hash=self.spec.spec_hash,
-            turn=turn,
+            turn=request_number,
             model=response.model,
             trace_id=response.trace_id,
             provider_request_id=response.provider_request_id,

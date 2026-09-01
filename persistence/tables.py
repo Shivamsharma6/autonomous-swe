@@ -91,6 +91,14 @@ class ProjectRow(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(300), nullable=False)
 
 
+class WorkspaceModelConfigRow(TimestampMixin, Base):
+    __tablename__ = "workspace_model_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    __table_args__ = (CheckConstraint("id = 1", name="ck_workspace_model_config_singleton"),)
+
+
 class RepositoryRow(TimestampMixin, Base):
     __tablename__ = "repositories"
 
@@ -122,6 +130,8 @@ class RunRow(TimestampMixin, Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Private provider settings captured at launch; intentionally absent from public responses.
+    model_configuration: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     __table_args__ = (
         CheckConstraint("length(baseline_commit) >= 40", name="ck_runs_baseline_commit"),
         Index("ix_runs_project_state", "project_id", "state"),

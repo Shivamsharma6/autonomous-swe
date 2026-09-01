@@ -1,0 +1,66 @@
+{
+    "runs": [
+        {
+            "id": "63731e5b-7866-45ef-bd1c-92d549dde750",
+            "state": "CANCELLED",
+            "created_at": "2026-08-31T18:25:58.497989+00:00",
+            "selected_model": "gemma4:12b-mlx",
+            "state_entered_at": "2026-08-31T18:28:48.285847+00:00"
+        },
+        {
+            "id": "12bf768c-e2d7-4b81-be69-152d606a111f",
+            "state": "CANCELLED",
+            "created_at": "2026-08-31T18:27:21.888021+00:00",
+            "selected_model": "nemotron-3.5-lightning:30b-mlx",
+            "state_entered_at": "2026-08-31T18:27:35.164074+00:00"
+        },
+        {
+            "id": "0e6f13a9-247f-4320-b167-027ab8e1399a",
+            "state": "FAILED",
+            "created_at": "2026-08-31T18:28:51.62087+00:00",
+            "selected_model": "nemotron-3.5-lightning:30b-mlx",
+            "state_entered_at": "2026-08-31T18:42:32.377122+00:00"
+        },
+        {
+            "id": "c8f34ee9-7c92-4c03-b1e2-2120d6579334",
+            "state": "FAILED",
+            "created_at": "2026-08-31T18:30:06.677897+00:00",
+            "selected_model": "ui-repair-missing-model",
+            "state_entered_at": "2026-08-31T18:39:09.368195+00:00"
+        }
+    ],
+    "model_usage": [
+        {
+            "model": "nemotron-3.5-lightning:30b-mlx",
+            "run_id": "0e6f13a9-247f-4320-b167-027ab8e1399a",
+            "input_tokens": 0,
+            "failure_class": "TIMEOUT",
+            "output_tokens": 0,
+            "recorded_calls": 1
+        },
+        {
+            "model": "nemotron-3.5-lightning:30b-mlx",
+            "run_id": "0e6f13a9-247f-4320-b167-027ab8e1399a",
+            "input_tokens": 62319,
+            "failure_class": null,
+            "output_tokens": 3692,
+            "recorded_calls": 24
+        },
+        {
+            "model": "gemma4:12b-mlx",
+            "run_id": "63731e5b-7866-45ef-bd1c-92d549dde750",
+            "input_tokens": 0,
+            "failure_class": "TIMEOUT",
+            "output_tokens": 0,
+            "recorded_calls": 1
+        },
+        {
+            "model": "ui-repair-missing-model",
+            "run_id": "c8f34ee9-7c92-4c03-b1e2-2120d6579334",
+            "input_tokens": 0,
+            "failure_class": "PERMANENT",
+            "output_tokens": 0,
+            "recorded_calls": 3
+        }
+    ]
+}

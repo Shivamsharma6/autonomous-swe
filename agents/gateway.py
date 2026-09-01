@@ -434,10 +434,15 @@ class OpenAICompatibleGateway:
     def _raise_for_status(self, response: httpx.Response) -> None:
         if response.status_code < 400:
             return
-        try:
-            detail = response.text[:1_000]
-        except httpx.ResponseNotRead:
-            detail = "streaming response body not buffered"
+        # Providers can echo credentials or private prompts in error bodies.
+        # Exceptions cross service logs, persisted workflow errors and repair prompts.
+        detail = "check provider availability and request configuration"
+        if response.status_code in {401, 403}:
+            detail = "check the provider API key and access"
+        elif response.status_code == 404:
+            detail = "check the provider endpoint and model name"
+        elif response.status_code == 429:
+            detail = "provider rate limit or quota exceeded"
         raise GatewayError(
             f"model provider returned {response.status_code}: {detail}",
             failure_class=classify_status(response.status_code),

@@ -51,6 +51,7 @@ from domain.enums import RunStatus
 from execution.scheduler.service import RUN_TERMINAL_VALUES
 from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
+from persistence.model_settings import ModelConfiguration
 from persistence.tables import (
     AgentMessageRow,
     ApprovalRow,
@@ -145,17 +146,20 @@ def _normalize_backend_url(url: str) -> str:
 
 @router.get("/models/config", response_model=ModelConfigResponse)
 async def get_model_config(services: Services) -> ModelConfigResponse:
-    provider = _detect_provider(services.settings.model_base_url)
-    api_key_str = services.settings.model_api_key.get_secret_value()
+    return _model_config_response(await services.model_settings.load())
+
+
+def _model_config_response(configuration: ModelConfiguration) -> ModelConfigResponse:
+    api_key_str = configuration.api_key.get_secret_value()
     return ModelConfigResponse(
-        base_url=services.settings.model_base_url,
-        primary_model=services.settings.model_primary,
-        fallback_models=services.settings.model_fallbacks,
-        timeout_seconds=services.settings.model_timeout_seconds,
-        temperature=0.0,
+        base_url=configuration.base_url,
+        primary_model=configuration.primary_model,
+        fallback_models=list(configuration.fallback_models),
+        timeout_seconds=configuration.timeout_seconds,
+        temperature=configuration.temperature,
         has_api_key=bool(api_key_str),
         api_key_preview=_api_key_preview(api_key_str),
-        provider_name=provider,
+        provider_name=_detect_provider(configuration.base_url),
     )
 
 
@@ -165,102 +169,116 @@ async def update_model_config(
     services: Services,
 ) -> ModelConfigResponse:
     endpoint = _normalize_backend_url(request.base_url)
-    provider_changed = endpoint != _normalize_backend_url(services.settings.model_base_url)
-    services.settings.model_base_url = endpoint
-    services.settings.model_primary = request.primary_model
-    services.settings.model_fallbacks = request.fallback_models
-    services.settings.model_timeout_seconds = request.timeout_seconds
-    # A blank key preserves credentials only for the same endpoint. Never send a
-    # previously saved provider's secret to a newly selected endpoint.
-    if request.api_key or provider_changed:
-        services.settings.model_api_key = SecretStr(request.api_key)
-    provider = _detect_provider(services.settings.model_base_url)
-    api_key_str = services.settings.model_api_key.get_secret_value()
-    return ModelConfigResponse(
-        base_url=services.settings.model_base_url,
-        primary_model=services.settings.model_primary,
-        fallback_models=services.settings.model_fallbacks,
-        timeout_seconds=services.settings.model_timeout_seconds,
+    try:
+        url = httpx.URL(endpoint)
+        if (
+            url.scheme not in {"http", "https"} or not url.host
+            or url.userinfo or url.query or url.fragment
+        ):
+            raise ValueError("invalid endpoint")
+    except (httpx.InvalidURL, ValueError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Enter a valid HTTP or HTTPS provider base URL "
+                "without credentials, query or fragment."
+            ),
+        ) from error
+    previous = await services.model_settings.load()
+    key = request.api_key
+    if not key and endpoint == _normalize_backend_url(previous.base_url):
+        key = previous.api_key.get_secret_value()
+    configuration = ModelConfiguration(
+        base_url=endpoint,
+        api_key=SecretStr(key),
+        primary_model=request.primary_model,
+        fallback_models=tuple(request.fallback_models),
+        timeout_seconds=request.timeout_seconds,
         temperature=request.temperature,
-        has_api_key=bool(api_key_str),
-        api_key_preview=_api_key_preview(api_key_str),
-        provider_name=provider,
     )
+    await services.model_settings.save(configuration)
+    return _model_config_response(configuration)
+
+
+async def _model_check_headers(base_url: str, api_key: str, services: Services) -> dict[str, str]:
+    saved = await services.model_settings.load()
+    if not api_key and base_url == _normalize_backend_url(saved.base_url):
+        api_key = saved.api_key.get_secret_value()
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
 @router.post("/models/probe", response_model=ModelProbeResponse)
-async def probe_models(request: ModelProbeRequest) -> ModelProbeResponse:
+async def probe_models(request: ModelProbeRequest, services: Services) -> ModelProbeResponse:
     base_url = _normalize_backend_url(request.base_url)
-    headers = {"Authorization": f"Bearer {request.api_key}"} if request.api_key else {}
+    headers = await _model_check_headers(base_url, request.api_key, services)
     start_t = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            endpoints_to_try = [
-                f"{base_url}/models",
-                f"{base_url.removesuffix('/v1')}/api/tags",
-            ]
-            resp = None
-            for ep in endpoints_to_try:
-                try:
-                    r = await client.get(ep, headers=headers)
-                except Exception as error:
-                    logger.debug(
-                        "model_probe_endpoint_failed",
-                        endpoint=ep,
-                        error_type=type(error).__name__,
-                    )
-                    continue
-                if r.status_code < 400:
-                    resp = r
-                    break
-
-            latency = (time.perf_counter() - start_t) * 1000.0
-            if resp is not None and resp.status_code < 400:
-                body = resp.json()
-                data = body.get("data") if isinstance(body, dict) else None
-                model_ids: list[str] = []
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and "id" in item:
-                            model_ids.append(str(item["id"]))
-                elif (
-                    isinstance(body, dict)
-                    and "models" in body
-                    and isinstance(body["models"], list)
-                ):
-                    for item in body["models"]:
-                        if isinstance(item, dict) and "name" in item:
-                            model_ids.append(str(item["name"]))
-                        elif isinstance(item, str):
-                            model_ids.append(item)
-                return ModelProbeResponse(
-                    reachable=True,
-                    models=model_ids or ["default"],
-                    latency_ms=round(latency, 1),
-                    error=None,
+    errors: list[str] = []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Accept both OpenAI-compatible model lists and Ollama's native tags API.
+        for endpoint in [f"{base_url}/models", f"{base_url.removesuffix('/v1')}/api/tags"]:
+            try:
+                response = await client.get(endpoint, headers=headers)
+            except httpx.InvalidURL:
+                errors.append("Invalid provider URL. Enter a valid HTTP or HTTPS base URL.")
+                break
+            except httpx.TimeoutException:
+                errors.append("Connection timed out. Check that the model server is running.")
+                continue
+            except httpx.RequestError as exc:
+                errors.append(f"Could not connect to the model server ({type(exc).__name__}).")
+                continue
+            if response.status_code in (401, 403):
+                errors.append(
+                    f"HTTP {response.status_code}: check the provider API key and access."
                 )
-            else:
-                detail = resp.status_code if resp else "Connection Failed"
-                return ModelProbeResponse(
-                    reachable=False,
-                    models=[],
-                    latency_ms=round(latency, 1),
-                    error=f"Endpoint returned HTTP {detail}",
+                break
+            if not response.is_success:
+                errors.append(f"Model list returned HTTP {response.status_code}.")
+                continue
+            try:
+                body = response.json()
+            except ValueError:
+                errors.append("The endpoint did not return JSON. Check the provider base URL.")
+                continue
+            items = body.get("data", body.get("models")) if isinstance(body, dict) else None
+            if not isinstance(items, list):
+                errors.append(
+                    "The endpoint did not return a model list. Check the provider base URL."
                 )
-    except Exception as exc:
-        latency = (time.perf_counter() - start_t) * 1000.0
-        return ModelProbeResponse(
-            reachable=False,
-            models=[],
-            latency_ms=round(latency, 1),
-            error=str(exc),
-        )
+                continue
+            models = []
+            for item in items:
+                name = (
+                    item.get("id", item.get("name", item.get("model")))
+                    if isinstance(item, dict) else item
+                )
+                if isinstance(name, str) and name.strip() and name.strip() not in models:
+                    models.append(name.strip())
+            if items and not models:
+                errors.append("The endpoint returned a model list without valid model names.")
+                continue
+            return ModelProbeResponse(
+                reachable=True,
+                models=models,
+                latency_ms=round((time.perf_counter() - start_t) * 1000.0, 1),
+            )
+    error = " ".join(dict.fromkeys(errors))
+    if _detect_provider(base_url) == "Ollama":
+        error += " Ensure Ollama is running and reachable from the AutoSWE API container."
+    return ModelProbeResponse(
+        reachable=False,
+        models=[],
+        latency_ms=round((time.perf_counter() - start_t) * 1000.0, 1),
+        error=error,
+    )
 
 
 @router.post("/models/test", response_model=ModelTestResponse)
-async def test_model(request: ModelTestRequest) -> ModelTestResponse:
+async def test_model(request: ModelTestRequest, services: Services) -> ModelTestResponse:
     base_url = _normalize_backend_url(request.base_url)
-    headers = {"Authorization": f"Bearer {request.api_key}"} if request.api_key else {}
+    headers = await _model_check_headers(base_url, request.api_key, services)
+    saved = await services.model_settings.load()
+    timeout_seconds = request.timeout_seconds or saved.timeout_seconds
     start_t = time.perf_counter()
     payload = {
         "model": request.model,
@@ -277,41 +295,58 @@ async def test_model(request: ModelTestRequest) -> ModelTestResponse:
         "temperature": 0.0,
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-            latency = (time.perf_counter() - start_t) * 1000.0
-            if resp.status_code < 400:
+            if resp.is_success:
                 body = resp.json()
-                choices = body.get("choices", [])
-                content = choices[0]["message"]["content"] if choices else ""
+                choices = body.get("choices") if isinstance(body, dict) else None
+                message = (
+                    choices[0].get("message")
+                    if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+                    else None
+                )
+                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("missing response content")
                 is_json = _parses_as_json(content)
                 return ModelTestResponse(
                     success=True,
                     model=request.model,
-                    latency_ms=round(latency, 1),
+                    latency_ms=round((time.perf_counter() - start_t) * 1000.0, 1),
                     structured_output=is_json,
                     response_snippet=content[:300],
                     error=None,
                 )
-            else:
-                return ModelTestResponse(
-                    success=False,
-                    model=request.model,
-                    latency_ms=round(latency, 1),
-                    structured_output=False,
-                    response_snippet="",
-                    error=f"HTTP {resp.status_code}: {resp.text[:300]}",
-                )
-    except Exception as exc:
-        latency = (time.perf_counter() - start_t) * 1000.0
-        return ModelTestResponse(
-            success=False,
-            model=request.model,
-            latency_ms=round(latency, 1),
-            structured_output=False,
-            response_snippet="",
-            error=str(exc),
+            error = f"Model server returned HTTP {resp.status_code}."
+            if resp.status_code in (401, 403):
+                error += " Check the provider API key and access."
+            elif resp.status_code == 404:
+                error += " Check the model name and provider base URL."
+    except httpx.InvalidURL:
+        error = "Invalid provider URL. Enter a valid HTTP or HTTPS base URL."
+    except httpx.TimeoutException:
+        error = (
+            f"Model response timed out after {timeout_seconds:g} seconds. "
+            "Try a faster model or increase Inference Timeout."
         )
+    except httpx.RequestError:
+        error = (
+            "Could not connect to the model server. "
+            "Check the endpoint and that the server is running."
+        )
+    except (ValueError, TypeError):
+        error = (
+            "The model server returned an invalid completion response. "
+            "Check the endpoint supports chat completions."
+        )
+    return ModelTestResponse(
+        success=False,
+        model=request.model,
+        latency_ms=round((time.perf_counter() - start_t) * 1000.0, 1),
+        structured_output=False,
+        response_snippet="",
+        error=error,
+    )
 
 
 @router.post("/projects/onboard", response_model=ProjectOnboardResponse, status_code=201)
@@ -320,42 +355,100 @@ async def onboard_project(
     services: Services,
 ) -> ProjectOnboardResponse:
     import_root = services.settings.repository_import_root.resolve(strict=False)
-    import_root.mkdir(parents=True, exist_ok=True)
+    branch_check = _run_git(
+        import_root if import_root.is_dir() else Path.cwd(),
+        "check-ref-format",
+        "--branch",
+        request.default_branch,
+    )
+    if branch_check.returncode or branch_check.stdout.strip() != request.default_branch:
+        raise HTTPException(status_code=422, detail="Enter a valid Git branch name.")
 
-    folder_candidate = (request.folder_name or request.source_path or request.name).strip()
-    safe_folder = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", folder_candidate.split("/")[-1]) or "project"
-    target_dir = (import_root / safe_folder).resolve()
-
-    if not str(target_dir).startswith(str(import_root)):
-        target_dir = import_root / safe_folder
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-
+    uploaded: list[tuple[Path, str]] = []
+    paths: set[tuple[str, ...]] = set()
     for file_info in request.files:
-        clean_rel = re.sub(r"^[/\\]+", "", file_info.path)
-        if ".." in clean_rel.split("/"):
-            continue
-        dest_path = (target_dir / clean_rel).resolve()
-        if not str(dest_path).startswith(str(target_dir)):
-            continue
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_text(file_info.content, encoding="utf-8", errors="replace")
+        parts = file_info.path.split("/")
+        if (
+            "\\" in file_info.path
+            or "\x00" in file_info.path
+            or any(
+                part in {"", ".", ".."} or ":" in part or part.casefold() == ".git"
+                for part in parts
+            )
+        ):
+            raise HTTPException(
+                status_code=422, detail="Uploaded files must use safe repository-relative paths."
+            )
+        folded = tuple(part.casefold() for part in parts)
+        if folded in paths:
+            raise HTTPException(status_code=422, detail="Uploaded file paths must be unique.")
+        paths.add(folded)
+        uploaded.append((Path(*parts), file_info.content))
+    if any(path[:depth] in paths for path in paths for depth in range(1, len(path))):
+        raise HTTPException(status_code=422, detail="Uploaded file and directory paths conflict.")
 
-    baseline_sha = _ensure_git_repository(target_dir, request.default_branch)
+    if uploaded:
+        requested = (request.folder_name or request.source_path or request.name).strip()
+        import_root.mkdir(parents=True, exist_ok=True)
+        target_dir = _validated_repository_source(import_root, requested, must_exist=False)
+        if target_dir == import_root:
+            raise HTTPException(
+                status_code=422, detail="Choose a new folder inside the import root."
+            )
+    else:
+        requested = (request.source_path or request.folder_name).strip()
+        target_dir = _validated_repository_source(import_root, requested)
 
-    async with services.database.transaction() as session:
-        await services.database_repository.create_project(
-            session,
-            project_id=request.project_id,
-            name=request.name,
+    created_import = False
+    try:
+        if uploaded:
+            try:
+                # Atomic ownership claim: never reuse a folder belonging to a
+                # prior upload or an existing repository, even with no Git data.
+                target_dir.mkdir()
+            except FileExistsError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Import folder already exists. Choose a new folder name.",
+                ) from exc
+            created_import = True
+            for relative_path, content in uploaded:
+                destination = target_dir / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("x", encoding="utf-8") as stream:
+                    stream.write(content)
+
+        baseline_sha = _ensure_git_repository(
+            target_dir, request.default_branch, initialize=bool(uploaded)
         )
-        await services.database_repository.create_repository(
-            session,
-            repository_id=request.repository_id,
-            project_id=request.project_id,
-            source_path=str(target_dir),
-            default_branch=request.default_branch,
-        )
+        async with services.database.transaction() as session:
+            await services.database_repository.create_project(
+                session,
+                project_id=request.project_id,
+                name=request.name,
+            )
+            await services.database_repository.create_repository(
+                session,
+                repository_id=request.repository_id,
+                project_id=request.project_id,
+                source_path=str(target_dir),
+                default_branch=request.default_branch,
+            )
+    except BaseException as exc:
+        # This request may remove only the new directory it successfully claimed.
+        # A failed connection/transaction must never alter an existing repository.
+        if created_import:
+            shutil.rmtree(target_dir)
+        if isinstance(exc, IntegrityError):
+            raise HTTPException(
+                status_code=409, detail="Project or repository ID already exists."
+            ) from exc
+        if isinstance(exc, OSError):
+            raise HTTPException(
+                status_code=422,
+                detail="Could not create the uploaded repository. Check its folder and file paths.",
+            ) from exc
+        raise
 
     return ProjectOnboardResponse(
         project_id=request.project_id,
@@ -403,7 +496,7 @@ async def create_run(
     event_id = uuid4()
     async with services.database.transaction() as session:
         try:
-            await services.database_repository.create_run(
+            run = await services.database_repository.create_run(
                 session,
                 run_id=request.run_id,
                 project_id=request.project_id,
@@ -411,6 +504,8 @@ async def create_run(
                 goal=request.goal,
                 baseline_commit=request.baseline_commit,
             )
+            configuration = await services.model_settings.load(session)
+            run.model_configuration = configuration.private_storage()
         except IntegrityError as exc:
             raise HTTPException(status_code=404, detail="project or repository not found") from exc
         payload = {
@@ -976,6 +1071,8 @@ def _task_response(row: TaskRow) -> TaskResponse:
         version=row.version,
         task_type=row.task_type.value,
         title=row.title,
+        description=row.description,
+        priority=row.priority,
         state_entered_at=row.state_entered_at.isoformat(),
         plan_revision=row.plan_revision,
         dependencies=tuple(UUID(value) for value in row.dependencies),
@@ -993,66 +1090,74 @@ async def _require_run(session: AsyncSession, run_id: UUID) -> RunRow:
     return row
 
 
-def _ensure_git_repository(target_dir: Path, default_branch: str = "main") -> str:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    git_dir = target_dir / ".git"
-    if not git_dir.exists():
-        _run_git(target_dir, "init", "-b", default_branch)
-        _run_git(target_dir, "config", "user.name", "AutoSWE System")
-        _run_git(target_dir, "config", "user.email", "autoswe@local")
-
-    pyproject = target_dir / "pyproject.toml"
-    package_json = target_dir / "package.json"
-    if not pyproject.exists() and not package_json.exists():
-        pyproject.write_text(
-            '[project]\nname = "service"\nversion = "0.1.0"\n'
-            'dependencies = []\n\n'
-            '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
-            encoding="utf-8",
+def _ensure_git_repository(
+    target_dir: Path, default_branch: str = "main", *, initialize: bool = False
+) -> str:
+    if initialize:
+        commands = (
+            ("init", "--template=", "-b", default_branch),
+            ("add", "--all", "--force", "--", "."),
+            ("commit", "-m", "Initial imported baseline", "--allow-empty"),
         )
-        (target_dir / "requirements.txt").write_text("# requirements\n", encoding="utf-8")
-        src_dir = target_dir / "src"
-        src_dir.mkdir(exist_ok=True)
-        (src_dir / "__init__.py").write_text("", encoding="utf-8")
-        (src_dir / "service.py").write_text(
-            'def handle_request(payload: dict) -> dict:\n'
-            '    return {"status": "ok", "payload": payload}\n',
-            encoding="utf-8",
+        for command in commands:
+            result = _run_git(
+                target_dir,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=AutoSWE System",
+                "-c",
+                "user.email=autoswe@local",
+                *command,
+            )
+            if result.returncode:
+                raise HTTPException(
+                    status_code=422, detail="Could not initialize the uploaded repository baseline."
+                )
+    else:
+        # Git can discover a parent repository from an arbitrary child folder.
+        # Require the selected folder itself to be the repository root.
+        bare = _run_git(target_dir, "rev-parse", "--is-bare-repository")
+        location = _run_git(
+            target_dir,
+            "rev-parse",
+            "--absolute-git-dir" if bare.stdout.strip() == "true" else "--show-toplevel",
         )
-        tests_dir = target_dir / "tests"
-        tests_dir.mkdir(exist_ok=True)
-        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
-        (tests_dir / "test_service.py").write_text(
-            "from src.service import handle_request\n\n"
-            "def test_handle_request():\n"
-            '    assert handle_request({})["status"] == "ok"\n',
-            encoding="utf-8",
+        if location.returncode or Path(location.stdout.strip()).resolve() != target_dir:
+            raise HTTPException(status_code=422, detail="Select an existing Git repository root.")
+
+    result = _run_git(
+        target_dir, "rev-parse", "--verify", f"refs/heads/{default_branch}^{{commit}}"
+    )
+    baseline = result.stdout.strip()
+    if result.returncode or re.fullmatch(r"[0-9a-f]{40}", baseline) is None:
+        raise HTTPException(
+            status_code=422,
+            detail="The requested branch has no committed baseline in this repository.",
         )
-
-    res = _run_git(target_dir, "rev-parse", "HEAD")
-    rev = res.stdout.strip()
-    if not rev or res.returncode != 0:
-        _run_git(target_dir, "add", ".")
-        _run_git(target_dir, "commit", "-m", "Initial baseline commit", "--allow-empty")
-        res = _run_git(target_dir, "rev-parse", "HEAD")
-        rev = res.stdout.strip()
-    return rev
+    return baseline
 
 
-def _validated_repository_source(import_root: Path, requested: str) -> Path:
+def _validated_repository_source(
+    import_root: Path, requested: str, *, must_exist: bool = True
+) -> Path:
     try:
+        if not requested.strip() or "\x00" in requested:
+            raise ValueError("repository path is required")
         root = import_root.resolve(strict=True)
         req_path = Path(requested)
-        candidate = (
-            root / req_path if not req_path.is_absolute() else req_path
-        ).resolve(strict=True)
+        candidate = (root / req_path if not req_path.is_absolute() else req_path).resolve(
+            strict=must_exist
+        )
         candidate.relative_to(root)
     except (OSError, ValueError) as exc:
         raise HTTPException(
             status_code=422,
             detail="repository source must be an existing path inside the import root",
         ) from exc
-    if candidate.is_symlink() or not candidate.is_dir():
+    if candidate.is_symlink() or (must_exist and not candidate.is_dir()):
         raise HTTPException(status_code=422, detail="repository source must be a directory")
     return candidate
 

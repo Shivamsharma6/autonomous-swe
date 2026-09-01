@@ -78,44 +78,115 @@ class WorkerService:
         inbox: DispatchInbox,
         executor: DispatchedWorkflowExecutor,
         batch_size: int = 1,
+        max_concurrency: int | None = None,
         block_ms: int = 1_000,
     ) -> None:
-        if batch_size < 1 or block_ms < 1:
-            raise ValueError("worker batch size and block time must be positive")
+        capacity = batch_size if max_concurrency is None else max_concurrency
+        if batch_size < 1 or capacity < 1 or block_ms < 1:
+            raise ValueError("worker batch size, concurrency and block time must be positive")
         self._inbox = inbox
         self._executor = executor
         self._batch_size = batch_size
+        self._max_concurrency = capacity
         self._block_ms = block_ms
 
+    async def _process_record(self, record: RedisStreamRecord) -> None:
+        message = DispatchMessage.model_validate(record.payload)
+        await self._executor.execute(message)
+        await self._inbox.acknowledge(record)
+
     async def process_once(self) -> int:
-        records = await self._inbox.read(count=self._batch_size, block_ms=self._block_ms)
-        completed = 0
-        for record in records:
-            message = DispatchMessage.model_validate(record.payload)
-            await self._executor.execute(message)
-            await self._inbox.acknowledge(record)
-            completed += 1
-        return completed
+        records = await self._inbox.read(
+            count=min(self._batch_size, self._max_concurrency), block_ms=self._block_ms
+        )
+        executions = [asyncio.create_task(self._process_record(record)) for record in records]
+        try:
+            results = await asyncio.gather(*executions, return_exceptions=True)
+        except BaseException:
+            for execution in executions:
+                execution.cancel()
+            await asyncio.gather(*executions, return_exceptions=True)
+            raise
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return len(records)
+
+    @staticmethod
+    def _report_completion(execution: asyncio.Task[None]) -> None:
+        try:
+            execution.result()
+        except (Exception, asyncio.CancelledError) as error:
+            # Each envelope has its own execution task and lease heartbeat.
+            # Its failure/cancellation must not terminate unrelated executions.
+            logger.error(
+                "worker_task_failed", error_type=type(error).__name__, error_message=str(error)
+            )
 
     async def run(self, stop: asyncio.Event) -> None:
+        executions: set[asyncio.Task[None]] = set()
+        reading: asyncio.Task[tuple[RedisStreamRecord, ...]] | None = None
+        stopping = asyncio.create_task(stop.wait())
         failures = 0
-        while not stop.is_set():
-            try:
-                await self.process_once()
-                failures = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                # Leave the envelope unacknowledged. Lease reconciliation owns
-                # recovery; a single failed task must not kill other workers.
-                failures += 1
-                logger.error(
-                    "worker_cycle_failed", error_type=type(error).__name__, error_message=str(error)
-                )
+        try:
+            while not stop.is_set():
+                available = self._max_concurrency - len(executions)
+                if reading is None and available:
+                    # Never prefetch leased work behind a local execution queue.
+                    reading = asyncio.create_task(self._inbox.read(
+                        count=min(self._batch_size, available), block_ms=self._block_ms
+                    ))
+                waiting: list[asyncio.Task[object]] = [*executions, stopping]
+                if reading is not None:
+                    waiting.append(reading)
+                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                for execution in executions.intersection(done):
+                    executions.remove(execution)
+                    self._report_completion(execution)
+                if stop.is_set():
+                    break
+                if reading is None or reading not in done:
+                    continue
+                completed_read, reading = reading, None
                 try:
-                    await asyncio.wait_for(stop.wait(), timeout=0.25 * 2 ** min(failures, 5))
-                except TimeoutError:
-                    pass
+                    records = completed_read.result()
+                except Exception as error:
+                    failures += 1
+                    logger.error(
+                        "worker_cycle_failed",
+                        error_type=type(error).__name__, error_message=str(error),
+                    )
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=0.25 * 2 ** min(failures, 5))
+                    except TimeoutError:
+                        pass
+                    continue
+                failures = 0
+                executions.update(
+                    asyncio.create_task(self._process_record(record)) for record in records
+                )
+        except BaseException:
+            for execution in executions:
+                execution.cancel()
+            raise
+        finally:
+            # A stop signal stops intake and drains started work with heartbeats
+            # intact. Cancelling the service cancels and joins every child instead.
+            auxiliary: list[asyncio.Task[object]] = [stopping]
+            if reading is not None:
+                auxiliary.append(reading)
+            for task in auxiliary:
+                task.cancel()
+            try:
+                await asyncio.gather(*auxiliary, return_exceptions=True)
+                await asyncio.gather(*executions, return_exceptions=True)
+            except BaseException:
+                for task in [*auxiliary, *executions]:
+                    task.cancel()
+                await asyncio.gather(*auxiliary, *executions, return_exceptions=True)
+                raise
+            for execution in executions:
+                self._report_completion(execution)
 
 
 def install_worker_signal_handlers(stop: asyncio.Event) -> None:

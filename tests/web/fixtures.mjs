@@ -4,8 +4,17 @@ export const runs = [
   { run_id: '33333333-3333-4333-8333-333333333333', project_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', repository_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', project_name: 'Checkout service', goal: 'Investigate intermittent failures in the payment queue', state: 'FAILED', task_counts: {}, model_cost_usd: 0, model_input_tokens: 0, model_output_tokens: 0, active_plan_revision: null, created_at: '2026-08-30T13:00:00Z', state_duration_seconds: 3600, baseline_commit: 'a'.repeat(40) },
   { run_id: '44444444-4444-4444-8444-444444444444', project_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', repository_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', project_name: 'Checkout service', goal: 'Review and document the deployment process', state: 'CANCELLED', task_counts: { CANCELLED: 3 }, model_cost_usd: 0.024, model_input_tokens: 3100, model_output_tokens: 840, active_plan_revision: 1, created_at: '2026-08-29T10:00:00Z', state_duration_seconds: 3600, baseline_commit: 'a'.repeat(40) },
 ];
-export const tasks = ['Inspect delivery pipeline', 'Add retry and backoff handling', 'Verify delivery and failure behavior', 'Document retry configuration', 'Validate the finished changes'].map((title, i) => ({ id: `task-${i}`, title, description: `${title}. Preserve existing behavior and record evidence.`, task_type: ['RESEARCH', 'IMPLEMENTATION', 'TEST', 'DOCUMENTATION', 'VALIDATION'][i], state: ['COMPLETED', 'COMPLETED', 'RUNNING', 'READY', 'READY'][i], assigned_capability: ['research', 'implementation', 'testing', 'documentation', 'validation'][i], dependencies: i ? [`task-${i - 1}`] : [], priority: 1, plan_revision: 1 }));
-export const events = Array.from({ length: 55 }, (_, i) => ({ event_id: `event-${i}`, event_type: i % 2 ? 'tool.completed' : 'task.state_changed', created_at: '2026-08-31T15:35:00Z', payload: { task_id: `task-${i % 5}`, summary: i % 2 ? 'Verification command completed' : 'Task status updated' } }));
+const taskId = i => `10000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`;
+export const tasks = ['Inspect delivery pipeline', 'Add retry and backoff handling', 'Verify delivery and failure behavior', 'Document retry configuration', 'Validate the finished changes'].map((title, i) => ({
+  task_id: taskId(i), run_id: runs[0].run_id, project_id: runs[0].project_id, repository_id: runs[0].repository_id,
+  title, description: `${title}. Preserve existing behavior and record evidence.`,
+  task_type: ['RESEARCH', 'IMPLEMENTATION', 'TEST', 'DOCUMENTATION', 'VALIDATION'][i],
+  state: ['COMPLETED', 'COMPLETED', 'RUNNING', 'READY', 'READY'][i], version: 1, state_entered_at: '2026-08-31T15:35:00Z',
+  assigned_capability: ['research', 'implementation', 'testing', 'documentation', 'validation'][i],
+  dependencies: i ? [taskId(i - 1)] : [], priority: 1, plan_revision: 1,
+  acceptance_criteria: ['Record evidence'], allowed_tools: ['read_file'], risk_ceiling: 'LOW',
+}));
+export const events = Array.from({ length: 55 }, (_, i) => ({ event_id: `event-${i}`, event_type: i % 2 ? 'tool.completed' : 'task.state_changed', created_at: '2026-08-31T15:35:00Z', payload: { task_id: taskId(i % 5), summary: i % 2 ? 'Verification command completed' : 'Task status updated' } }));
 export function fixture(path) {
   if (path === '/health/ready') return { ready: true, dependencies: { postgres: true, redis: true, sandbox: true, model: true, uams: true } };
   if (path.startsWith('/api/v1/models/config')) return { primary_model: 'local-model', fallback_models: ['local-fallback'], provider_name: 'Local provider', base_url: 'http://localhost:11434/v1', has_api_key: false, timeout_seconds: 300, temperature: 0 };

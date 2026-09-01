@@ -4,7 +4,7 @@ import { readFile, cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
-import { fixture, runs, events } from './fixtures.mjs';
+import { fixture, runs, tasks, events } from './fixtures.mjs';
 
 const source = new URL('../../apps/web/', import.meta.url);
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
@@ -25,6 +25,8 @@ async function setup(t, { recent = [], fetcher, token = true } = {}) {
   window.clearTimeout = id => timers.delete(id);
   window.setInterval = () => 0;
   window.scrollTo = () => {};
+  window.requestAnimationFrame = cb => { cb(); return 0; };
+  window.cancelAnimationFrame = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
@@ -39,7 +41,7 @@ async function setup(t, { recent = [], fetcher, token = true } = {}) {
     const custom = await fetcher?.(path, options);
     return custom ?? new Response(JSON.stringify(fixture(path)), { status: 200 });
   };
-  Object.assign(globalThis, { window, document: window.document, sessionStorage: window.sessionStorage, localStorage: window.localStorage, fetch, ResizeObserver: window.ResizeObserver, requestAnimationFrame: cb => { cb(); return 0; }, cancelAnimationFrame() {}, WebSocket: class { constructor() { sockets.push(this); } close() { this.onclose?.(); } } });
+  Object.assign(globalThis, { window, document: window.document, sessionStorage: window.sessionStorage, localStorage: window.localStorage, fetch, ResizeObserver: window.ResizeObserver, requestAnimationFrame: cb => { cb(); return 0; }, cancelAnimationFrame() {}, WebSocket: class { constructor(url) { this.url = url; sockets.push(this); } close() { this.onclose?.(); } } });
   t.after(async () => { await flush(); dom.window.close(); await rm(dir, { recursive: true, force: true }); });
   await import(pathToFileURL(`${dir}/app.js`));
   await flush();
@@ -314,4 +316,457 @@ test('a late settings save cannot restore model state after sign-out', async t =
   ui.click('#closeModelStudio'); ui.click('#clearToken');
   release(new Response(JSON.stringify({ ...fixture('/api/v1/models/config'), primary_model: 'late-model' }))); await flush();
   assert.equal(ui.document.querySelector('#topbarModelName').textContent, 'Connect to configure');
+});
+
+test('opening settings discovers installed models and reopening refreshes the list', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? new Response(JSON.stringify({ reachable: true, models: ['installed-model'], latency_ms: 4 })) : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  assert.equal(ui.calls.filter(c => c.path === '/api/v1/models/probe').length, 1);
+  assert.match(ui.document.querySelector('#primaryModelSelect').textContent, /installed-model/);
+  assert.equal(ui.document.querySelector('#discoveredModelsChips').textContent, 'installed-model');
+  assert.match(ui.document.querySelector('#modelDiscoveryStatus').textContent, /1 model/);
+  ui.click('#closeModelStudio'); ui.click('#modelStudioBtn'); await flush();
+  assert.equal(ui.calls.filter(c => c.path === '/api/v1/models/probe').length, 2);
+  assert.match(ui.document.querySelector('#primaryModelSelect').textContent, /installed-model/);
+});
+
+test('choosing Ollama discovers real models without inserting a hardcoded model or fallback', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? new Response(JSON.stringify({ reachable: true, models: ['my-ollama-model'], latency_ms: 4 })) : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  ui.click('[data-provider="ollama"]'); await flush();
+  assert.equal(ui.document.querySelector('#primaryModelInput').value, 'my-ollama-model');
+  assert.equal(ui.document.querySelector('#fallbackModelsInput').value, '');
+  assert.equal(ui.document.querySelector('#discoveredModelsChips').textContent, 'my-ollama-model');
+});
+
+test('endpoint edits clear discovered models and reject a delayed discovery response', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? pending : undefined });
+  ui.click('#modelStudioBtn'); ui.click('#probeModelsBtn');
+  const endpoint = ui.document.querySelector('#modelBaseUrl');
+  endpoint.value = 'https://new-provider.example/v1';
+  endpoint.dispatchEvent(new ui.window.Event('input'));
+  release(new Response(JSON.stringify({ reachable: true, models: ['old-provider-model'], latency_ms: 4 }))); await flush();
+  assert.doesNotMatch(ui.document.querySelector('#primaryModelSelect').textContent, /old-provider-model/);
+  assert.equal(ui.document.querySelector('#discoveredModelsChips').textContent, '');
+  assert.equal(ui.document.querySelector('#probeModelsBtn').disabled, false);
+});
+
+test('closing settings invalidates pending discovery, including after sign-out', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? pending : undefined });
+  ui.click('#modelStudioBtn'); ui.click('#probeModelsBtn');
+  ui.click('#closeModelStudio'); ui.click('#clearToken');
+  release(new Response(JSON.stringify({ reachable: true, models: ['late-model'], latency_ms: 4 }))); await flush();
+  assert.doesNotMatch(ui.document.querySelector('#primaryModelSelect').textContent, /late-model/);
+  assert.equal(ui.document.querySelector('#modelStudioDialog').open, false);
+});
+
+test('empty discovery clears prior results and explains how to install Ollama models', async t => {
+  let empty = false;
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? new Response(JSON.stringify({ reachable: true, models: empty ? [] : ['installed-model'], latency_ms: 4 })) : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  empty = true; ui.click('#probeModelsBtn'); await flush();
+  assert.equal(ui.document.querySelector('#discoveredModelsChips').textContent, '');
+  assert.match(ui.document.querySelector('#modelDiscoveryStatus').textContent, /No models.*ollama pull/i);
+});
+
+test('discovery failures remain visible in settings with a usable retry button', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? new Response(JSON.stringify({ reachable: false, models: [], latency_ms: 4, error: 'HTTP 401: authentication required' })) : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  assert.match(ui.document.querySelector('#modelDiscoveryStatus').textContent, /401/);
+  assert.equal(ui.document.querySelector('#probeModelsBtn').disabled, false);
+});
+
+test('settings opened before configuration arrives gets the endpoint and starts discovery', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/config' ? pending : undefined });
+  ui.click('#modelStudioBtn');
+  release(new Response(JSON.stringify(fixture('/api/v1/models/config')))); await flush();
+  assert.equal(ui.document.querySelector('#modelBaseUrl').value, 'http://localhost:11434/v1');
+  assert.equal(ui.calls.filter(c => c.path === '/api/v1/models/probe').length, 1);
+});
+
+test('editing a model cancels a pending connection test and removes its stale status', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/test' ? pending : undefined });
+  ui.click('#modelStudioBtn'); await flush(); ui.click('#testModelBtn');
+  const input = ui.document.querySelector('#primaryModelInput');
+  input.value = 'different-model'; input.dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  assert.equal(ui.document.querySelector('#modelTestCard').classList.contains('hidden'), true);
+  assert.equal(ui.document.querySelector('#testModelBtn').disabled, false);
+  release(new Response(JSON.stringify({ success: true, structured_output: true, latency_ms: 3 }))); await flush();
+  assert.equal(ui.document.querySelector('#modelTestCard').classList.contains('hidden'), true);
+});
+
+test('selecting another discovered model clears the previous model verification', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/test' ? new Response(JSON.stringify({ success: true, structured_output: true, latency_ms: 3 })) : undefined });
+  ui.click('#modelStudioBtn'); await flush(); ui.click('#testModelBtn'); await flush();
+  ui.document.querySelectorAll('#discoveredModelsChips button')[1].click();
+  assert.equal(ui.document.querySelector('#modelTestCard').classList.contains('hidden'), true);
+});
+
+test('a settings save cannot close or overwrite a newly opened settings draft', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: (path, options) => path === '/api/v1/models/config' && options.method === 'POST' ? pending : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  ui.document.querySelector('#modelStudioForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true }));
+  ui.click('#closeModelStudio'); ui.click('#modelStudioBtn'); await flush();
+  const input = ui.document.querySelector('#primaryModelInput');
+  input.value = 'unfinished-model'; input.dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  release(new Response(JSON.stringify(fixture('/api/v1/models/config')))); await flush();
+  assert.equal(ui.document.querySelector('#modelStudioDialog').open, true);
+  assert.equal(input.value, 'unfinished-model');
+});
+
+test('a queued native close event cannot cancel discovery in a reopened dialog', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/probe' ? pending.then(response => response.clone()) : undefined });
+  const dialog = ui.document.querySelector('#modelStudioDialog');
+  dialog.close = function () { this.open = false; };
+  ui.click('#modelStudioBtn'); ui.click('#closeModelStudio'); ui.click('#modelStudioBtn');
+  dialog.dispatchEvent(new ui.window.Event('close'));
+  release(new Response(JSON.stringify({ reachable: true, models: ['reopened-model'], latency_ms: 1 }))); await flush();
+  assert.match(ui.document.querySelector('#discoveredModelsChips').textContent, /reopened-model/);
+});
+
+
+test('API-shaped task rows open details with the canonical ID, description and priority', async t => {
+  const ui = await setup(t);
+  ui.click('[data-run-id]'); await flush();
+  ui.click('.task-list-row'); await flush();
+  assert.equal(ui.document.querySelector('#taskDrawer').open, true);
+  assert.equal(ui.document.querySelector('#drawerTaskId').textContent, tasks[0].task_id);
+  assert.equal(ui.document.querySelector('#drawerTaskGoal').textContent, tasks[0].description);
+  assert.equal(ui.document.querySelector('#drawerTaskPriority').textContent, 'Priority 1');
+  assert.ok(ui.calls.some(c => c.path === `/api/v1/projects/${runs[0].project_id}/tasks/${tasks[0].task_id}/messages?limit=30`));
+});
+
+test('task graphs use API dependencies to draw one task per stage and valid connectors', async t => {
+  const ui = await setup(t);
+  ui.click('[data-run-id]'); await flush(); ui.click('#taskGraphView'); await flush();
+  const columns = [...ui.document.querySelectorAll('.dag-column')];
+  assert.equal(columns.length, 5);
+  assert.deepEqual(columns.map(column => [...column.querySelectorAll('.task-node')].map(node => node.dataset.taskId)), tasks.map(task => [task.task_id]));
+  assert.equal(ui.document.querySelectorAll('#dagSvgConnections path').length, 4);
+});
+
+test('live task sockets always use the canonical task UUID', async t => {
+  const ui = await setup(t);
+  ui.click('[data-run-id]'); await flush();
+  assert.equal(ui.sockets[0].url, `ws://localhost/api/v1/projects/${runs[0].project_id}/tasks/${tasks[2].task_id}/events`);
+});
+
+test('task activity excludes run events and other tasks', async t => {
+  const activity = [
+    { ...events[0], event_id: 'run', event_type: 'run.requested', payload: {} },
+    { ...events[0], event_id: 'this-task', event_type: 'task.selected', payload: { task_id: tasks[0].task_id } },
+    { ...events[0], event_id: 'other-task', event_type: 'task.other', payload: { task_id: tasks[1].task_id } },
+  ];
+  const ui = await setup(t, { fetcher: path => path.includes('/events?') ? new Response(JSON.stringify(activity)) : undefined });
+  ui.click('[data-run-id]'); await flush(); ui.click('#taskGraphView'); ui.click('.task-node'); await flush();
+  assert.match(ui.document.querySelector('#drawerTaskEvents').textContent, /task.selected/);
+  assert.doesNotMatch(ui.document.querySelector('#drawerTaskEvents').textContent, /run.requested|task.other/);
+});
+
+test('invalid run IDs show a concise lookup error without requests or navigation', async t => {
+  const ui = await setup(t);
+  ui.click('[data-nav="new"]');
+  const input = ui.document.querySelector('#runLookup');
+  input.value = 'not-a-run';
+  ui.document.querySelector('#lookupForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.calls.filter(c => c.path.includes('/runs/not-a-run')).length, 0);
+  assert.equal(ui.window.location.hash, '#new');
+  assert.equal(input.getAttribute('aria-invalid'), 'true');
+  assert.match(ui.document.querySelector('#lookupFeedback').textContent, /valid run ID.*UUID/i);
+  input.value = runs[0].run_id;
+  ui.document.querySelector('#lookupForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.document.querySelector('#lookupFeedback').classList.contains('hidden'), true);
+  assert.equal(input.hasAttribute('aria-invalid'), false);
+  assert.equal(ui.document.querySelector('#runIdText').textContent, runs[0].run_id);
+});
+
+test('editing a connected repository clears the stale success feedback', async t => {
+  const ui = await setup(t, { fetcher: path => path.endsWith('/onboard') ? new Response(JSON.stringify({ project_id: runs[0].project_id, repository_id: runs[0].repository_id, name: 'Checkout', source_path: 'checkout', default_branch: 'main', baseline_commit: 'a'.repeat(40) })) : undefined });
+  ui.click('[data-nav="new"]');
+  ui.document.querySelector('#projectName').value = 'Checkout';
+  ui.document.querySelector('#sourcePath').value = 'checkout';
+  ui.document.querySelector('#projectForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.match(ui.document.querySelector('#projectFeedback').textContent, /Repository connected/);
+  const input = ui.document.querySelector('#sourcePath'); input.value = 'changed'; input.dispatchEvent(new ui.window.Event('input'));
+  assert.equal(ui.document.querySelector('#projectFeedback').classList.contains('hidden'), true);
+  assert.equal(ui.document.querySelector('#projectFeedback').classList.contains('success'), false);
+});
+
+for (const terminalState of ['FAILED', 'CANCELLED', 'COMPLETED']) {
+  test(`${terminalState} runs with no tasks never show planning as current progress`, async t => {
+    const ui = await setup(t, { fetcher: path => path === `/api/v1/runs/${runs[0].run_id}` ? new Response(JSON.stringify({ ...runs[0], state: terminalState, active_plan_revision: null, task_counts: {} })) : path.endsWith('/tasks') ? new Response('[]') : undefined });
+    ui.click('[data-run-id]'); await flush();
+    assert.doesNotMatch(ui.document.querySelector('#planRevision').textContent, /Planning/i);
+    assert.match(ui.document.querySelector('#taskSummary').textContent, /No tasks/i);
+    assert.match(ui.document.querySelector('#taskList').textContent, /No tasks/);
+  });
+}
+
+test('model connection tests use the draft inference timeout', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/test' ? new Response(JSON.stringify({ success: false, latency_ms: 120000, error: 'Model test timed out after 120 seconds.' })) : undefined });
+  ui.click('#modelStudioBtn'); await flush();
+  ui.document.querySelector('#modelTimeoutInput').value = '120';
+  ui.click('#testModelBtn'); await flush();
+  assert.equal(JSON.parse(ui.calls.find(c => c.path === '/api/v1/models/test').options.body).timeout_seconds, 120);
+  assert.match(ui.document.querySelector('#testOutputSnippet').textContent, /timed out after 120 seconds/);
+});
+
+test('changing the timeout aborts a pending model test and removes stale status', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/models/test' ? pending : undefined });
+  ui.click('#modelStudioBtn'); await flush(); ui.click('#testModelBtn');
+  const input = ui.document.querySelector('#modelTimeoutInput'); input.value = '120'; input.dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  assert.equal(ui.calls.find(c => c.path === '/api/v1/models/test').options.signal.aborted, true);
+  assert.equal(ui.document.querySelector('#modelTestCard').classList.contains('hidden'), true);
+  release(new Response(JSON.stringify({ success: true, latency_ms: 2 }))); await flush();
+  assert.equal(ui.document.querySelector('#modelTestCard').classList.contains('hidden'), true);
+});
+
+test('invalid timeout input blocks model tests with visible validation', async t => {
+  const ui = await setup(t);
+  ui.click('#modelStudioBtn'); await flush(); ui.document.querySelector('#modelTimeoutInput').value = '0';
+  ui.click('#testModelBtn'); await flush();
+  assert.equal(ui.calls.filter(c => c.path === '/api/v1/models/test').length, 0);
+  assert.match(ui.document.querySelector('.toast-stack').textContent, /timeout.*10.*3600/i);
+});
+
+test('workspace connection stays pending and does not store a token before authentication succeeds', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const candidate = 'candidate-token-for-authentication-test';
+  const ui = await setup(t, { token: false, fetcher: path => path === '/api/v1/runs?limit=1' ? pending : undefined });
+  ui.click('#openAuth'); ui.document.querySelector('#adminToken').value = candidate;
+  ui.document.querySelector('#authForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.document.querySelector('#authDialog').open, true);
+  assert.equal(ui.window.sessionStorage.getItem('autoswe.adminToken'), null);
+  assert.doesNotMatch(ui.document.querySelector('.toast-stack')?.textContent || '', /saved|connected/i);
+  const request = ui.calls.find(c => c.path === '/api/v1/runs?limit=1');
+  assert.equal(request.options.headers.get('Authorization'), `Bearer ${candidate}`);
+  release(new Response('[]')); await flush();
+  assert.equal(ui.document.querySelector('#authDialog').open, false);
+  assert.equal(ui.window.sessionStorage.getItem('autoswe.adminToken'), candidate);
+  assert.match(ui.document.querySelector('.toast-stack').textContent, /Workspace connected/);
+});
+
+test('rejected admin tokens keep the dialog open with no success message or stored credential', async t => {
+  const ui = await setup(t, { token: false, fetcher: path => path.startsWith('/api/') ? new Response('{"detail":"Unauthorized"}', { status: 401 }) : undefined });
+  ui.click('#openAuth'); ui.document.querySelector('#adminToken').value = 'invalid-token-for-authentication-test';
+  ui.document.querySelector('#authForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.document.querySelector('#authDialog').open, true);
+  assert.equal(ui.window.sessionStorage.getItem('autoswe.adminToken'), null);
+  assert.match(ui.document.querySelector('#authFeedback').textContent, /rejected/i);
+  assert.doesNotMatch(ui.document.querySelector('.toast-stack')?.textContent || '', /saved|connected/i);
+});
+
+test('closing workspace access prevents delayed authentication from signing in', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { token: false, fetcher: path => path === '/api/v1/runs?limit=1' ? pending : undefined });
+  ui.click('#openAuth'); ui.document.querySelector('#adminToken').value = 'candidate-token-for-authentication-test';
+  ui.document.querySelector('#authForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  ui.click('#closeAuth'); release(new Response('[]')); await flush();
+  assert.equal(ui.window.sessionStorage.getItem('autoswe.adminToken'), null);
+  assert.equal(ui.document.querySelector('#authDialog').open, false);
+});
+
+test('active run toolbar opens a named cancel dialog and submits only after confirmation', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  let cancelled = false;
+  const ui = await setup(t, { fetcher: path => path.endsWith('/cancel') ? pending : cancelled && path === `/api/v1/runs/${runs[0].run_id}` ? new Response(JSON.stringify({ ...runs[0], state: 'CANCELLED' })) : undefined });
+  ui.click('[data-run-id]'); await flush();
+  const trigger = ui.document.querySelector('#cancelRun');
+  assert.ok(trigger, 'Active runs expose a cancel button');
+  assert.equal(trigger.classList.contains('hidden'), false);
+  trigger.focus(); trigger.click();
+  const dialog = ui.document.querySelector('#cancelRunDialog');
+  assert.equal(dialog.open, true);
+  assert.ok(dialog.getAttribute('aria-labelledby'));
+  assert.match(ui.document.querySelector('#cancelRunDescription').textContent, new RegExp(runs[0].run_id));
+  assert.equal(ui.document.activeElement.id, 'keepRun');
+  assert.equal(ui.calls.filter(c => c.path.endsWith('/cancel')).length, 0);
+  ui.document.querySelector('#cancelRunForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true }));
+  ui.document.querySelector('#cancelRunForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.calls.filter(c => c.path.endsWith('/cancel')).length, 1);
+  assert.equal(ui.document.querySelector('#confirmCancelRun').disabled, true);
+  cancelled = true; release(new Response('{}')); await flush();
+  assert.equal(dialog.open, false);
+  assert.equal(trigger.classList.contains('hidden'), true);
+  assert.equal(ui.document.querySelector('#runState').textContent, 'Cancelled');
+});
+
+for (const dismissal of ['keepRun', 'closeCancelRun', 'Escape']) {
+  test(`cancel dialog ${dismissal} dismisses without a request and restores toolbar focus`, async t => {
+    const ui = await setup(t);
+    ui.click('[data-run-id]'); await flush();
+    const trigger = ui.document.querySelector('#cancelRun');
+    assert.ok(trigger); trigger.focus(); trigger.click();
+    if (dismissal === 'Escape') ui.document.activeElement.dispatchEvent(new ui.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    else ui.click(`#${dismissal}`);
+    assert.equal(ui.document.querySelector('#cancelRunDialog').open, false);
+    assert.equal(ui.document.activeElement, trigger);
+    assert.equal(ui.calls.filter(c => c.path.endsWith('/cancel')).length, 0);
+  });
+}
+
+test('a delayed cancellation cannot return the user to a run after navigation', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path.endsWith('/cancel') ? pending : undefined });
+  ui.click('[data-run-id]'); await flush();
+  assert.ok(ui.document.querySelector('#cancelRun')); ui.click('#cancelRun');
+  ui.document.querySelector('#cancelRunForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true }));
+  ui.click('#closeCancelRun'); ui.click('[data-nav="new"]'); release(new Response('{}')); await flush();
+  assert.equal(ui.window.location.hash, '#new');
+  assert.equal(ui.document.querySelector('#cancelRunDialog').open, false);
+  assert.equal(ui.calls.filter(c => c.path === `/api/v1/runs/${runs[0].run_id}`).length, 1);
+});
+
+test('terminal runs do not offer cancellation in the toolbar or palette', async t => {
+  const ui = await setup(t);
+  ui.click(`[data-run-id="${runs[1].run_id}"]`); await flush();
+  assert.ok(ui.document.querySelector('#cancelRun'));
+  assert.equal(ui.document.querySelector('#cancelRun').classList.contains('hidden'), true);
+  ui.click('#openCommandPalette');
+  assert.doesNotMatch(ui.document.querySelector('#paletteList').textContent, /Cancel Current Run/);
+});
+
+test('the palette cancellation command opens the application dialog without window.confirm', async t => {
+  const ui = await setup(t);
+  let nativeConfirmCalls = 0;
+  ui.window.confirm = () => { nativeConfirmCalls += 1; return false; };
+  ui.click('[data-run-id]'); await flush(); ui.click('#openCommandPalette');
+  [...ui.document.querySelectorAll('.palette-item')].find(item => /Cancel Current Run/.test(item.textContent)).click();
+  assert.equal(nativeConfirmCalls, 0);
+  assert.equal(ui.document.querySelector('#paletteDialog').open, false);
+  assert.equal(ui.document.querySelector('#cancelRunDialog').open, true);
+});
+
+for (const [triggerId, dialogId, focusId] of [['tourHelpBtn', 'helpDialog', 'closeHelp'], ['modelStudioBtn', 'modelStudioDialog', 'closeModelStudio'], ['openCommandPalette', 'paletteDialog', 'paletteInput']]) {
+  test(`${dialogId} Escape and native cancel restore focus and allow reopening`, async t => {
+    const ui = await setup(t);
+    const trigger = ui.document.querySelector(`#${triggerId}`);
+    const dialog = ui.document.querySelector(`#${dialogId}`);
+    trigger.focus(); trigger.click(); await flush();
+    assert.equal(ui.document.activeElement.id, focusId);
+    ui.document.activeElement.dispatchEvent(new ui.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    assert.equal(dialog.open, false);
+    assert.equal(ui.document.activeElement, trigger);
+    trigger.click(); await flush();
+    dialog.dispatchEvent(new ui.window.Event('cancel', { cancelable: true }));
+    assert.equal(dialog.open, false);
+    assert.equal(ui.document.activeElement, trigger);
+  });
+}
+
+test('closing and reopening authentication cannot accept an earlier pending attempt', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const candidate = 'candidate-token-for-authentication-test';
+  const ui = await setup(t, { token: false, fetcher: path => path === '/api/v1/runs?limit=1' ? pending : undefined });
+  const dialog = ui.document.querySelector('#authDialog');
+  dialog.close = function () { this.open = false; }; // Native close events are queued.
+  ui.click('#openAuth'); ui.document.querySelector('#adminToken').value = candidate;
+  ui.document.querySelector('#authForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  dialog.dispatchEvent(new ui.window.Event('cancel', { cancelable: true }));
+  ui.click('#openAuth'); ui.document.querySelector('#adminToken').value = candidate;
+  dialog.dispatchEvent(new ui.window.Event('close'));
+  release(new Response('[]')); await flush();
+  assert.equal(ui.window.sessionStorage.getItem('autoswe.adminToken'), null);
+  assert.equal(dialog.open, true);
+});
+
+test('queued task drawer close events cannot discard a newly requested task feed', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path.includes('/messages?') ? pending.then(response => response.clone()) : undefined });
+  ui.click('[data-run-id]'); await flush();
+  const dialog = ui.document.querySelector('#taskDrawer');
+  dialog.close = function () { this.open = false; };
+  ui.click('.task-list-row'); ui.click('#closeDrawer'); ui.click('.task-list-row');
+  dialog.dispatchEvent(new ui.window.Event('close'));
+  release(new Response(JSON.stringify([{ kind: 'context_handoff', sender: 'research', recipient: 'implementation', summary: 'Current task feed', created_at: events[0].created_at }]))); await flush();
+  assert.match(ui.document.querySelector('#drawerTaskIntel').textContent, /Current task feed/);
+});
+
+test('pending cancellations remain deduplicated while moving between active runs', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ui = await setup(t, { fetcher: path => path.endsWith('/cancel') ? pending.then(response => response.clone()) : path === `/api/v1/runs/${runs[1].run_id}` ? new Response(JSON.stringify({ ...runs[1], state: 'EXECUTING' })) : undefined });
+  ui.click('[data-run-id]'); await flush(); ui.click('#cancelRun');
+  ui.document.querySelector('#cancelRunForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true }));
+  ui.click('#closeCancelRun');
+  for (const run of [runs[1], runs[0]]) {
+    ui.document.querySelector('#runLookup').value = run.run_id;
+    ui.document.querySelector('#lookupForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+    ui.click('#cancelRun');
+    if (ui.document.querySelector('#cancelRunDialog').open) {
+      ui.document.querySelector('#cancelRunForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); ui.click('#closeCancelRun');
+    }
+  }
+  assert.equal(ui.calls.filter(c => c.path === `/api/v1/runs/${runs[0].run_id}/cancel`).length, 1);
+  release(new Response('{}')); await flush();
+});
+
+test('a queued artifact close does not abort a reopened preview', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const artifact = { artifact_id: 'file-a', sha256: 'a'.repeat(64), size_bytes: 10, media_type: 'text/plain' };
+  const ui = await setup(t, { fetcher: path => path.endsWith('/artifacts') ? new Response(JSON.stringify([artifact])) : path.endsWith('/artifacts/file-a') ? pending.then(response => response.clone()) : undefined });
+  ui.click('[data-run-id]'); await flush();
+  const dialog = ui.document.querySelector('#artifactDialog'); dialog.close = function () { this.open = false; };
+  ui.click('.artifact-item'); ui.click('#closeArtifactModal'); ui.click('.artifact-item');
+  dialog.dispatchEvent(new ui.window.Event('close'));
+  release(new Response('Reopened artifact content')); await flush();
+  assert.equal(ui.document.querySelector('#artifactPreviewCode').textContent, 'Reopened artifact content');
+});
+
+test('a queued approval close cannot discard the currently open decision', async t => {
+  const approval = { approval_id: 'approval-1', status: 'PENDING', tool_name: 'git_push', call_hash: 'a'.repeat(64), expires_at: '2026-09-01T00:00:00Z' };
+  const ui = await setup(t, { fetcher: path => path.endsWith('/approvals') ? new Response(JSON.stringify([approval])) : path.endsWith('/decision') ? new Response('{}') : undefined });
+  ui.click('[data-run-id]'); await flush();
+  const dialog = ui.document.querySelector('#approvalDialog'); dialog.close = function () { this.open = false; };
+  ui.click('#approvalList .button.primary'); ui.click('#closeApproval'); ui.click('#approvalList .button.primary');
+  dialog.dispatchEvent(new ui.window.Event('close'));
+  ui.document.querySelector('#approvalOperator').value = 'Test operator';
+  ui.document.querySelector('#approvalForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.calls.filter(c => c.path.endsWith('/decision')).length, 1);
+});
+
+test('navigation clears transient lookup errors without clearing authentication or service feedback', async t => {
+  const ui = await setup(t, { fetcher: path => path === '/api/v1/runs?limit=100'
+    ? new Response('{"detail":"Service temporarily unavailable"}', { status: 503 })
+    : path === '/api/v1/runs?limit=1' ? new Response('{"detail":"Unauthorized"}', { status: 401 }) : undefined });
+  ui.click('#openAuth');
+  ui.document.querySelector('#adminToken').value = 'invalid-token-for-authentication-test';
+  ui.document.querySelector('#authForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  ui.click('#closeAuth');
+  const authFeedback = ui.document.querySelector('#authFeedback').textContent;
+  const serviceFeedback = ui.document.querySelector('#runsFeedback').textContent;
+  assert.match(authFeedback, /rejected/i);
+  assert.match(serviceFeedback, /Service temporarily unavailable/);
+  const input = ui.document.querySelector('#runLookup');
+  input.value = 'not-a-run';
+  ui.document.querySelector('#lookupForm').dispatchEvent(new ui.window.Event('submit', { cancelable: true })); await flush();
+  assert.equal(ui.document.querySelector('#lookupFeedback').classList.contains('hidden'), false);
+  ui.click('[data-nav="new"]');
+  assert.equal(ui.window.location.hash, '#new');
+  assert.equal(ui.document.querySelector('#lookupFeedback').classList.contains('hidden'), true);
+  assert.equal(ui.document.querySelector('#lookupFeedback').textContent, '');
+  assert.equal(input.hasAttribute('aria-invalid'), false);
+  assert.equal(ui.document.querySelector('#authFeedback').textContent, authFeedback);
+  assert.equal(ui.document.querySelector('#runsFeedback').textContent, serviceFeedback);
 });

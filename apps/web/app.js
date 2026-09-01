@@ -15,6 +15,7 @@ import { initRunsBrowser, showRunsBrowser, hideRunsBrowser, resetRunsBrowser } f
 import { initPalette, openPalette } from './js/palette.js?v=20260831-clean-ui';
 import { loadTaskIntel, clearTaskIntel } from './js/taskIntel.js?v=20260831-clean-ui';
 import { initTour } from './js/tour.js?v=20260831-clean-ui';
+import { showDialog, closeDialog } from './js/dialogs.js?v=20260831-clean-ui';
 
 (() => {
   'use strict';
@@ -37,6 +38,10 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     wsReconnectTimer: null,
     selectedTask: null,
     modelConfig: null,
+    modelFormDirty: false,
+    modelFormRevision: 0,
+    modelProbeRequest: null,
+    modelTestRequest: null,
     view: 'runs',
     viewEpoch: 0,
     runRequest: null,
@@ -48,8 +53,11 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     renderKeys: {},
     repositoryVersion: 0,
     authEpoch: 0,
+    authRequest: null,
     artifactRequest: null,
     approvalDecision: null,
+    cancelTarget: null,
+    cancelRequests: new Map(),
   };
 
   function feedback(id, message, success = false) {
@@ -78,11 +86,13 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   }
 
   function setView(view, runId = '', historyMode = 'push') {
+    feedback('lookupFeedback', '');
+    el('runLookup').removeAttribute('aria-invalid');
     state.viewEpoch += 1;
     stopRunUpdates();
     hideRunsBrowser();
     state.view = view;
-    for (const id of ['taskDrawer', 'artifactDialog', 'approvalDialog']) if (el(id).open) el(id).close();
+    for (const id of ['taskDrawer', 'artifactDialog', 'approvalDialog', 'cancelRunDialog']) closeDialog(el(id));
     el('dashboard').setAttribute('aria-busy', 'false');
     el('refreshRun').disabled = false;
     for (const [id, name] of [['runsBrowserSection', 'runs'], ['onboardingSection', 'new'], ['dashboard', 'run']]) {
@@ -107,12 +117,54 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
 
   // Authentication Dialog Controls
   function openAuth() {
+    cancelAuthRequest();
+    feedback('authFeedback', '');
     el('adminToken').value = getToken();
-    if (!el('authDialog').open) el('authDialog').showModal();
+    if (!el('authDialog').open) showDialog(el('authDialog'));
   }
 
   function closeAuth() {
-    if (el('authDialog').open) el('authDialog').close();
+    cancelAuthRequest();
+    if (el('authDialog').open) closeDialog(el('authDialog'));
+  }
+
+  function cancelAuthRequest() {
+    state.authRequest?.abort();
+    state.authRequest = null;
+    el('connectWorkspace').disabled = false;
+    el('connectWorkspace').textContent = 'Connect workspace';
+  }
+
+  async function connectWorkspace(event) {
+    event.preventDefault();
+    if (state.authRequest) return;
+    const token = el('adminToken').value.trim();
+    if (!token) { feedback('authFeedback', 'Enter your admin token.'); return; }
+    const request = new AbortController();
+    state.authRequest = request;
+    const epoch = state.authEpoch;
+    const current = () => state.authRequest === request && !request.signal.aborted
+      && state.authEpoch === epoch && el('authDialog').open && el('adminToken').value.trim() === token;
+    el('connectWorkspace').disabled = true;
+    el('connectWorkspace').textContent = 'Connecting…';
+    feedback('authFeedback', 'Checking workspace access…');
+    try {
+      await api('/api/v1/runs?limit=1', { signal: request.signal }, token);
+      if (!current()) return;
+      state.authEpoch += 1;
+      state.repositoryVersion += 1;
+      setToken(token);
+      el('authBtnText').textContent = 'Workspace access';
+      closeAuth();
+      showToast('Workspace connected.');
+      void loadModelConfig();
+      if (state.view === 'run') void loadRun(state.runId, { refresh: true });
+      else if (state.view === 'runs') showRunsBrowser();
+    } catch (error) {
+      if (current()) feedback('authFeedback', error.message);
+    } finally {
+      if (state.authRequest === request) cancelAuthRequest();
+    }
   }
 
   // Recent Runs Manager (Local Storage)
@@ -230,6 +282,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   }
 
   function invalidateRepository() {
+    feedback('projectFeedback', '');
     state.repositoryVersion += 1;
     state.projectId = ''; state.repositoryId = ''; state.registeredSignature = '';
     sessionStorage.removeItem('autoswe.repositorySelection');
@@ -429,6 +482,14 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   async function loadRun(runId, { refresh = false, historyMode = 'push' } = {}) {
     const candidate = String(runId || '').trim();
     if (!candidate || (refresh && (state.view !== 'run' || state.runId !== candidate))) return;
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(candidate)) {
+      feedback('lookupFeedback', 'Enter a valid run ID (UUID), copied from a run’s details.');
+      el('runLookup').setAttribute('aria-invalid', 'true');
+      el('runLookup').focus();
+      return;
+    }
+    feedback('lookupFeedback', '');
+    el('runLookup').removeAttribute('aria-invalid');
     if (refresh && document.hidden) {
       state.pollTimer = window.setTimeout(() => void loadRun(candidate, { refresh: true }), 5000);
       return;
@@ -438,6 +499,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       setView('run', candidate, historyMode);
       if (different) {
         state.currentRun = null;
+        updateCancelControl();
         state.tasks = []; state.approvals = []; state.artifacts = []; state.events = [];
         state.renderKeys = {};
         el('runGoalTitle').textContent = 'Loading run…';
@@ -512,7 +574,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   }
   function setupWebSocket(projectId, runId) {
     const task = state.tasks.find(t => t.state === 'RUNNING' || t.state === 'LEASED');
-    if (task?.id === state.socketTaskId && state.ws) return;
+    if (task?.task_id === state.socketTaskId && state.ws) return;
     window.clearTimeout(state.wsReconnectTimer);
     if (state.ws) { state.ws.onclose = state.ws.onmessage = state.ws.onopen = state.ws.onerror = null; state.ws.close(); }
     state.ws = null; state.socketTaskId = null;
@@ -521,9 +583,9 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       el('streamStatusText').textContent = terminalStates.has(state.currentRun?.state) ? 'Run finished' : 'Auto-updating';
       return;
     }
-    state.socketTaskId = task.id;
-    const valid = () => state.view === 'run' && state.runId === runId && state.socketTaskId === task.id;
-    state.ws = connectTaskSocket(projectId, task.id, {
+    state.socketTaskId = task.task_id;
+    const valid = () => state.view === 'run' && state.runId === runId && state.socketTaskId === task.task_id;
+    state.ws = connectTaskSocket(projectId, task.task_id, {
       onEvent(payload) {
         if (!valid()) return;
         if (state.events.some(event => eventKey(event) === eventKey(payload))) return;
@@ -546,6 +608,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
 
   // Render Dashboard
   function renderRun(run) {
+    updateCancelControl();
     el('runGoalTitle').textContent = run.goal;
     el('runIdText').textContent = run.run_id;
     el('runProjectName').textContent = run.project_name || run.project_id.slice(0, 8);
@@ -558,9 +621,11 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     // Metrics
     el('runState').textContent = humanState(run.state);
     el('stateDuration').textContent = `${formatDuration(run.state_duration_seconds)} in current state`;
-    el('planRevision').textContent = run.active_plan_revision === null ? 'Planning' : `r${run.active_plan_revision}`;
+    el('planRevision').textContent = run.active_plan_revision == null
+      ? (terminalStates.has(run.state) ? 'No plan' : run.state === 'PLANNING' ? 'Planning' : 'Awaiting plan')
+      : `r${run.active_plan_revision}`;
     const counts = summarizeCounts(run.task_counts);
-    el('taskSummary').textContent = `${counts.done} / ${counts.total} complete`;
+    el('taskSummary').textContent = counts.total ? `${counts.done} / ${counts.total} complete` : 'No tasks created';
 
     // Calculate Task Progress Fill
     const taskCounts = run.task_counts || {};
@@ -626,13 +691,13 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     const root = el('taskList');
     if (!tasks.length) { root.innerHTML = `<div class="empty-state">${emptyTasks()}</div>`; return; }
     root.querySelector('.empty-state')?.remove();
-    const ids = new Set(tasks.map(t => t.id));
+    const ids = new Set(tasks.map(t => t.task_id));
     for (const row of [...root.children]) if (!ids.has(row.dataset.taskId)) row.remove();
     tasks.forEach((task, index) => {
-      let button = [...root.children].find(row => row.dataset.taskId === task.id);
+      let button = [...root.children].find(row => row.dataset.taskId === task.task_id);
       if (!button) {
-        button = document.createElement('button'); button.type = 'button'; button.className = 'task-list-row'; button.dataset.taskId = task.id;
-        button.addEventListener('click', () => { const latest = state.tasks.find(t => t.id === button.dataset.taskId); if (latest) openTaskDrawer(latest); });
+        button = document.createElement('button'); button.type = 'button'; button.className = 'task-list-row'; button.dataset.taskId = task.task_id;
+        button.addEventListener('click', () => { const latest = state.tasks.find(t => t.task_id === button.dataset.taskId); if (latest) openTaskDrawer(latest); });
       }
       const html = `<span class="task-number">${String(index + 1).padStart(2, '0')}</span><span><span class="task-list-name">${escapeHtml(task.title)}</span><span class="task-list-meta">${task.dependencies?.length ? `${task.dependencies.length} prerequisite task(s)` : 'No prerequisites'}</span></span><span class="state-pill tone-${stateTone(task.state)}"><span class="pill-dot"></span>${humanState(task.state)}</span><span class="task-list-type">${humanState(task.task_type)}</span><span aria-hidden="true">›</span>`;
       if (button.innerHTML !== html) button.innerHTML = html;
@@ -647,6 +712,56 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       el(`panel-${tab.dataset.panel}`).classList.toggle('hidden', !active);
     });
     if (name === 'tasks' && state.taskView === 'graph') renderDAG(state.tasks);
+  }
+
+  function updateCancelControl() {
+    const active = state.view === 'run' && state.currentRun && !terminalStates.has(state.currentRun.state);
+    el('cancelRun').classList.toggle('hidden', !active);
+    el('cancelRun').disabled = state.cancelRequests.has(state.runId);
+    if (!active && el('cancelRunDialog').open) closeDialog(el('cancelRunDialog'));
+  }
+
+  function openCancelDialog() {
+    if (state.view !== 'run' || !state.currentRun || terminalStates.has(state.currentRun.state)
+      || state.cancelRequests.has(state.runId)) return;
+    state.cancelTarget = { runId: state.runId, epoch: state.authEpoch };
+    el('cancelRunDescription').textContent = `Active work will stop for “${state.currentRun.goal}” (${state.runId}). This cannot be undone.`;
+    feedback('cancelRunFeedback', '');
+    el('confirmCancelRun').disabled = false;
+    el('confirmCancelRun').textContent = 'Cancel run';
+    showDialog(el('cancelRunDialog'), el('keepRun'));
+  }
+
+  async function submitCancellation(event) {
+    event.preventDefault();
+    const target = state.cancelTarget;
+    if (!target || state.cancelRequests.has(target.runId) || target.epoch !== state.authEpoch
+      || state.view !== 'run' || state.runId !== target.runId || terminalStates.has(state.currentRun?.state)) return;
+    state.cancelRequests.set(target.runId, target);
+    el('confirmCancelRun').disabled = true;
+    el('confirmCancelRun').textContent = 'Cancelling…';
+    feedback('cancelRunFeedback', 'Requesting cancellation. Closing this dialog will not undo the request.');
+    updateCancelControl();
+    try {
+      await api(`/api/v1/runs/${encodeURIComponent(target.runId)}/cancel`, { method: 'POST' });
+      if (target.epoch !== state.authEpoch) return;
+      if (state.cancelTarget === target) closeDialog(el('cancelRunDialog'));
+      if (state.view === 'run' && state.runId === target.runId) {
+        showToast('Cancellation requested — workers will wind down.');
+        void loadRun(target.runId, { refresh: true });
+      }
+    } catch (error) {
+      if (target.epoch !== state.authEpoch) return;
+      if (state.cancelTarget === target) feedback('cancelRunFeedback', error.message);
+      else if (state.view === 'run' && state.runId === target.runId) showToast(error.message, true);
+    } finally {
+      if (state.cancelRequests.get(target.runId) === target) state.cancelRequests.delete(target.runId);
+      if (state.cancelTarget === target) {
+        el('confirmCancelRun').disabled = false;
+        el('confirmCancelRun').textContent = 'Cancel run';
+      }
+      updateCancelControl();
+    }
   }
 
   // Topological DAG Layout & Stage Grouping Engine
@@ -664,7 +779,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     }
 
     // Compute topological ranks for each task
-    const taskMap = new Map(tasks.map(t => [t.id, t]));
+    const taskMap = new Map(tasks.map(t => [t.task_id, t]));
     const ranks = new Map();
 
     function getRank(taskId, visited = new Set()) {
@@ -687,14 +802,14 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       return rank;
     }
 
-    tasks.forEach(t => getRank(t.id));
+    tasks.forEach(t => getRank(t.task_id));
 
     // Group tasks by rank
     const maxRank = Math.max(...Array.from(ranks.values()), 0);
     const columns = Array.from({ length: maxRank + 1 }, () => []);
 
     tasks.forEach(t => {
-      const rank = ranks.get(t.id) || 0;
+      const rank = ranks.get(t.task_id) || 0;
       columns[rank].push(t);
     });
 
@@ -721,8 +836,8 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
         const node = document.createElement('button');
         node.type = 'button';
         node.className = `task-node ${task.state.toLowerCase()}${isRunningState(task.state) ? ' is-running' : ''}`;
-        node.id = `node-${task.id}`;
-        node.dataset.taskId = task.id;
+        node.id = `node-${task.task_id}`;
+        node.dataset.taskId = task.task_id;
 
         const header = document.createElement('div');
         header.className = 'task-node-header';
@@ -779,7 +894,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     svg.setAttribute('height', viewport.scrollHeight);
 
     tasks.forEach(task => {
-      const childNode = el(`node-${task.id}`);
+      const childNode = el(`node-${task.task_id}`);
       if (!childNode) return;
       const childRect = childNode.getBoundingClientRect();
 
@@ -814,7 +929,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     state.selectedTask = task;
     el('drawerTaskType').textContent = task.task_type;
     el('drawerTaskTitle').textContent = task.title;
-    el('drawerTaskId').textContent = task.id;
+    el('drawerTaskId').textContent = task.task_id;
     
     const stateEl = el('drawerTaskState');
     stateEl.textContent = humanState(task.state);
@@ -828,10 +943,10 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     el('drawerTaskGoal').textContent = task.description || task.goal || task.title;
 
     // Agent reasoning feed (handoff summaries) for this task.
-    void loadTaskIntel(state.currentRun?.project_id, task.id, el('drawerTaskIntel'));
+    void loadTaskIntel(state.currentRun?.project_id, task.task_id, el('drawerTaskIntel'));
 
     // Filter events for this task
-    const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.id);
+    const taskEvents = state.events.filter(e => e.payload && e.payload.task_id === task.task_id);
     const eventsContainer = el('drawerTaskEvents');
     eventsContainer.replaceChildren();
 
@@ -850,7 +965,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       });
     }
 
-    if (!el('taskDrawer').open) el('taskDrawer').showModal();
+    if (!el('taskDrawer').open) showDialog(el('taskDrawer'));
   }
 
   // Render Governed Approval Queue
@@ -929,7 +1044,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     el('confirmApproval').textContent = approved ? 'Approve exact call' : 'Reject call';
     el('confirmApproval').disabled = false;
     feedback('approvalFeedback', '');
-    el('approvalDialog').showModal();
+    showDialog(el('approvalDialog'));
   }
 
   async function submitApproval(event) {
@@ -943,7 +1058,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       await api(`/api/v1/approvals/${encodeURIComponent(approval.approval_id)}/decision`, {
         method: 'POST', body: JSON.stringify({ approved, approver, expected_call_hash: approval.call_hash }),
       });
-      if (state.approvalDecision === decision) el('approvalDialog').close();
+      if (state.approvalDecision === decision) closeDialog(el('approvalDialog'));
       showToast(approved ? 'Tool call approved.' : 'Tool call rejected.');
       if (state.view === 'run' && state.runId === runId && state.viewEpoch === viewEpoch) await loadRun(runId, { refresh: true });
     } catch (error) {
@@ -1009,7 +1124,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     const current = () => state.artifactRequest === request && !request.signal.aborted && el('artifactDialog').open;
     el('artifactPreviewCode').textContent = 'Loading file preview…';
     el('downloadArtifactBtn').onclick = () => downloadArtifact(projectId, artifact);
-    if (!el('artifactDialog').open) el('artifactDialog').showModal();
+    if (!el('artifactDialog').open) showDialog(el('artifactDialog'));
 
     try {
       const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`, {
@@ -1094,29 +1209,76 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     });
   }
 
-  // Utility Formatters
+  // Model settings and discovery
+  function modelDiscoveryStatus(message, success = false) {
+    feedback('modelDiscoveryStatus', message, success);
+  }
+
+  function cancelModelTest() {
+    state.modelTestRequest?.abort();
+    state.modelTestRequest = null;
+    el('testModelBtn').disabled = false;
+    el('testModelBtn').textContent = 'Test connection';
+    el('modelTestCard').classList.add('hidden');
+  }
+
+  function cancelModelRequests() {
+    state.modelProbeRequest?.abort();
+    state.modelProbeRequest = null;
+    el('probeModelsBtn').disabled = false;
+    el('probeModelsBtn').textContent = 'Discover models';
+    cancelModelTest();
+  }
+
+  function modelSelectionChanged() {
+    state.modelFormDirty = true;
+    state.modelFormRevision += 1;
+    cancelModelTest();
+  }
+
+  function syncProviderChips() {
+    const endpoint = el('modelBaseUrl').value.trim();
+    let provider = state.modelConfig?.base_url === endpoint ? state.modelConfig.provider_name?.toLowerCase() : '';
+    if (/11434|ollama/i.test(endpoint)) provider = 'ollama';
+    document.querySelectorAll('.provider-chip').forEach(chip => {
+      const active = chip.dataset.provider === provider || (!!chip.dataset.url && chip.dataset.url === endpoint);
+      chip.classList.toggle('active', active);
+      chip.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function fillModelSettings() {
+    const config = state.modelConfig;
+    el('modelBaseUrl').value = config?.base_url || '';
+    el('primaryModelInput').value = config?.primary_model || '';
+    el('fallbackModelsInput').value = (config?.fallback_models || []).join(', ');
+    el('modelTimeoutInput').value = config?.timeout_seconds || 300;
+    el('modelTemperatureInput').value = config?.temperature || 0;
+    el('apiKeyStatusHint').textContent = config?.has_api_key
+      ? 'A key is saved for this endpoint. Leave blank to keep it, or enter a replacement.'
+      : 'Leave blank for local Ollama. Changing the endpoint clears the old key.';
+    populateModelDropdowns([], config?.primary_model || '');
+    syncProviderChips();
+    modelDiscoveryStatus('Choose a provider or enter a base URL to discover models.');
+    if (getToken() && config?.base_url) void probeModels();
+  }
+
   function openModelStudio() {
+    cancelModelRequests();
+    state.modelFormDirty = false;
+    state.modelFormRevision += 1;
     // API tokens are not login passwords; never reuse browser-autofilled values.
     el('modelApiKey').value = '';
     el('modelApiKey').type = 'password';
-    el('apiKeyStatusHint').textContent = 'Leave blank to retain a saved key for this endpoint. Changing the endpoint clears the old key.';
-    if (state.modelConfig) {
-      if (el('modelBaseUrl')) el('modelBaseUrl').value = state.modelConfig.base_url || '';
-      if (el('primaryModelInput')) el('primaryModelInput').value = state.modelConfig.primary_model || '';
-      if (el('fallbackModelsInput')) el('fallbackModelsInput').value = (state.modelConfig.fallback_models || []).join(', ');
-      if (el('modelTimeoutInput')) el('modelTimeoutInput').value = state.modelConfig.timeout_seconds || 300;
-      if (el('modelTemperatureInput')) el('modelTemperatureInput').value = state.modelConfig.temperature || 0.0;
-      if (state.modelConfig.has_api_key && el('apiKeyStatusHint')) {
-        el('apiKeyStatusHint').textContent = 'A key is saved for this endpoint. Leave blank to keep it, or enter a replacement.';
-      }
-      populateModelDropdowns(state.modelConfig.fallback_models || [], state.modelConfig.primary_model);
-    }
-    if (el('modelTestCard')) el('modelTestCard').classList.add('hidden');
-    if (!el('modelStudioDialog').open) el('modelStudioDialog').showModal();
+    if (!el('modelStudioDialog').open) showDialog(el('modelStudioDialog'));
+    fillModelSettings();
+    if (!getToken()) modelDiscoveryStatus('Connect your workspace to discover models.');
   }
 
   function closeModelStudio() {
-    if (el('modelStudioDialog').open) el('modelStudioDialog').close();
+    state.modelFormRevision += 1;
+    cancelModelRequests();
+    if (el('modelStudioDialog').open) closeDialog(el('modelStudioDialog'));
   }
 
   function updateModelBadge(config) {
@@ -1147,9 +1309,12 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     primary.value = selected || '__custom__';
     if (selected) el('primaryModelInput').value = selected;
     const chips = el('discoveredModelsChips'); chips.replaceChildren();
-    available.forEach(model => {
+    [...new Set(models)].forEach(model => {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'preset-chip'; button.textContent = model;
-      button.addEventListener('click', () => { el('primaryModelInput').value = model; primary.value = model; }); chips.append(button);
+      button.addEventListener('click', () => {
+        modelSelectionChanged();
+        el('primaryModelInput').value = model; primary.value = model;
+      }); chips.append(button);
     });
   }
 
@@ -1160,7 +1325,9 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       if (authEpoch !== state.authEpoch || !getToken()) return;
       state.modelConfig = config;
       updateModelBadge(config);
-      populateModelDropdowns(config.fallback_models || [], config.primary_model);
+      if (el('modelStudioDialog').open) {
+        if (!state.modelFormDirty) fillModelSettings();
+      } else populateModelDropdowns([], config.primary_model);
     } catch (_) {
       if (authEpoch !== state.authEpoch || !getToken()) return;
       const topbarText = el('topbarModelName');
@@ -1175,6 +1342,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     if (button.disabled) return;
     button.disabled = true;
     const authEpoch = state.authEpoch;
+    const formRevision = state.modelFormRevision;
     const payload = {
       base_url: el('modelBaseUrl').value.trim(),
       api_key: el('modelApiKey').value.trim(),
@@ -1196,8 +1364,10 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
       if (authEpoch !== state.authEpoch || !getToken()) return;
       state.modelConfig = updated;
       updateModelBadge(updated);
-      populateModelDropdowns(updated.fallback_models || [], updated.primary_model);
-      closeModelStudio();
+      if (formRevision === state.modelFormRevision && el('modelStudioDialog').open) {
+        populateModelDropdowns([], updated.primary_model);
+        closeModelStudio();
+      }
       showToast(`✓ Active Model: ${updated.primary_model} (${updated.provider_name})`);
     } catch (err) {
       if (authEpoch === state.authEpoch && getToken()) showToast(err.message, true);
@@ -1206,43 +1376,48 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     }
   }
 
-  async function probeModels(notify = true) {
-    const baseUrl = el('modelBaseUrl') ? el('modelBaseUrl').value.trim() : (state.modelConfig ? state.modelConfig.base_url : '');
-    if (!baseUrl) {
-      if (notify) showToast('Please enter an endpoint Base URL to probe.', true);
-      return;
-    }
-    const apiKey = el('modelApiKey') ? el('modelApiKey').value.trim() : '';
+  async function probeModels() {
+    const baseUrl = el('modelBaseUrl').value.trim();
+    if (!baseUrl || !getToken() || !el('modelStudioDialog').open) return;
+    state.modelProbeRequest?.abort();
+    const request = new AbortController();
+    state.modelProbeRequest = request;
+    const authEpoch = state.authEpoch;
+    const apiKey = el('modelApiKey').value.trim();
+    const isCurrent = () => state.modelProbeRequest === request && authEpoch === state.authEpoch
+      && getToken() && el('modelStudioDialog').open && el('modelBaseUrl').value.trim() === baseUrl
+      && el('modelApiKey').value.trim() === apiKey;
     const probeBtn = el('probeModelsBtn');
-    let originalText = '';
-    if (probeBtn) {
-      originalText = probeBtn.innerHTML;
-      probeBtn.disabled = true;
-      probeBtn.innerHTML = '<span>Probing...</span>';
-    }
-
+    probeBtn.disabled = true;
+    probeBtn.textContent = 'Discovering…';
+    populateModelDropdowns([], el('primaryModelInput').value.trim());
+    modelDiscoveryStatus('Looking for models at this endpoint…', true);
     try {
-      if (notify) showToast(`Probing models at ${baseUrl}...`);
       const res = await api('/api/v1/models/probe', {
-        method: 'POST',
+        method: 'POST', signal: request.signal,
         body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
       });
-      if (res.reachable && res.models && res.models.length) {
-        const cur = el('primaryModelInput') ? el('primaryModelInput').value.trim() : (state.modelConfig ? state.modelConfig.primary_model : '');
-        populateModelDropdowns(res.models, cur || res.models[0]);
-        if (el('primaryModelInput') && !el('primaryModelInput').value.trim()) {
-          el('primaryModelInput').value = res.models[0];
-        }
-        if (notify) showToast(`✓ Discovered ${res.models.length} models (${res.latency_ms}ms)`);
+      if (!isCurrent()) return;
+      const models = Array.isArray(res.models) ? res.models : [];
+      if (!res.reachable) {
+        modelDiscoveryStatus(res.error || 'Could not reach this endpoint. Check the URL and API key.');
+      } else if (!models.length) {
+        modelDiscoveryStatus(/11434|ollama/i.test(baseUrl)
+          ? 'No models installed. Install one with ollama pull <model>, then discover again.'
+          : 'No models returned by this endpoint. Check the provider or enter a custom model name.');
       } else {
-        if (notify) showToast(`Probe result: ${res.error || 'No models returned, check URL and key.'}`, true);
+        const selected = el('primaryModelInput').value.trim() || models[0];
+        populateModelDropdowns(models, selected);
+        const missing = !models.includes(selected) ? ' The current model was not returned; choose an installed model or keep it as a custom name.' : '';
+        modelDiscoveryStatus(`${models.length} model${models.length === 1 ? '' : 's'} found.${missing}`, true);
       }
     } catch (err) {
-      if (notify) showToast(err.message, true);
+      if (isCurrent() && err.name !== 'AbortError') modelDiscoveryStatus(err.message);
     } finally {
-      if (probeBtn) {
+      if (state.modelProbeRequest === request) {
+        state.modelProbeRequest = null;
         probeBtn.disabled = false;
-        probeBtn.innerHTML = originalText;
+        probeBtn.textContent = 'Discover models';
       }
     }
   }
@@ -1250,11 +1425,25 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   async function testModelConnection() {
     const baseUrl = el('modelBaseUrl').value.trim();
     const model = el('primaryModelInput').value.trim();
+    const timeoutSeconds = Number(el('modelTimeoutInput').value);
     if (!baseUrl || !model) {
       showToast('Please specify both Base URL and Primary Model.', true);
       return;
     }
+    if (!el('modelTimeoutInput').checkValidity()) {
+      showToast('Set the inference timeout between 10 and 3600 seconds.', true);
+      el('modelTimeoutInput').focus();
+      return;
+    }
+    state.modelTestRequest?.abort();
+    const request = new AbortController();
+    state.modelTestRequest = request;
+    const authEpoch = state.authEpoch;
     const apiKey = el('modelApiKey').value.trim();
+    const isCurrent = () => state.modelTestRequest === request && authEpoch === state.authEpoch
+      && getToken() && el('modelStudioDialog').open && el('modelBaseUrl').value.trim() === baseUrl
+      && el('modelApiKey').value.trim() === apiKey && el('primaryModelInput').value.trim() === model
+      && Number(el('modelTimeoutInput').value) === timeoutSeconds;
     const testBtn = el('testModelBtn');
     const originalText = testBtn.innerHTML;
     testBtn.disabled = true;
@@ -1269,14 +1458,15 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     statusBadge.className = 'badge';
     statusBadge.textContent = 'RUNNING TEST...';
     latencyEl.textContent = '...';
-    snippetEl.textContent = 'Sending test JSON completion probe...';
+    snippetEl.textContent = `Sending a JSON completion probe. Waiting up to ${timeoutSeconds} seconds…`;
 
     try {
       const res = await api('/api/v1/models/test', {
-        method: 'POST',
-        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model: model }),
+        method: 'POST', signal: request.signal,
+        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, timeout_seconds: timeoutSeconds }),
       });
 
+      if (!isCurrent()) return;
       latencyEl.textContent = `${res.latency_ms}ms`;
       if (res.success) {
         statusBadge.className = 'badge badge-green';
@@ -1290,17 +1480,23 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
         showToast(`Model test failed: ${res.error}`, true);
       }
     } catch (err) {
+      if (!isCurrent() || err.name === 'AbortError') return;
       statusBadge.className = 'badge badge-red';
       statusBadge.textContent = 'ERROR';
       snippetEl.textContent = err.message;
       showToast(err.message, true);
     } finally {
-      testBtn.disabled = false;
-      testBtn.innerHTML = originalText;
+      if (state.modelTestRequest === request) {
+        state.modelTestRequest = null;
+        testBtn.disabled = false;
+        testBtn.innerHTML = originalText;
+      }
     }
   }
 
   function handleProviderChipClick(chip) {
+    cancelModelRequests();
+    modelSelectionChanged();
     document.querySelectorAll('.provider-chip').forEach(c => c.classList.remove('active'));
     chip.classList.add('active');
 
@@ -1317,10 +1513,13 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     el('fallbackModelsInput').value = fallbacks || '';
     if (!model) el('primaryModelInput').value = '';
     populateModelDropdowns([], model || '');
+    modelDiscoveryStatus('Discover models after entering this provider’s URL and API key.');
+    syncProviderChips();
 
     if (chip.dataset.provider === 'ollama') {
       el('modelApiKey').value = '';
       el('apiKeyStatusHint').textContent = 'Ollama local models do not require an API key.';
+      void probeModels();
     } else if (chip.dataset.provider === 'openai') {
       el('apiKeyStatusHint').textContent = 'Enter your OpenAI API key (sk-...).';
     } else if (chip.dataset.provider === 'openrouter') {
@@ -1334,6 +1533,28 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   }
 
   // Model Studio Event Listeners
+  el('modelStudioDialog').addEventListener('close', () => {
+    // Native close events are queued; an older close must not cancel a reopened dialog.
+    if (!el('modelStudioDialog').open) {
+      state.modelFormRevision += 1;
+      cancelModelRequests();
+    }
+  });
+  for (const event of ['input', 'change']) {
+    el('modelStudioForm').addEventListener(event, () => {
+      state.modelFormDirty = true;
+      state.modelFormRevision += 1;
+    });
+  }
+  for (const id of ['modelBaseUrl', 'modelApiKey']) {
+    el(id).addEventListener('input', () => {
+      cancelModelRequests();
+      populateModelDropdowns([], el('primaryModelInput').value.trim());
+      syncProviderChips();
+      modelDiscoveryStatus('Connection changed. Discover models to refresh the list.');
+    });
+    el(id).addEventListener('change', () => { void probeModels(); });
+  }
   const modelStudioBtn = el('modelStudioBtn');
   if (modelStudioBtn) modelStudioBtn.addEventListener('click', openModelStudio);
 
@@ -1347,14 +1568,16 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   if (modelStudioForm) modelStudioForm.addEventListener('submit', saveModelConfig);
 
   const probeModelsBtn = el('probeModelsBtn');
-  if (probeModelsBtn) probeModelsBtn.addEventListener('click', () => probeModels(true));
+  if (probeModelsBtn) probeModelsBtn.addEventListener('click', () => probeModels());
 
   const testModelBtn = el('testModelBtn');
   if (testModelBtn) testModelBtn.addEventListener('click', testModelConnection);
+  el('modelTimeoutInput').addEventListener('input', cancelModelTest);
 
   const primaryModelSelect = el('primaryModelSelect');
   if (primaryModelSelect) {
     primaryModelSelect.addEventListener('change', (e) => {
+      modelSelectionChanged();
       const val = e.target.value;
       const input = el('primaryModelInput');
       if (val === '__custom__') {
@@ -1371,6 +1594,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   const primaryModelInput = el('primaryModelInput');
   if (primaryModelInput) {
     primaryModelInput.addEventListener('input', (e) => {
+      modelSelectionChanged();
       const val = e.target.value;
       if (primaryModelSelect) {
         const optionExists = Array.from(primaryModelSelect.options).some(opt => opt.value === val);
@@ -1411,8 +1635,8 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   }
 
   // Modal Closers
-  el('closeDrawer').addEventListener('click', () => el('taskDrawer').close());
-  el('closeArtifactModal').addEventListener('click', () => el('artifactDialog').close());
+  el('closeDrawer').addEventListener('click', () => closeDialog(el('taskDrawer')));
+  el('closeArtifactModal').addEventListener('click', () => closeDialog(el('artifactDialog')));
 
   // Timeline Filter Pills
     el('timelineFilters').addEventListener('click', (e) => {
@@ -1440,6 +1664,7 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     el('authBtnText').textContent = 'Connect workspace';
     stopRunUpdates(); resetRunsBrowser();
     state.tasks = []; state.events = []; state.currentRun = null; state.runId = '';
+    closeModelStudio();
     state.modelConfig = null; populateModelDropdowns([], '');
     el('topbarModelName').textContent = 'Connect to configure';
     backToRuns();
@@ -1447,18 +1672,9 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
     closeAuth();
   });
 
-  el('authForm').addEventListener('submit', event => {
-    event.preventDefault();
-    state.authEpoch += 1;
-    state.repositoryVersion += 1;
-    setToken(el('adminToken').value.trim());
-    el('authBtnText').textContent = 'Workspace access';
-    showToast('Admin token saved for this session.');
-    closeAuth();
-    void loadModelConfig();
-    if (state.view === 'run') void loadRun(state.runId, { refresh: true });
-    else if (state.view === 'runs') showRunsBrowser();
-  });
+  el('authForm').addEventListener('submit', connectWorkspace);
+  el('authDialog').addEventListener('close', () => { if (!el('authDialog').open) cancelAuthRequest(); });
+  el('adminToken').addEventListener('input', () => { cancelAuthRequest(); feedback('authFeedback', ''); });
 
   el('browseFolderBtn').addEventListener('click', selectDirectory);
   el('dirPickerFallback').addEventListener('change', handleFallbackDirPicker);
@@ -1544,22 +1760,13 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
           showToast('Run ID copied to clipboard');
         },
       });
-      items.push({
+      if (!terminalStates.has(state.currentRun.state)) items.push({
         id: 'cancel',
         title: 'Cancel Current Run',
         icon: '✕',
         hint: 'destructive',
         keywords: 'cancel abort stop mission',
-        run: async () => {
-          try {
-            if (terminalStates.has(state.currentRun?.state)) { showToast('This run has already finished.'); return; }
-            if (!window.confirm('Cancel this run? Active work will stop. This cannot be undone.')) return;
-            await api(`/api/v1/runs/${encodeURIComponent(state.runId)}/cancel`, { method: 'POST' });
-            showToast('Cancellation requested — workers will wind down.');
-          } catch (error) {
-            showToast(error.message, true);
-          }
-        },
+        run: openCancelDialog,
       });
       if (state.currentRun?.project_id && state.tasks.length) {
         items.push({
@@ -1616,10 +1823,16 @@ import { initTour } from './js/tour.js?v=20260831-clean-ui';
   el('backToRuns').addEventListener('click', backToRuns);
   el('closeAuth').addEventListener('click', closeAuth);
   el('approvalForm').addEventListener('submit', submitApproval);
-  el('closeApproval').addEventListener('click', () => el('approvalDialog').close());
-  el('approvalDialog').addEventListener('close', () => { state.approvalDecision = null; });
-  el('artifactDialog').addEventListener('close', () => { state.artifactRequest?.abort(); state.artifactRequest = null; });
-  el('taskDrawer').addEventListener('close', () => clearTaskIntel(el('drawerTaskIntel')));
+  el('cancelRun').addEventListener('click', openCancelDialog);
+  el('cancelRunForm').addEventListener('submit', submitCancellation);
+  for (const id of ['closeCancelRun', 'keepRun']) el(id).addEventListener('click', () => closeDialog(el('cancelRunDialog')));
+  el('cancelRunDialog').addEventListener('close', () => { if (!el('cancelRunDialog').open) state.cancelTarget = null; });
+  el('closeApproval').addEventListener('click', () => closeDialog(el('approvalDialog')));
+  el('approvalDialog').addEventListener('close', () => { if (!el('approvalDialog').open) state.approvalDecision = null; });
+  el('artifactDialog').addEventListener('close', () => {
+    if (!el('artifactDialog').open) { state.artifactRequest?.abort(); state.artifactRequest = null; }
+  });
+  el('taskDrawer').addEventListener('close', () => { if (!el('taskDrawer').open) clearTaskIntel(el('drawerTaskIntel')); });
   for (const id of ['projectName', 'sourcePath', 'defaultBranch']) el(id).addEventListener('input', invalidateRepository);
   el('baselineCommit').addEventListener('invalid', () => { el('baselineCommit').closest('details').open = true; });
   document.querySelectorAll('[data-panel]').forEach(tab => {

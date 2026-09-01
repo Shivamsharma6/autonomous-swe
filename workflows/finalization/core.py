@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sqlalchemy import func, select
 
 from agents.base import AgentInvocation, AgentRuntime
+from agents.configuration import ModelRuntimeFactory
 from agents.gateway import ModelGateway
 from agents.specs import AgentRole, build_agent_specs
 from domain.enums import ApprovalStatus, ArtifactState, RiskLevel, RunStatus, TaskStatus
@@ -80,9 +81,11 @@ class RunFinalizationService:
         fallback_models: tuple[str, ...],
         limits: PlanLimits,
         repository: DomainRepository | None = None,
+        model_factory: ModelRuntimeFactory | None = None,
     ) -> None:
         self._database = database
         self._gateway = gateway
+        self._model_factory = model_factory
         self._memory = memory
         self._artifacts = artifacts
         self._scheduler = scheduler
@@ -232,10 +235,19 @@ class RunFinalizationService:
         if replay is not None:
             return replay
 
+        async with self._database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+        if run is None:
+            raise LookupError(f"run {run_id} does not exist")
+        configured = (
+            self._model_factory.resolve(run.model_configuration) if self._model_factory else None
+        )
         spec = build_agent_specs(
             primary_model=self._primary_model,
             fallback_models=self._fallback_models,
         )[AgentRole.FINAL_REVIEWER]
+        if configured:
+            spec = configured.apply_spec(spec)
         async with self._database.transaction() as session:
             await session.merge(
                 RunStageAttemptRow(
@@ -246,13 +258,9 @@ class RunFinalizationService:
                     status="RUNNING",
                 )
             )
-            run = await session.get(RunRow, run_id)
-        if run is None:
-            raise LookupError(f"run {run_id} does not exist")
-
         runtime = AgentRuntime(
             spec,
-            self._gateway,
+            configured.gateway if configured else self._gateway,
             input_type=AgentInvocation,
             output_type=ReleaseDecision,
             memory=self._memory,
@@ -431,6 +439,11 @@ class RunFinalizationService:
             escalation_policy="terminate-on-bounds-or-no-progress",
             termination_policy="one-valid-mutation-or-visible-failure",
         )
+        configured = (
+            self._model_factory.resolve(run.model_configuration) if self._model_factory else None
+        )
+        if configured:
+            spec = configured.apply_spec(spec)
         async with self._database.transaction() as session:
             await session.merge(
                 RunStageAttemptRow(
@@ -443,7 +456,7 @@ class RunFinalizationService:
             )
         runtime = AgentRuntime(
             spec,
-            self._gateway,
+            configured.gateway if configured else self._gateway,
             input_type=AgentInvocation,
             output_type=TaskPlanMutation,
             memory=self._memory,

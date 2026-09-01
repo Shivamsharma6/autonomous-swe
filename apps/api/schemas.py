@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 
 from domain.models import CommitSha, ContractModel, NonEmptyText, Sha256
 
@@ -18,7 +18,7 @@ class ProjectCreateRequest(ContractModel):
 
 class ProjectFilePayload(ContractModel):
     path: str = Field(min_length=1, max_length=1_000)
-    content: str
+    content: Annotated[str, StringConstraints(strip_whitespace=False)]
 
 
 class ProjectOnboardRequest(ContractModel):
@@ -81,6 +81,7 @@ class ModelTestRequest(ContractModel):
     base_url: str = Field(min_length=1, max_length=2_000)
     api_key: str = Field(default="", max_length=1_000)
     model: str = Field(min_length=1, max_length=200)
+    timeout_seconds: float | None = Field(default=None, gt=0, le=3_600)
 
 
 class ModelTestResponse(ContractModel):
@@ -114,6 +115,8 @@ class TaskResponse(ContractModel):
     version: int
     task_type: str
     title: str
+    description: str
+    priority: int
     state_entered_at: str
     plan_revision: int
     dependencies: tuple[UUID, ...]
