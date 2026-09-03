@@ -43,6 +43,7 @@ class ReadFileResult(ContractModel):
     content: Annotated[str, StringConstraints(strip_whitespace=False)]
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
+    truncated: bool = False
     sandbox_execution_id: UUID
 
 
@@ -139,10 +140,11 @@ root=Path('/workspace').resolve(); rel=Path(sys.argv[1]); limit=int(sys.argv[2])
 if rel.is_absolute() or '..' in rel.parts: raise SystemExit('unsafe path')
 path=(root/rel).resolve(strict=True); path.relative_to(root)
 if path.is_symlink() or not path.is_file(): raise SystemExit('not a regular file')
-data=path.read_bytes()
-if len(data)>limit: raise SystemExit('file exceeds maximum_bytes')
-text=data.decode('utf-8')
-print(json.dumps({'path':rel.as_posix(),'content':text,'sha256':hashlib.sha256(data).hexdigest(),'size_bytes':len(data)}))
+full_data=path.read_bytes(); full_sha=hashlib.sha256(full_data).hexdigest(); full_size=len(full_data)
+truncated=full_size>limit
+data=full_data[:limit] if truncated else full_data
+text=data.decode('utf-8', errors='replace')
+print(json.dumps({'path':rel.as_posix(),'content':text,'sha256':full_sha,'size_bytes':full_size,'truncated':truncated}))
 """
 
 _SEARCH_SCRIPT = """import json,sys

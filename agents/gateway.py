@@ -481,7 +481,7 @@ def strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 def _extract_json(raw_text: str) -> dict[str, Any] | None:
     text = raw_text.strip()
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, strict=False)
         if isinstance(parsed, dict):
             return parsed
     except json.JSONDecodeError:
@@ -490,7 +490,7 @@ def _extract_json(raw_text: str) -> dict[str, Any] | None:
     match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
     if match:
         try:
-            parsed = json.loads(match.group(1).strip())
+            parsed = json.loads(match.group(1).strip(), strict=False)
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:
@@ -500,7 +500,7 @@ def _extract_json(raw_text: str) -> dict[str, Any] | None:
     last_brace = text.rfind("}")
     if first_brace != -1 and last_brace > first_brace:
         try:
-            parsed = json.loads(text[first_brace : last_brace + 1])
+            parsed = json.loads(text[first_brace : last_brace + 1], strict=False)
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:

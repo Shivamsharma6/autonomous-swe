@@ -20,3 +20,4 @@ artifacts/
 data/
 runtime/
 .compose-test-runtime/
+tests/e2e_browser/screenshots/

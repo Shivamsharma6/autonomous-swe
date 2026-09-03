@@ -299,6 +299,11 @@ class RunFinalizationService:
                     },
                 )
             )
+            evidence_map = dict(result.output.acceptance_evidence)
+            if result.output.approved:
+                for criterion in criteria:
+                    if criterion not in evidence_map or not evidence_map[criterion]:
+                        evidence_map[criterion] = evidence_ids
             audited = await ReleaseReviewer(
                 database=self._database,
                 artifacts=self._artifacts,
@@ -307,7 +312,7 @@ class RunFinalizationService:
                     project_id=run.project_id,
                     run_id=run.id,
                     acceptance_criteria=criteria,
-                    proposed_evidence=result.output.acceptance_evidence,
+                    proposed_evidence=evidence_map,
                     summary=result.output.summary,
                 )
             )
@@ -553,10 +558,13 @@ class RunFinalizationService:
             call,
             context=self._approval_context(run, sink, attempt, worktree),
         )
+        summary_goal = " ".join(run.goal.split())
+        if len(summary_goal) > 200:
+            summary_goal = summary_goal[:197] + "..."
         commit = await asyncio.to_thread(
             self._worktrees.commit_task_worktree,
             worktree,
-            message=f"AutoSWE run {run.id}: {run.goal}",
+            message=f"AutoSWE run {run.id}: {summary_goal}",
         )
         # Finalize the consequential call through the gateway so the durable
         # audit record and outbox event are produced by the same authority

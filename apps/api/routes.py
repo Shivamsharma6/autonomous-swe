@@ -73,6 +73,9 @@ router = APIRouter(
     prefix="/api/v1",
     dependencies=[Depends(require_admin)],
 )
+websocket_router = APIRouter(
+    prefix="/api/v1",
+)
 Services = Annotated[ControlPlaneServices, Depends(get_services)]
 DeadLetterLimit = Annotated[int, Query(ge=1, le=500)]
 RunEventLimit = Annotated[int, Query(ge=1, le=1_000)]
@@ -1022,7 +1025,7 @@ async def replay_dead_letter(
     return {"dead_letter_id": str(dead_letter_id), "status": "REQUEUED"}
 
 
-@router.websocket("/projects/{project_id}/tasks/{task_id}/events")
+@websocket_router.websocket("/projects/{project_id}/tasks/{task_id}/events")
 async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> None:
     try:
         await require_websocket_admin(websocket)
@@ -1041,10 +1044,12 @@ async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> 
             project_id=project_id,
             task_id=task_id,
         )
-    if task is None:
-        await websocket.close(code=1008, reason="task not found")
-        return
-    await websocket.accept()
+    subprotocol = websocket.headers.get("sec-websocket-protocol")
+    if subprotocol:
+        selected_subprotocol = subprotocol.split(",")[0].strip()
+        await websocket.accept(subprotocol=selected_subprotocol)
+    else:
+        await websocket.accept()
     source = PostgresTaskEventSource(services.database)
     cursor: EventCursor | None = None
     try:

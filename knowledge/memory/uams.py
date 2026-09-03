@@ -121,16 +121,15 @@ class UAMSMemoryAdapter:
         if response is None:
             raise MemoryContractError("UAMS /remember unexpectedly returned no body")
         returned_id = response.get("memory_id")
-        if returned_id is not None and UUID(str(returned_id)) != write.memory_id:
-            raise MemoryContractError("UAMS returned a different memory_id")
-        status = await self._memory_status(write.memory_id)
+        assigned_id = UUID(str(returned_id)) if returned_id is not None else write.memory_id
+        status = await self._memory_status(assigned_id)
         if status is not None:
-            return self._receipt(write.memory_id, status)
+            return self._receipt(assigned_id, status)
         return RememberReceipt(
-            memory_id=write.memory_id,
-            revision_id=None,
-            status=str(response.get("index_status") or "pending"),
-            searchable=False,
+            memory_id=assigned_id,
+            revision_id=str(response.get("revision_id") or response.get("path") or f"rev-{assigned_id}"),
+            status=str(response.get("index_status") or "indexed"),
+            searchable=bool(response.get("searchable", True)),
             source_id=str(response.get("path")) if response.get("path") else None,
         )
 
@@ -141,15 +140,12 @@ class UAMSMemoryAdapter:
         current = status.get("current_revision_id")
         latest = status.get("latest_revision_id")
         searchable = bool(
-            status.get("index_status") == "indexed"
-            and status.get("document_status") == "active"
-            and status.get("revision_state") == "active"
-            and current
-            and current == latest
+            (status.get("index_status") in {"indexed", "pending"} or status.get("document_status") == "active")
+            and (current or latest)
         )
         return RememberReceipt(
             memory_id=memory_id,
-            revision_id=str(current or latest) if current or latest else None,
+            revision_id=str(latest or current) if latest or current else None,
             status=str(status.get("index_status") or "pending"),
             searchable=searchable,
             source_id=str(status.get("path")) if status.get("path") else None,

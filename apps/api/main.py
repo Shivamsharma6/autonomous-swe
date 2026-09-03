@@ -19,7 +19,7 @@ from apps.api.middleware import (
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
 )
-from apps.api.routes import router
+from apps.api.routes import router, websocket_router
 from execution.scheduler.service import ConcurrencyPolicy, SchedulerService
 from infrastructure.config import Settings
 from knowledge.memory.uams import UAMSMemoryAdapter
@@ -80,6 +80,7 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
         )
 
     application.include_router(router)
+    application.include_router(websocket_router)
     return application
 
 

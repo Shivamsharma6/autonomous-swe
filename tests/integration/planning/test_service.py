@@ -922,3 +922,45 @@ async def test_planning_timeout_then_success_keeps_usage_and_replay_idempotency(
     assert len(replayed) == 2
     assert sum(row.input_tokens + row.output_tokens for row in replayed) == 60
     assert sum(row.cost_usd for row in replayed) == pytest.approx(0.12)
+
+
+async def test_planner_remaps_colliding_task_ids_across_runs(database, planning_case):
+    plan1, service_for = planning_case
+    service1, _ = service_for(plan1)
+    persisted1 = await service1.plan_next()
+    assert persisted1 == plan1
+
+    # Create second run whose model plan reuses the exact same task IDs
+    repository = DomainRepository()
+    run_id2 = uuid4()
+    async with database.transaction() as session:
+        await repository.create_run(
+            session,
+            run_id=run_id2,
+            project_id=plan1.project_id,
+            repository_id=plan1.repository_id,
+            goal="Second run with identical placeholder task IDs",
+            baseline_commit=plan1.baseline_commit,
+        )
+    plan2 = plan1.model_copy(update={"run_id": run_id2})
+    service2, _ = service_for(plan2)
+    persisted2 = await service2.plan_next()
+
+    assert persisted2 is not None
+    assert persisted2.run_id == run_id2
+    # The task IDs must have been remapped away from plan1's task IDs to avoid DB collision
+    plan1_ids = {t.id for t in plan1.tasks}
+    persisted2_ids = {t.id for t in persisted2.tasks}
+    assert plan1_ids.isdisjoint(persisted2_ids)
+
+    # Verify both sets of tasks exist concurrently in the database
+    async with database.sessions() as session:
+        rows1 = (
+            await session.scalars(select(TaskRow).where(TaskRow.run_id == plan1.run_id))
+        ).all()
+        rows2 = (
+            await session.scalars(select(TaskRow).where(TaskRow.run_id == run_id2))
+        ).all()
+    assert len(rows1) == len(plan1.tasks)
+    assert len(rows2) == len(plan2.tasks)
+

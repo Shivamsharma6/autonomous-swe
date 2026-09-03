@@ -70,18 +70,17 @@ class GitWorktreeManager:
                 raise WorktreePolicyError(
                     f"completed dependency worktree is unavailable: {dependency_id}"
                 )
-            patch = self._git(dependency, "diff", "--binary", "--no-ext-diff", "HEAD")
-            if patch:
-                patch += "\n"
-                already_applied = self._git_with_input_optional(
-                    target,
-                    patch,
-                    "apply",
-                    "--reverse",
-                    "--check",
-                )
-                if not already_applied:
-                    self._git_with_input(target, patch, "apply", "--3way")
+            diff_files = [
+                line.strip()
+                for line in self._git(dependency, "diff", "--name-only", "HEAD").splitlines()
+                if line.strip()
+            ]
+            for rel in diff_files:
+                src_path = dependency / rel
+                dst_path = target / rel
+                if src_path.is_file():
+                    dst_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
             self._copy_untracked(dependency, target)
         self._git(source, "worktree", "list", "--porcelain")
 

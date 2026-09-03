@@ -190,6 +190,8 @@ class ToolGateway:
             if row is None or row.id != call.call_id:
                 raise ToolGatewayError("approved tool execution is missing")
             _validate_replay(row, call)
+            if ToolExecutionStatus(row.status) is ToolExecutionStatus.COMPLETED:
+                return _result_from_row(row, replayed=True)
             if ToolExecutionStatus(row.status) not in {
                 ToolExecutionStatus.CLAIMED,
                 ToolExecutionStatus.WAITING_FOR_APPROVAL,

@@ -33,8 +33,18 @@ from execution.repositories import RepositoryAdapterRegistry
 from knowledge.memory.port import MemoryPort
 from persistence.database import Database
 from persistence.repositories import DomainRepository
-from persistence.tables import ModelCallRow, RepositoryRow, RunRow, RunStageAttemptRow, utc_now
+from persistence.tables import (
+    ModelCallRow,
+    RepositoryRow,
+    RunRow,
+    RunStageAttemptRow,
+    TaskRow,
+    utc_now,
+)
+from observability.logging import get_structured_logger
 from planning.validator import TaskPlanValidator, ValidationIssue
+
+logger = get_structured_logger("planning")
 
 RepositoryContextProvider = Callable[[str], dict[str, Any]]
 _OWNERSHIP_POLL_SECONDS = 0.25
@@ -300,14 +310,25 @@ class RunPlanningService:
                 validation = self._validator.validate(plan)
                 validation_issues = validation.issues
                 if not validation.valid:
+                    logger.warning(
+                        "plan_validation_failed",
+                        run_id=str(run.id),
+                        attempt=attempt,
+                        issues=[
+                            {
+                                "code": i.code,
+                                "message": i.message,
+                                "task_id": str(i.task_id) if i.task_id else None,
+                            }
+                            for i in validation_issues
+                        ],
+                    )
                     raise InvalidTaskPlan(validation_issues)
-                self._require_integration_sink(plan)
-                await self._persist_plan(
+                return await self._persist_plan(
                     plan,
                     stage_attempt_id=stage_attempt_id,
                     fence_started_at=fence_started_at,
                 )
-                return plan
             except PlanningOwnershipLost:
                 return None
             except Exception as error:
@@ -464,7 +485,7 @@ class RunPlanningService:
         *,
         stage_attempt_id: UUID,
         fence_started_at: datetime,
-    ) -> None:
+    ) -> TaskPlan:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
             run = await session.scalar(
@@ -483,6 +504,32 @@ class RunPlanningService:
                 raise PlanningOwnershipLost("planning attempt is no longer running")
             if existing.started_at != fence_started_at:
                 raise PlanningOwnershipLost("planning stage was taken over by another dispatcher")
+
+            # Remap any task IDs that already exist in the database from other runs
+            task_ids = [t.id for t in plan.tasks]
+            existing_task_ids = set(
+                await session.scalars(
+                    select(TaskRow.id).where(TaskRow.id.in_(task_ids))
+                )
+            )
+            if existing_task_ids:
+                id_map = {
+                    t.id: (uuid5(run.id, str(t.id)) if t.id in existing_task_ids else t.id)
+                    for t in plan.tasks
+                }
+                resolved_tasks = []
+                for task_spec in plan.tasks:
+                    new_id = id_map[task_spec.id]
+                    new_deps = tuple(id_map.get(dep, dep) for dep in task_spec.dependencies)
+                    resolved_tasks.append(
+                        task_spec.model_copy(
+                            update={"id": new_id, "dependencies": new_deps}
+                        )
+                    )
+                plan = plan.model_copy(update={"tasks": tuple(resolved_tasks)})
+
+            self._require_integration_sink(plan)
+
             await self._repository.create_plan_revision(
                 session,
                 run_id=run.id,
@@ -531,6 +578,7 @@ class RunPlanningService:
                 topic="plan-created",
                 payload=payload,
             )
+            return plan
 
     async def _fail_run(
         self,

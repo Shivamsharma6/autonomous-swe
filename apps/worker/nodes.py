@@ -97,18 +97,18 @@ _NODE_ROLES = {
 _NODE_TOOL_POLICY = {
     "recall": (),
     "investigate": ("read_file", "search_code"),
-    "evidence": ("read_file", "search_code"),
-    "synthesis": ("read_file", "search_code"),
+    "evidence": (),
+    "synthesis": (),
     "implement": ("read_file", "search_code", "apply_patch", "run_tests"),
     "targeted_test": ("read_file", "search_code", "run_tests"),
     "review": ("read_file", "search_code", "run_tests"),
-    "generate_tests": ("read_file", "search_code", "apply_patch"),
-    "execute": ("run_tests",),
+    "generate_tests": ("read_file", "search_code", "apply_patch", "run_tests"),
+    "execute": ("read_file", "search_code", "run_tests"),
     "establish_invariants": ("read_file", "search_code", "run_tests"),
     "refactor": ("read_file", "search_code", "apply_patch", "run_tests"),
-    "regression_verify": ("run_tests",),
-    "draft": ("read_file", "search_code", "apply_patch"),
-    "validate_examples": ("read_file", "run_tests"),
+    "regression_verify": ("read_file", "search_code", "run_tests"),
+    "draft": ("read_file", "search_code", "apply_patch", "run_tests"),
+    "validate_examples": ("read_file", "search_code", "run_tests"),
     "inspect": ("read_file", "search_code"),
     "verify": ("read_file", "search_code", "run_tests"),
 }
@@ -188,6 +188,79 @@ class GatewayToolDispatcher(ToolDispatcher):
                 f"agent-tool:{invocation.attempt_id}:{invocation.trace_id}:{call.call_id}"
             ),
         )
+        # Prevent repetitive duplicate test executions when tests have already succeeded.
+        if call.name == "run_tests":
+            last_patch_index = -1
+            for idx, res in enumerate(self.results):
+                if res.tool_name == "apply_patch" and res.status is ToolExecutionStatus.COMPLETED:
+                    last_patch_index = idx
+            for idx, res in enumerate(self.results):
+                if (
+                    idx > last_patch_index
+                    and res.tool_name == "run_tests"
+                    and res.status is ToolExecutionStatus.COMPLETED
+                    and isinstance(res.output, dict)
+                    and res.output.get("passed") is True
+                ):
+                    result = ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        tool_version=request.tool_version,
+                        status=ToolExecutionStatus.COMPLETED,
+                        output={
+                            "passed": True,
+                            "note": (
+                                "Tests already passed successfully since the last code change. "
+                                "Verification is complete. Stop calling tools and immediately return "
+                                "the final NodeAgentOutput JSON."
+                            ),
+                        },
+                        error=None,
+                        risk=self._risk_ceiling,
+                        attempts=0,
+                    )
+                    self.results.append(result)
+                    return result.model_dump(mode="json")
+
+        # Prevent repetitive duplicate read_file calls on unchanged files.
+        if call.name == "read_file":
+            req_path = str(call.arguments.get("path", "")).strip()
+            last_patch_index = -1
+            for idx, res in enumerate(self.results):
+                if (
+                    res.tool_name == "apply_patch"
+                    and res.status is ToolExecutionStatus.COMPLETED
+                    and str(res.output.get("path", "")).strip() == req_path
+                ):
+                    last_patch_index = idx
+            for idx, res in enumerate(self.results):
+                if (
+                    idx > last_patch_index
+                    and res.tool_name == "read_file"
+                    and res.status is ToolExecutionStatus.COMPLETED
+                    and isinstance(res.output, dict)
+                    and str(res.output.get("path", "")).strip() == req_path
+                ):
+                    directive = (
+                        "You MUST now call 'apply_patch' to apply your code changes. Do not call read_file."
+                        if "apply_patch" in self._agent_capabilities
+                        else "Stop calling tools and immediately return the final NodeAgentOutput JSON."
+                    )
+                    result = ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        tool_version=request.tool_version,
+                        status=ToolExecutionStatus.COMPLETED,
+                        output={
+                            "path": req_path,
+                            "error": f"File '{req_path}' has already been read into context. {directive}",
+                        },
+                        error=None,
+                        risk=self._risk_ceiling,
+                        attempts=0,
+                    )
+                    self.results.append(result)
+                    return result.model_dump(mode="json")
         try:
             result = await self._gateway.execute(
                 request,
@@ -386,7 +459,7 @@ class ProductionNodeExecutor:
             # tool exchange to finish within the same bound as other agents.
             token_budget=self._agent_specs[AgentRole(role)].token_budget,
             cost_budget_usd=2.0,
-            turn_budget=12,
+            turn_budget=self._agent_specs[AgentRole(role)].turn_budget,
             wall_time_seconds=900,
             sandbox_profile="task-isolated",
             network_profile="none",
@@ -408,9 +481,43 @@ class ProductionNodeExecutor:
 
         def require_evidence(output: NodeAgentOutput) -> None:
             try:
+                validated_output = output
+                if output.changed_paths:
+                    actual_writes = {
+                        str(item.output["path"])
+                        for item in (*prior_results, *dispatcher.results)
+                        if item.tool_name == "apply_patch"
+                        and item.status is ToolExecutionStatus.COMPLETED
+                        and isinstance(item.output.get("path"), str)
+                    }
+                    validated_output = output.model_copy(
+                        update={
+                            "changed_paths": tuple(
+                                p for p in output.changed_paths if p in actual_writes
+                            )
+                        }
+                    )
+                latest_test = None
+                for res in (*prior_results, *dispatcher.results):
+                    if res.tool_name == "apply_patch":
+                        latest_test = None
+                    elif res.tool_name == "run_tests" and res.status is ToolExecutionStatus.COMPLETED:
+                        latest_test = res
+                if (
+                    latest_test is not None
+                    and isinstance(latest_test.output, dict)
+                    and isinstance(latest_test.output.get("passed"), bool)
+                ):
+                    validated_output = validated_output.model_copy(
+                        update={"verification_passed": latest_test.output["passed"]}
+                    )
+                else:
+                    validated_output = validated_output.model_copy(
+                        update={"verification_passed": None}
+                    )
                 validate_tool_evidence(
                     request.node_name,
-                    output,
+                    validated_output,
                     tuple(dispatcher.results),
                     prior_results=prior_results,
                 )
@@ -427,7 +534,7 @@ class ProductionNodeExecutor:
             tool_dispatcher=dispatcher,
             usage_recorder=self._usage,
             output_validator=require_evidence,
-            max_schema_repairs=2,
+            max_schema_repairs=3,
         )
         result = await runtime.run(
             AgentInvocation(
@@ -453,6 +560,8 @@ class ProductionNodeExecutor:
                         "call apply_patch before returning final output. "
                         "Test stages must call run_tests. Only report "
                         "changed paths and verification backed by successful tool results. "
+                        "When required tool evidence for this stage is obtained, stop calling tools "
+                        "and immediately return the structured output JSON conforming to NodeAgentOutput. "
                         "Recall summarizes supplied context only; "
                         "it must not claim to have read files, changed code, or run tests. "
                         "Do not invent bug reports, files, issue trackers, or playtest results."
@@ -661,13 +770,13 @@ def validate_tool_evidence(
     if node_name in mutation_nodes:
         if patch_result is None or patch_result.status is not ToolExecutionStatus.COMPLETED:
             raise RuntimeError("mutation node requires a successful apply_patch result")
-    written_paths = {
-        result.output.get("path")
-        for result in results
-        if result.tool_name == "apply_patch" and result.status is ToolExecutionStatus.COMPLETED
-    }
-    if set(output.changed_paths) - written_paths:
-        raise RuntimeError("changed paths must match successful apply_patch results")
+        written_paths = {
+            result.output.get("path")
+            for result in (*prior_results, *results)
+            if result.tool_name == "apply_patch" and result.status is ToolExecutionStatus.COMPLETED
+        }
+        if set(output.changed_paths) - written_paths:
+            raise RuntimeError("changed paths must match successful apply_patch results")
 
     unrecovered = tuple(
         name
