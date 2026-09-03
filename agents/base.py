@@ -444,11 +444,7 @@ class AgentRuntime[OutputT: BaseModel]:
                 result = await self._tool_dispatcher.dispatch(call, invocation=invocation)
             all_calls.append(call)
             if successful_calls is not None and isinstance(result, dict) and result.get("error") is None:
-                if call.name == "run_tests":
-                    if isinstance(result.get("output"), dict) and result["output"].get("passed") is True:
-                        successful_calls.add(call.call_id)
-                else:
-                    successful_calls.add(call.call_id)
+                successful_calls.add(call.call_id)
             serialized = json.dumps(result, sort_keys=True, separators=(",", ":"))
             if len(serialized) > _MAX_TOOL_RESULT_CHARS:
                 # Keep the head of large outputs; unbounded tool payloads
@@ -482,9 +478,11 @@ class AgentRuntime[OutputT: BaseModel]:
                 isinstance(result, dict)
                 and call.name == "run_tests"
                 and isinstance(result.get("output"), dict)
-                and result["output"].get("passed") is True
             ):
-                serialized += "\n\n[Instruction: All tests passed. Verification is complete. Do not call further tools. Return ONLY the final JSON output object conforming to the schema now.]"
+                if result["output"].get("passed") is True:
+                    serialized += "\n\n[Instruction: All tests passed. Verification is complete. Do not call further tools. Return ONLY the final JSON output object conforming to the schema now.]"
+                else:
+                    serialized += "\n\n[Instruction: Tests executed. If you need to modify code to fix test failures, call 'apply_patch'. Otherwise, do not call further tools and return ONLY the final JSON output object conforming to the schema now.]"
             elif (
                 "apply_patch" in self.spec.tool_grants
                 and not any(c.name == "apply_patch" and (successful_calls is None or c.call_id in successful_calls) for c in all_calls)
@@ -492,7 +490,7 @@ class AgentRuntime[OutputT: BaseModel]:
                 serialized += "\n\n[CRITICAL DIRECTIVE: You have gathered file context. You MUST now call 'apply_patch' to apply your changes to the files. Do NOT call read_file again.]"
             elif (
                 "run_tests" in self.spec.tool_grants
-                and not any(c.name == "run_tests" and (successful_calls is None or c.call_id in successful_calls) for c in all_calls)
+                and not any(c.name == "run_tests" for c in all_calls)
             ):
                 serialized += "\n\n[CRITICAL DIRECTIVE: You MUST now call 'run_tests' to execute the tests. Do NOT emit JSON until tests have been run.]"
             elif len(all_calls) >= 2:

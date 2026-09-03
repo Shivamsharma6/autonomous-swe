@@ -188,7 +188,7 @@ class GatewayToolDispatcher(ToolDispatcher):
                 f"agent-tool:{invocation.attempt_id}:{invocation.trace_id}:{call.call_id}"
             ),
         )
-        # Prevent repetitive duplicate test executions when tests have already succeeded.
+        # Prevent repetitive duplicate test executions when no code has changed since the last test run.
         if call.name == "run_tests":
             last_patch_index = -1
             for idx, res in enumerate(self.results):
@@ -200,21 +200,24 @@ class GatewayToolDispatcher(ToolDispatcher):
                     and res.tool_name == "run_tests"
                     and res.status is ToolExecutionStatus.COMPLETED
                     and isinstance(res.output, dict)
-                    and res.output.get("passed") is True
                 ):
+                    cached_output = dict(res.output)
+                    note = (
+                        "Tests already passed successfully since the last code change. "
+                        "Verification is complete. Stop calling tools and immediately return "
+                        "the final NodeAgentOutput JSON."
+                        if res.output.get("passed") is True
+                        else "Tests have already run on the current code. "
+                        "If you need to modify code to fix test failures, call 'apply_patch'. "
+                        "Otherwise, do not call further tools and return the final NodeAgentOutput JSON."
+                    )
+                    cached_output["note"] = note
                     result = ToolCallResult(
                         call_id=request.call_id,
                         tool_name=request.tool_name,
                         tool_version=request.tool_version,
                         status=ToolExecutionStatus.COMPLETED,
-                        output={
-                            "passed": True,
-                            "note": (
-                                "Tests already passed successfully since the last code change. "
-                                "Verification is complete. Stop calling tools and immediately return "
-                                "the final NodeAgentOutput JSON."
-                            ),
-                        },
+                        output=cached_output,
                         error=None,
                         risk=self._risk_ceiling,
                         attempts=0,

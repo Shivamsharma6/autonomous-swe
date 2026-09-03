@@ -41,6 +41,8 @@ class PythonRepositoryAdapter(RepositoryAdapter):
             raise AdapterPolicyError("pyproject.toml must contain a project table")
         lockfile = select_lockfile(root, self._lockfiles)
         dependencies = _python_dependencies(document)
+        if (root / "pytest.ini").is_file():
+            dependencies.add("pytest")
         return RepositoryManifest(
             adapter=self.name,
             root=root,
@@ -123,6 +125,17 @@ def _python_dependencies(document: dict[str, Any]) -> set[str]:
             poetry_dependencies = poetry.get("dependencies", {})
             if isinstance(poetry_dependencies, dict):
                 raw.extend(str(name) for name in poetry_dependencies)
+            poetry_group = poetry.get("group", {})
+            if isinstance(poetry_group, dict):
+                for grp in poetry_group.values():
+                    if isinstance(grp, dict) and isinstance(grp.get("dependencies"), dict):
+                        raw.extend(str(name) for name in grp["dependencies"])
+        if "pytest" in tool or "pytest.ini_options" in tool:
+            raw.append("pytest")
+        if "ruff" in tool:
+            raw.append("ruff")
+        if "mypy" in tool:
+            raw.append("mypy")
     names: set[str] = set()
     for requirement in raw:
         name = requirement.split(";", 1)[0]
