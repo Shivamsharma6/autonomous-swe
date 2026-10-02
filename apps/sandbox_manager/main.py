@@ -4,19 +4,27 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import docker  # type: ignore[import-untyped]
-from fastapi import Depends, FastAPI, HTTPException, Response
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import text
 
 from apps.api.auth import AdminAuthenticator
 from apps.api.dependencies import require_admin
 from apps.api.middleware import CorrelationMiddleware
+from execution.sandbox.boundary import SandboxBoundary, SandboxBoundaryViolation
 from execution.sandbox.manager import PostgresSandboxRunStore, SandboxManager
 from execution.sandbox.runner import DockerSandboxRunner, SandboxRequest, SandboxResult
 from infrastructure.config import Settings
 from observability.logging import configure_logging
+from observability.metrics import start_metrics_endpoint
 from observability.tracing import configure_telemetry
 from persistence.database import Database
+
+
+def _boundary_rejected() -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail="sandbox request violates boundary policy",
+    )
 
 
 def create_production_app() -> FastAPI:
@@ -27,6 +35,10 @@ def create_production_app() -> FastAPI:
     runner = DockerSandboxRunner(client)
     store = PostgresSandboxRunStore(database)
     manager = SandboxManager(runner, store)
+    # Isolation-relevant request fields are re-derived here rather than trusted
+    # from the caller: this process, not the HTTP body, decides which host paths
+    # may be mounted, which image may run, and as which container user.
+    boundary = SandboxBoundary.from_settings(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -43,7 +55,7 @@ def create_production_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.state.authenticator = AdminAuthenticator(
-        settings.admin_token.get_secret_value()
+        settings.require_sandbox_manager_token()
     )
     application.add_middleware(CorrelationMiddleware, trust_internal_headers=True)
 
@@ -72,10 +84,6 @@ def create_production_app() -> FastAPI:
             )
         return {"ready": True, "postgres": True, "docker": True}
 
-    @application.get("/metrics", include_in_schema=False)
-    async def metrics() -> Response:
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
     @application.post(
         "/executions",
         response_model=SandboxResult,
@@ -83,7 +91,15 @@ def create_production_app() -> FastAPI:
     )
     async def execute(request: SandboxRequest) -> SandboxResult:
         try:
-            return await manager.execute(request)
+            governed = boundary.enforce(request)
+        except SandboxBoundaryViolation as exc:
+            # 403, not 409: the request is well formed but asks for isolation
+            # the platform does not grant, and it must never reach Docker.
+            raise _boundary_rejected() from exc
+        try:
+            return await manager.execute(governed)
+        except SandboxBoundaryViolation as exc:
+            raise _boundary_rejected() from exc
         except Exception as exc:
             raise HTTPException(status_code=409, detail="sandbox execution failed") from exc
 
@@ -111,4 +127,5 @@ def create_production_app() -> FastAPI:
         application=application,
         sqlalchemy_engine=database.engine,
     )
+    start_metrics_endpoint()
     return application

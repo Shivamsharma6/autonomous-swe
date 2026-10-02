@@ -30,6 +30,7 @@ __all__ = [
     "RetryCategory",
     "RetryDecision",
     "SchedulerService",
+    "TaskBudgetExhausted",
     "TaskClaim",
     "TaskStatus",
     "dependencies_satisfied",

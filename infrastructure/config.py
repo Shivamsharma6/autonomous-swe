@@ -29,7 +29,18 @@ class Settings(BaseSettings):
         default="production",
         validation_alias=AliasChoices("autoswe_env", "AUTOSWE_ENV"),
     )
-    admin_token: SecretStr
+    # Both credentials are optional at the Settings level and validated by the
+    # accessor that consumes them, so a service only has to be handed the
+    # secret it actually authenticates with. `AdminAuthenticator` and
+    # `SandboxManagerClient` construct with the resolved value, so a service
+    # missing its own token still fails fast at startup rather than silently
+    # accepting unauthenticated traffic.
+    admin_token: SecretStr = SecretStr("")
+    # The sandbox manager is the only component that can reach the Docker
+    # Engine, so it authenticates a dedicated service credential instead of the
+    # operator token. Compromise of the loopback-published API must not hand an
+    # attacker the credential that authorises container creation.
+    sandbox_manager_token: SecretStr = SecretStr("")
     database_url: str
     redis_url: str
     uams_url: str
@@ -68,6 +79,10 @@ class Settings(BaseSettings):
     max_dynamic_tasks: int = Field(default=24, ge=0, le=1_000)
     max_plan_depth: int = Field(default=12, ge=1, le=100)
     max_total_budget_usd: float = Field(default=25.0, gt=0)
+    # A re-dispatch is a full-cost replay: a new attempt id means a new
+    # checkpoint chain and new node idempotency keys. Without a cap, a worker
+    # that keeps dying mid-task is paid for in full every time, indefinitely.
+    max_task_attempts: int = Field(default=3, ge=1, le=100)
     max_total_execution_seconds: int = Field(default=7_200, ge=1, le=604_800)
     max_risk_ceiling: RiskLevel = RiskLevel.MEDIUM
     request_max_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
@@ -97,14 +112,41 @@ class Settings(BaseSettings):
     def is_test(self) -> bool:
         return self.autoswe_env == "test"
 
+    def require_admin_token(self) -> str:
+        """Return the operator credential, or refuse to start without one."""
+        return self._require_token("admin_token", self.admin_token)
+
+    def require_sandbox_manager_token(self) -> str:
+        """Return the sandbox service credential, or refuse to start without one."""
+        return self._require_token("sandbox_manager_token", self.sandbox_manager_token)
+
+    def _require_token(self, field_name: str, value: SecretStr) -> str:
+        secret = value.get_secret_value()
+        if len(secret) < 32:
+            raise ValueError(f"{field_name} must contain at least 32 characters")
+        return secret
+
     @model_validator(mode="after")
     def validate_service_boundaries(self) -> Self:
-        if len(self.admin_token.get_secret_value()) < 32:
-            raise ValueError("admin_token must contain at least 32 characters")
         if not self.cors_origins:
             raise ValueError("cors_origins must contain at least one explicit origin")
         if "*" in self.cors_origins:
             raise ValueError("wildcard CORS origins are forbidden")
+        for root_field in ("artifact_root", "repository_import_root", "managed_worktree_root"):
+            root = Path(getattr(self, root_field))
+            if not root.is_absolute():
+                raise ValueError(f"{root_field} must be an absolute path")
+        overlapping = {
+            (Path(self.repository_import_root), Path(self.managed_worktree_root)),
+            (Path(self.artifact_root), Path(self.repository_import_root)),
+            (Path(self.artifact_root), Path(self.managed_worktree_root)),
+        }
+        for left, right in overlapping:
+            if left == right or left in right.parents or right in left.parents:
+                raise ValueError(
+                    "artifact, import, and managed worktree roots must be distinct and "
+                    "must not nest inside one another"
+                )
 
         service_values = {
             "database_url": self.database_url,

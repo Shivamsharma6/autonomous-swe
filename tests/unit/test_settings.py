@@ -10,6 +10,8 @@ def production_values() -> dict[str, object]:
     return {
         "autoswe_env": "production",
         "admin_token": "admin-token-with-at-least-thirty-two-bytes",
+        "sandbox_manager_token": "sandbox-token-with-at-least-thirty-two-bytes",
+        "repository_import_root": "/var/lib/autoswe/imports",
         "database_url": "postgresql+asyncpg://autoswe:password@postgres:5432/autoswe",
         "redis_url": "redis://redis:6379/0",
         "uams_url": "http://host.docker.internal:8000",
@@ -39,7 +41,46 @@ def test_production_rejects_missing_admin_token() -> None:
     values = production_values()
     del values["admin_token"]
 
-    with pytest.raises(ValidationError, match="admin_token"):
+    # Settings itself no longer demands the operator credential: only the API
+    # authenticates operators, and only the sandbox manager authenticates
+    # container creation. Every other service can construct Settings without
+    # holding a secret it never uses. The consuming accessor must still refuse.
+    settings = Settings(_env_file=None, **values)
+
+    with pytest.raises(ValueError, match="admin_token"):
+        settings.require_admin_token()
+
+
+def test_production_rejects_missing_sandbox_manager_token() -> None:
+    values = production_values()
+    del values["sandbox_manager_token"]
+
+    settings = Settings(_env_file=None, **values)
+
+    with pytest.raises(ValueError, match="sandbox_manager_token"):
+        settings.require_sandbox_manager_token()
+
+
+def test_short_credentials_are_refused_by_the_consuming_accessor() -> None:
+    settings = Settings(_env_file=None, **production_values())
+    short = Settings(
+        _env_file=None,
+        **production_values()
+        | {"admin_token": "too-short", "sandbox_manager_token": "nope"},
+    )
+
+    assert len(settings.require_admin_token()) >= 32
+    assert len(settings.require_sandbox_manager_token()) >= 32
+    with pytest.raises(ValueError, match="at least 32"):
+        short.require_admin_token()
+    with pytest.raises(ValueError, match="at least 32"):
+        short.require_sandbox_manager_token()
+
+
+def test_runtime_roots_must_not_nest_inside_one_another() -> None:
+    values = production_values() | {"repository_import_root": "/var/lib/autoswe/worktrees/imports"}
+
+    with pytest.raises(ValidationError, match="must not nest"):
         Settings(_env_file=None, **values)
 
 

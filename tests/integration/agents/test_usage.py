@@ -125,9 +125,19 @@ async def test_timeout_and_success_are_durable_separate_idempotent_requests(
     assert len(rows) == 2
     assert [row.turn for row in rows] == [1, 2]
     assert [row.failure_class for row in rows] == ["TIMEOUT", None]
-    assert sum(row.input_tokens + row.output_tokens for row in rows) == 60
-    assert sum(row.cost_usd for row in rows) == pytest.approx(0.01)
-    assert result.usage.total_tokens == 60
+    # The successful response reported 40 + 20 tokens. The timed-out attempt is
+    # charged for the prompt it certainly sent, because a timeout can arrive
+    # after the provider generated and billed the completion; recording it as
+    # free is what let an unbounded retry loop look cost-free.
+    timed_out, succeeded = rows
+    assert (succeeded.input_tokens, succeeded.output_tokens) == (40, 20)
+    assert timed_out.input_tokens > 0
+    assert timed_out.output_tokens == 0
+    assert timed_out.cost_usd > 0
+    charged = sum(row.input_tokens + row.output_tokens for row in rows)
+    assert charged == 60 + timed_out.input_tokens
+    assert result.usage.total_tokens == charged
+    assert sum(row.cost_usd for row in rows) == pytest.approx(0.01 + timed_out.cost_usd)
 
     if recorder_type is PostgresUsageRecorder:
         conflicting = result.attempts[-1].model_copy(update={"usage": ModelUsage(input_tokens=999)})

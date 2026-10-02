@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -153,6 +154,8 @@ class PlanRevisionRow(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "revision", name="uq_plan_revision"),
         CheckConstraint("revision >= 1", name="ck_plan_revision_positive"),
+        # Backs the max(revision) lookup the run list endpoint performs per run.
+        Index("ix_plan_revisions_run", "run_id"),
     )
 
 
@@ -239,6 +242,9 @@ class TaskRow(TimestampMixin, Base):
         CheckConstraint("version >= 1", name="ck_tasks_version_positive"),
         Index("ix_tasks_ready", "state", "priority", "created_at"),
         Index("ix_tasks_project_state", "project_id", "state"),
+        # Backs the reconciliation scan, which filters on state and orders by
+        # state_entered_at; without it a mass wedge scans every stuck task.
+        Index("ix_tasks_state_entered", "state", "state_entered_at"),
     )
 
 
@@ -497,7 +503,18 @@ class OutboxRow(Base):
     )
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="ck_outbox_attempts"),
-        Index("ix_outbox_publishable", "published_at", "next_attempt_at"),
+        # Partial over the publishable rows only, in the order the claim query
+        # reads them. The previous full index on (published_at, next_attempt_at)
+        # could not supply that order and carried every published row forever.
+        Index(
+            "ix_outbox_publishable_partial",
+            "next_attempt_at",
+            "created_at",
+            "event_id",
+            postgresql_where=sql_text(
+                "published_at IS NULL AND dead_lettered_at IS NULL"
+            ),
+        ),
         Index("ix_outbox_claim_expiry", "claimed_until"),
     )
 
@@ -823,4 +840,8 @@ class AuditEventRow(Base):
     __table_args__ = (
         CheckConstraint("length(content_hash) = 64", name="ck_audit_content_hash"),
         Index("ix_audit_aggregate", "aggregate_type", "aggregate_id", "created_at"),
+        # Serves GET /runs/{id}/events and the task event WebSocket poll.
+        Index("ix_audit_correlation_created", "correlation_id", "created_at", "id"),
+        # Serves retention sweeps and the reconciliation tail.
+        Index("ix_audit_created", "created_at", "id"),
     )

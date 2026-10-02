@@ -129,3 +129,100 @@ def test_cleanup_requires_terminal_state_and_is_idempotent(
     assert manager.cleanup(source_repository, worktree, terminal=True) is True
     assert manager.cleanup(source_repository, worktree, terminal=True) is False
     assert not worktree.exists()
+
+
+def test_tree_hash_covers_tracked_edits_deletions_and_untracked_files(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    manager = GitWorktreeManager(tmp_path / "managed")
+    task = uuid4()
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    worktree = manager.create_task_worktree(source_repository, task, baseline)
+
+    clean = manager.worktree_tree_hash(worktree)
+    (worktree / "app.py").write_text("VALUE = 2\n")
+    edited = manager.worktree_tree_hash(worktree)
+    (worktree / "untracked.py").write_text("X = 1\n")
+    with_untracked = manager.worktree_tree_hash(worktree)
+    (worktree / "app.py").unlink()
+    with_deletion = manager.worktree_tree_hash(worktree)
+
+    assert len({clean, edited, with_untracked, with_deletion}) == 4
+
+
+def test_hashing_does_not_disturb_the_real_index(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    manager = GitWorktreeManager(tmp_path / "managed")
+    task = uuid4()
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    worktree = manager.create_task_worktree(source_repository, task, baseline)
+    (worktree / "app.py").write_text("VALUE = 3\n")
+
+    manager.worktree_tree_hash(worktree)
+
+    assert git("diff", "--cached", "--name-only", cwd=worktree) == ""
+    assert git("status", "--porcelain", cwd=worktree).strip() == "M app.py"
+
+
+def test_commit_rejects_content_that_appeared_after_approval(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    """The regression: approval bound a worktree *name*, then `add --all` ran.
+
+    Anything landing in the worktree between the operator's decision and the
+    commit used to be swept into the release with no re-authorisation.
+    """
+    manager = GitWorktreeManager(tmp_path / "managed")
+    task = uuid4()
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    worktree = manager.create_task_worktree(source_repository, task, baseline)
+    (worktree / "app.py").write_text("VALUE = 10\n")
+
+    approved = manager.worktree_tree_hash(worktree)
+    # Repository-controlled code runs in this worktree while approval is pending.
+    (worktree / "conftest.py").write_text("raise SystemExit('unreviewed')\n")
+
+    with pytest.raises(WorktreePolicyError, match="changed after approval"):
+        manager.commit_task_worktree(
+            worktree, message="reviewed release", expected_tree_hash=approved
+        )
+    assert git("rev-parse", "HEAD", cwd=worktree) == baseline
+
+
+def test_commit_accepts_content_that_is_unchanged_since_approval(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    manager = GitWorktreeManager(tmp_path / "managed")
+    task = uuid4()
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    worktree = manager.create_task_worktree(source_repository, task, baseline)
+    (worktree / "app.py").write_text("VALUE = 11\n")
+    reviewed = manager.worktree_tree_hash(worktree)
+
+    commit = manager.commit_task_worktree(
+        worktree, message="reviewed release", expected_tree_hash=reviewed
+    )
+
+    assert commit != baseline
+    assert git("show", "--name-only", "--format=", commit, cwd=worktree) == "app.py"
+    assert git("show", f"{commit}:app.py", cwd=worktree) == "VALUE = 11"
+
+
+def test_verified_commit_contains_exactly_the_reviewed_tree(
+    source_repository: Path, tmp_path: Path
+) -> None:
+    """The promoted scratch index must not leave the reviewed tree behind."""
+    manager = GitWorktreeManager(tmp_path / "managed")
+    task = uuid4()
+    baseline = git("rev-parse", "HEAD", cwd=source_repository)
+    worktree = manager.create_task_worktree(source_repository, task, baseline)
+    (worktree / "app.py").write_text("VALUE = 12\n")
+    (worktree / "extra.py").write_text("Y = 1\n")
+    reviewed = manager.worktree_tree_hash(worktree)
+
+    commit = manager.commit_task_worktree(
+        worktree, message="reviewed release", expected_tree_hash=reviewed
+    )
+
+    assert git("rev-parse", f"{commit}^{{tree}}", cwd=worktree) == reviewed

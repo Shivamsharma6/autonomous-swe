@@ -13,7 +13,11 @@ from sqlalchemy import select
 from apps.dispatcher.main import DispatchMessage
 from apps.worker.runner import WorkerOutcome
 from domain.enums import GraphExecutionState, RiskLevel, TaskStatus, TaskType
-from execution.scheduler.service import SchedulerService, TaskExecutionLease
+from execution.scheduler.service import (
+    SchedulerService,
+    TaskBudgetExhausted,
+    TaskExecutionLease,
+)
 from observability.logging import get_structured_logger
 from observability.tracing import CorrelationContext, bind_correlation, reset_correlation
 from persistence.database import Database
@@ -88,14 +92,29 @@ class DispatchedTaskExecutor:
         self._heartbeat_seconds = heartbeat_seconds
 
     async def execute(self, message: DispatchMessage) -> WorkerOutcome:
-        lease = await self._scheduler.start_claim(
-            task_id=message.task_id,
-            project_id=message.project_id,
-            owner=message.owner,
-            token=message.lease_token,
-            attempt_id=message.attempt_id,
-            agent_spec_hash=self._agent_spec_hash,
-        )
+        try:
+            lease = await self._scheduler.start_claim(
+                task_id=message.task_id,
+                project_id=message.project_id,
+                owner=message.owner,
+                token=message.lease_token,
+                attempt_id=message.attempt_id,
+                agent_spec_hash=self._agent_spec_hash,
+            )
+        except TaskBudgetExhausted as error:
+            # The scheduler already released the lease and reservations and
+            # moved the task to FAILED inside start_claim, because this is the
+            # admission gate. Nothing is left to clean up, and the task must not
+            # be re-dispatched, so this is a terminal outcome rather than an
+            # error: raising would only produce an unhandled task_failure.
+            logger.warning(
+                "task_budget_exhausted",
+                task_id=str(message.task_id),
+                run_id=str(message.attempt_id),
+                error_type=type(error).__name__,
+                error_message=str(error),
+            )
+            return WorkerOutcome.FAILED
         if lease.already_terminal:
             return WorkerOutcome.COMPLETED
         context = TaskExecutionContext.from_lease(lease)

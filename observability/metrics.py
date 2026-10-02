@@ -183,6 +183,15 @@ class PlatformMetrics:
         self.sandbox_memory.labels(exit_reason=exit_reason).observe(peak_memory_bytes)
         self.sandbox_duration.labels(exit_reason=exit_reason).observe(duration_seconds)
 
+    def set_unresolved_dead_letters(self, value: int) -> None:
+        if value < 0:
+            raise ValueError("dead letter count cannot be negative")
+        self.dead_letters.set(value)
+
+    def record_artifact_integrity_failure(self) -> None:
+        """Count an artifact quarantined because its stored bytes failed the hash."""
+        self.artifact_integrity_failures.inc()
+
 
 platform_metrics = PlatformMetrics()
 
@@ -200,7 +209,13 @@ def track_actual_resource(resource: str) -> Iterator[None]:
 
 
 def start_metrics_endpoint(port: int = 9_100) -> None:
-    """Expose process-local metrics on an internal Compose network."""
+    """Expose process-local metrics for in-network scraping.
+
+    The listener binds every interface because Prometheus scrapes it from a
+    sibling container. The boundary is therefore the Compose network, not the
+    socket: the port must never be published to the host, and the payload is
+    process metrics only (no tenant data, no tokens).
+    """
     start_http_server(port)
 
 

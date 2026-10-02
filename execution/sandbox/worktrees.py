@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from uuid import UUID
 
@@ -104,15 +106,54 @@ class GitWorktreeManager:
         self._git(source, "worktree", "prune")
         return True
 
-    def commit_task_worktree(self, worktree: Path, *, message: str) -> str:
-        """Perform the exact local commit only after the caller proves approval."""
+    def worktree_tree_hash(self, worktree: Path) -> str:
+        """Hash the exact tree ``commit_task_worktree`` would produce.
+
+        Staging happens in a scratch index so this never mutates the real one.
+        The result covers tracked modifications, deletions, and untracked files,
+        which is what ``add --all`` would otherwise sweep into a commit.
+        """
+        candidate = self._managed_child(worktree)
+        if not candidate.is_dir() or candidate.is_symlink():
+            raise WorktreePolicyError("task worktree is unavailable")
+        with tempfile.TemporaryDirectory(prefix="autoswe-index-") as scratch:
+            index = str(Path(scratch) / "index")
+            self._git(candidate, "add", "--all", env={"GIT_INDEX_FILE": index})
+            return self._git(candidate, "write-tree", env={"GIT_INDEX_FILE": index})
+
+    def commit_task_worktree(
+        self, worktree: Path, *, message: str, expected_tree_hash: str | None = None
+    ) -> str:
+        """Perform the exact local commit only after the caller proves approval.
+
+        When ``expected_tree_hash`` is supplied the tree is staged into a
+        scratch index and compared against the reviewed value before anything is
+        committed, so content that appeared after approval cannot be swept into
+        the release by a blanket ``add --all``.
+        """
         candidate = self._managed_child(worktree)
         if not candidate.is_dir() or candidate.is_symlink():
             raise WorktreePolicyError("approved task worktree is unavailable")
         normalized = " ".join(message.split())
         if not normalized or len(normalized) > 300:
             raise WorktreePolicyError("commit message must be a bounded single line")
-        self._git(candidate, "add", "--all")
+        if expected_tree_hash is None:
+            self._git(candidate, "add", "--all")
+        else:
+            git_dir = Path(self._git(candidate, "rev-parse", "--absolute-git-dir"))
+            with tempfile.TemporaryDirectory(prefix="autoswe-index-") as scratch:
+                index = str(Path(scratch) / "index")
+                scratch_env = {"GIT_INDEX_FILE": index}
+                self._git(candidate, "add", "--all", env=scratch_env)
+                actual = self._git(candidate, "write-tree", env=scratch_env)
+                if actual != expected_tree_hash:
+                    raise WorktreePolicyError(
+                        "worktree content changed after approval was granted; refusing to commit"
+                    )
+                # Promote the verified scratch index so the commit contains
+                # precisely the tree that was reviewed, and nothing that
+                # appeared in the worktree after the review.
+                shutil.copyfile(index, git_dir / "index")
         staged = self._git_optional(candidate, "diff", "--cached", "--quiet")
         if not staged:
             self._git(
@@ -191,7 +232,7 @@ class GitWorktreeManager:
         return path
 
     @staticmethod
-    def _git(repository: Path, *arguments: str) -> str:
+    def _git(repository: Path, *arguments: str, env: dict[str, str] | None = None) -> str:
         if _GIT_EXECUTABLE is None:
             raise WorktreePolicyError("Git executable is unavailable")
         try:
@@ -202,6 +243,7 @@ class GitWorktreeManager:
                 text=True,
                 timeout=120,
                 shell=False,
+                env=None if env is None else {**os.environ, **env},
             )
         except (OSError, subprocess.SubprocessError) as exc:
             detail = getattr(exc, "stderr", None) or str(exc)

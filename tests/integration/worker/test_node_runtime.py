@@ -45,16 +45,7 @@ def executor_for(tmp_path, ids, *, database=None, gateway=None):
     )
 
 
-@pytest.mark.parametrize("input_tokens, should_finish", [(3200, True), (6000, False)])
-async def test_multi_file_node_can_finish_within_shared_budget_but_not_exceed_it(
-    tmp_path, monkeypatch, input_tokens, should_finish,
-):
-    ids = {name: uuid4() for name in (
-        "run_id", "task_id", "attempt_id", "project_id", "repository_id",
-    )}
-    (tmp_path / "pyproject.toml").write_text('[project]\nname="fixture"\nversion="0.1.0"\n')
-    (tmp_path / "requirements.txt").write_text("")
-
+def _multi_file_gateway(input_tokens: int) -> tuple[object, object]:
     class MultiFileGateway:
         calls = 0
 
@@ -82,6 +73,27 @@ async def test_multi_file_node_can_finish_within_shared_budget_but_not_exceed_it
                                                          output_tokens=64),
             )
 
+    return MultiFileGateway()
+
+
+@pytest.mark.parametrize("input_tokens, budget, should_finish", [
+    # The budget is injected rather than read from the production role default.
+    # The invariant under test is that a shared token budget binds across the
+    # turns of one node invocation, not what that number happens to be today:
+    # this test was previously pinned to a value the production specs no longer
+    # use, so it silently stopped testing anything.
+    (3_200, 400_000, True),
+    (6_000, 30_000, False),
+])
+async def test_multi_file_node_can_finish_within_shared_budget_but_not_exceed_it(
+    tmp_path, monkeypatch, input_tokens, budget, should_finish,
+):
+    ids = {name: uuid4() for name in (
+        "run_id", "task_id", "attempt_id", "project_id", "repository_id",
+    )}
+    (tmp_path / "pyproject.toml").write_text('[project]\nname="fixture"\nversion="0.1.0"\n')
+    (tmp_path / "requirements.txt").write_text("")
+
     class SuccessfulTools:
         async def execute(self, request, *, context):
             return ToolCallResult(
@@ -90,10 +102,14 @@ async def test_multi_file_node_can_finish_within_shared_budget_but_not_exceed_it
                 output={"path": request.arguments["path"], "content": "source"}, attempts=1,
             )
 
-    gateway = MultiFileGateway()
+    gateway = _multi_file_gateway(input_tokens)
     executor = executor_for(tmp_path, ids, gateway=gateway)
     executor._tool_gateway = SuccessfulTools()
     executor._usage = InMemoryUsageRecorder()
+    executor._agent_specs = {
+        role: spec.model_copy(update={"token_budget": budget})
+        for role, spec in executor._agent_specs.items()
+    }
 
     async def no_prior(request):
         return ()

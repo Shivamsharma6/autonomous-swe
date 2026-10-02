@@ -20,10 +20,19 @@ class RedisStreamRecord:
 
 
 class RedisStreamsTransport:
-    """Disposable Redis Streams transport over PostgreSQL-canonical events."""
+    """Disposable Redis Streams transport over PostgreSQL-canonical events.
 
-    def __init__(self, client: Redis) -> None:
+    The stream is a transport, not a store: PostgreSQL and the outbox are
+    canonical, so entries are bounded at write time. Without a bound a stream
+    grows until the Redis container is OOM-killed, and because the outbox rows
+    are already marked published, nothing would republish them.
+    """
+
+    def __init__(self, client: Redis, *, maxlen: int = 100_000) -> None:
+        if maxlen < 1:
+            raise ValueError("stream maxlen must be positive")
         self._client = client
+        self._maxlen = maxlen
 
     async def publish(self, topic: str, event_id: UUID, payload: dict[str, Any]) -> str:
         value = await self._client.xadd(
@@ -33,6 +42,11 @@ class RedisStreamsTransport:
                 "topic": topic,
                 "payload": json.dumps(payload, sort_keys=True, separators=(",", ":")),
             },
+            # Approximate trimming is O(1) amortised. Exact MINID trimming walks
+            # every entry and blocks the single-threaded server, which stalls the
+            # dispatcher behind its own retention job.
+            maxlen=self._maxlen,
+            approximate=True,
         )
         return _text(value)
 
@@ -87,6 +101,11 @@ class RedisStreamsTransport:
     async def trim_before(self, stream: str, cutoff: datetime) -> int:
         aware_cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=UTC)
         minimum_id = f"{int(aware_cutoff.timestamp() * 1_000)}-0"
+        # Exact MINID trimming, because this is the expiry authority and must
+        # actually remove every entry past the cutoff. It is affordable precisely
+        # because writes are bounded by maxlen above; approximate trimming would
+        # drop whole macro-nodes only and could leave an expired entry in place
+        # indefinitely on a small stream.
         return int(await self._client.xtrim(stream, minid=minimum_id, approximate=False))
 
 

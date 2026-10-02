@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,6 +28,7 @@ from persistence.repositories import DomainRepository
 from persistence.tables import (
     GraphExecutionRow,
     LeaseRow,
+    ModelCallRow,
     ProjectTaskResourceEstimateRow,
     RepositoryRow,
     ReservationRow,
@@ -46,6 +48,12 @@ class ConcurrencyPolicy(SchedulerPolicyModel):
     max_parallel_tasks_per_project: int = Field(ge=1)
     max_model_concurrency: int = Field(ge=1)
     max_sandbox_concurrency: int = Field(ge=1)
+    # Ceilings on how much a single task may cost and how many lease attempts it
+    # may consume. Without these, every re-dispatch is a full-cost replay: a new
+    # attempt id means a new checkpoint chain and new node idempotency keys, so a
+    # worker that keeps dying mid-task is paid for in full each time, forever.
+    max_task_attempts: int = Field(default=3, ge=1, le=100)
+    max_run_cost_usd: float = Field(default=25.0, gt=0)
 
 
 class AdmissionSnapshot(SchedulerPolicyModel):
@@ -85,6 +93,27 @@ class RetryDecision(SchedulerPolicyModel):
     retry: bool
     category: RetryCategory
     reason: str
+
+
+# "Every dependency id resolves to a COMPLETED task", evaluated server side.
+# The LEFT JOIN plus null test keeps a dangling dependency id unsatisfied, which
+# is what dependencies_satisfied() does in Python.
+_DEPENDENCIES_SATISFIED_SQL = """
+(
+    SELECT count(*)
+    FROM jsonb_array_elements_text(tasks.dependencies) AS dep(value)
+    LEFT JOIN tasks AS resolved ON resolved.id::text = dep.value
+    WHERE resolved.id IS NULL OR resolved.state <> 'COMPLETED'
+) = 0
+"""
+
+_TERMINAL_TASK_STATES = frozenset(
+    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+)
+
+
+class TaskBudgetExhausted(RuntimeError):
+    """A task or run has consumed the ceiling it was admitted under."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,10 +201,20 @@ async def _noop_notify(_: UUID) -> None:
 class SchedulerService:
     # int4 namespace for per-project admission locks: pg_advisory_xact_lock(int, int).
     _ADMISSION_LOCK_NAMESPACE = 0x41555357 & 0x7FFFFFFF
+    # A second, distinct namespace for the global capacity ceiling. Resource
+    # ceilings must serialise across every project, so this namespace cannot be
+    # shared with the per-project shard locks.
+    _RESOURCE_LOCK_NAMESPACE = 0x52455356 & 0x7FFFFFFF
 
     @staticmethod
     def _project_lock_key(project_id: UUID) -> int:
         return (project_id.int >> 32) & 0x7FFFFFFF
+
+    @staticmethod
+    def _resource_lock_key(resource: str) -> int:
+        """A stable int32 key per resource, so the ceiling lock is per-resource."""
+        digest = hashlib.sha256(resource.encode("utf-8")).digest()
+        return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
     def __init__(
         self,
@@ -304,6 +343,15 @@ class SchedulerService:
                         token=token,
                         expires_at=expires_at,
                     )
+                    # Latency from becoming READY to being dispatched. The
+                    # instrument existed with no producer, so the dispatch panel
+                    # on the reliability dashboard could never show a value.
+                    ready_at = task.state_entered_at
+                    if ready_at is not None:
+                        platform_metrics.observe_dispatch(
+                            max(0.0, (current_time - ready_at).total_seconds()),
+                            outcome="admitted",
+                        )
                     claims.append(
                         TaskClaim(
                             task_id=task.id,
@@ -326,8 +374,23 @@ class SchedulerService:
         cap: int,
     ) -> bool:
         """Insert a reservation only when the global ceiling still has room.
-        The aggregate predicate is evaluated atomically with the insert, so the
-        global cap holds even under sharded per-project admission locks."""
+
+        The ceiling is a read-then-write over an aggregate, so it needs a real
+        serialisation point. A single statement cannot supply one here: under
+        READ COMMITTED an ``INSERT ... SELECT`` sees one snapshot for both the
+        aggregate and the insert, and the existing advisory locks are keyed by
+        project, so two projects evaluating the same ceiling concurrently both
+        observe room and both insert. This docstring previously claimed the
+        opposite. A transaction-scoped advisory lock per resource makes the
+        check and the insert atomic with respect to every other admission.
+        """
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :resource_key)"),
+            {
+                "namespace": self._RESOURCE_LOCK_NAMESPACE,
+                "resource_key": self._resource_lock_key(resource),
+            },
+        )
         guard = (
             select(func.coalesce(func.sum(ReservationRow.units), 0))
             .where(
@@ -353,36 +416,40 @@ class SchedulerService:
         inserted = await session.scalar(statement)
         return inserted is not None
 
-    async def promote_dependency_ready(self, *, limit: int = 500) -> int:
-        """Promote PENDING tasks only after every durable dependency is COMPLETED."""
+    async def promote_dependency_ready(
+        self, *, limit: int = 500, max_rounds: int = 32
+    ) -> int:
+        """Promote PENDING tasks whose every durable dependency is COMPLETED.
+
+        Eligibility is decided by the database rather than by paging through the
+        oldest PENDING rows. An ordered window is not a bound, it is a hole: any
+        eligible task behind a block of never-eligible tasks was invisible to
+        every cycle, ``claim_ready`` only reads READY, and the run wedged in
+        EXECUTING forever. Repeating the windowed scan does not help either,
+        because the ineligible tasks refill the window, so the loop reports no
+        progress while eligible work sits just beyond it.
+
+        The predicate mirrors :func:`dependencies_satisfied` exactly, including
+        that a dependency id resolving to no task blocks promotion.
+        """
         promoted = 0
-        async with self.database.transaction() as session:
-            candidates = tuple(
-                (
-                    await session.scalars(
-                        select(TaskRow)
-                        .where(TaskRow.state == TaskStatus.PENDING)
-                        .order_by(TaskRow.created_at, TaskRow.id)
-                        .limit(limit)
-                        .with_for_update(skip_locked=True)
-                    )
-                ).all()
-            )
-            for task in candidates:
-                dependency_ids = tuple(UUID(value) for value in task.dependencies)
-                if not dependency_ids:
-                    ready = True
-                else:
-                    states = {
-                        row.id: row.state
-                        for row in (
-                            await session.scalars(
-                                select(TaskRow).where(TaskRow.id.in_(dependency_ids))
-                            )
-                        ).all()
-                    }
-                    ready = dependencies_satisfied(dependency_ids, states)
-                if ready:
+        for _ in range(max_rounds):
+            async with self.database.transaction() as session:
+                candidates = tuple(
+                    (
+                        await session.scalars(
+                            select(TaskRow)
+                            .where(TaskRow.state == TaskStatus.PENDING)
+                            .where(text(_DEPENDENCIES_SATISFIED_SQL))
+                            .order_by(TaskRow.created_at, TaskRow.id)
+                            .limit(limit)
+                            .with_for_update(skip_locked=True)
+                        )
+                    ).all()
+                )
+                if not candidates:
+                    break
+                for task in candidates:
                     await self.repository.transition_task(
                         session,
                         project_id=task.project_id,
@@ -390,7 +457,9 @@ class SchedulerService:
                         expected_version=task.version,
                         target=TaskStatus.READY,
                     )
-                    promoted += 1
+                promoted += len(candidates)
+                if len(candidates) < limit:
+                    break
         return promoted
 
     async def cancel_blocked_dependents(self, *, limit: int = 500) -> int:
@@ -401,14 +470,6 @@ class SchedulerService:
         terminal_states = [TaskStatus.FAILED, TaskStatus.CANCELLED]
         for _ in range(16):
             async with self.database.transaction() as session:
-                terminal_ids = {
-                    str(value)
-                    for value in (
-                        await session.scalars(
-                            select(TaskRow.id).where(TaskRow.state.in_(terminal_states))
-                        )
-                    )
-                }
                 candidates = tuple(
                     (
                         await session.scalars(
@@ -419,6 +480,32 @@ class SchedulerService:
                             .with_for_update(skip_locked=True)
                         )
                     ).all()
+                )
+                # Only the dependencies this batch actually names are resolved,
+                # instead of loading every task id that ever failed or was
+                # cancelled into Python. That set grew without bound for the life
+                # of the installation and was rebuilt on every dispatch cycle,
+                # several times a second, so dispatch latency degraded with uptime
+                # rather than with load.
+                wanted = {
+                    UUID(value)
+                    for task in candidates
+                    for value in task.dependencies
+                }
+                terminal_ids = (
+                    {
+                        str(value)
+                        for value in (
+                            await session.scalars(
+                                select(TaskRow.id).where(
+                                    TaskRow.id.in_(wanted),
+                                    TaskRow.state.in_(terminal_states),
+                                )
+                            )
+                        ).all()
+                    }
+                    if wanted
+                    else set()
                 )
                 blocked = tuple(
                     task
@@ -481,8 +568,47 @@ class SchedulerService:
         agent_spec_hash: str,
         now: datetime | None = None,
     ) -> TaskExecutionLease:
-        """Validate an exact dispatch lease and atomically enter RUNNING."""
+        """Validate an exact dispatch lease and atomically enter RUNNING.
+
+        Ceilings are checked here because this is the last point before a worker
+        spends anything; enforcing them afterwards would only ever report an
+        overrun that has already been paid for.
+        """
         current_time = now or datetime.now(UTC)
+        try:
+            return await self._admit_claim(
+                task_id=task_id,
+                project_id=project_id,
+                owner=owner,
+                token=token,
+                attempt_id=attempt_id,
+                agent_spec_hash=agent_spec_hash,
+                current_time=current_time,
+            )
+        except TaskBudgetExhausted as error:
+            # The admission probe above only read, so its rollback discarded
+            # nothing. Make the refusal durable in its own transaction before
+            # reporting it, otherwise the task stays re-queueable and payable
+            # again on the very next dispatch.
+            await self._refuse_exhausted_task(
+                project_id=project_id,
+                task_id=task_id,
+                current_time=current_time,
+                reason=str(error),
+            )
+            raise
+
+    async def _admit_claim(
+        self,
+        *,
+        task_id: UUID,
+        project_id: UUID,
+        owner: str,
+        token: UUID,
+        attempt_id: UUID,
+        agent_spec_hash: str,
+        current_time: datetime,
+    ) -> TaskExecutionLease:
         async with self.database.transaction() as session:
             task = await session.scalar(
                 select(TaskRow)
@@ -502,6 +628,12 @@ class SchedulerService:
                 return self._execution_lease(
                     task, run, repository, attempt_id, already_terminal=True
                 )
+            # Ceilings bind here, at admission, because this is the last point
+            # before a worker starts spending. Enforcing them after the fact
+            # would only ever report an overrun that has already been paid for.
+            exhausted = await self._exhaustion_reason(session, task=task, run=run)
+            if exhausted is not None:
+                raise TaskBudgetExhausted(exhausted)
             lease = await session.scalar(
                 select(LeaseRow).where(LeaseRow.task_id == task_id).with_for_update()
             )
@@ -533,6 +665,59 @@ class SchedulerService:
             elif attempt.task_id != task_id or attempt.agent_spec_hash != agent_spec_hash:
                 raise PermissionError("worker attempt identity does not match dispatch")
             return self._execution_lease(task, run, repository, attempt_id)
+
+    async def _refuse_exhausted_task(
+        self,
+        *,
+        project_id: UUID,
+        task_id: UUID,
+        current_time: datetime,
+        reason: str,
+    ) -> None:
+        """Make an admission refusal durable: FAILED, no lease, no reservations."""
+        async with self.database.transaction() as session:
+            task = await session.scalar(
+                select(TaskRow)
+                .where(TaskRow.id == task_id, TaskRow.project_id == project_id)
+                .with_for_update()
+            )
+            if task is None or task.state in _TERMINAL_TASK_STATES:
+                return
+            await self._release_reservations(session, task_id, current_time)
+            await session.execute(delete(LeaseRow).where(LeaseRow.task_id == task_id))
+            await self.repository.transition_task(
+                session,
+                project_id=project_id,
+                task_id=task_id,
+                expected_version=task.version,
+                target=TaskStatus.FAILED,
+            )
+
+    async def _exhaustion_reason(
+        self, session: AsyncSession, *, task: TaskRow, run: RunRow
+    ) -> str | None:
+        """Return why this task may not start, or ``None`` if it may."""
+        attempts = await session.scalar(
+            select(func.count())
+            .select_from(TaskAttemptRow)
+            .where(TaskAttemptRow.task_id == task.id)
+        )
+        cap = self.policy.max_task_attempts
+        if attempts is not None and attempts >= cap:
+            return (
+                f"task exhausted its attempt budget: {attempts} of {cap} attempts consumed"
+            )
+        spent = await session.scalar(
+            select(func.coalesce(func.sum(ModelCallRow.cost_usd), 0.0)).where(
+                ModelCallRow.run_id == run.id
+            )
+        )
+        cost_cap = self.policy.max_run_cost_usd
+        if spent is not None and spent >= cost_cap:
+            return (
+                f"run exhausted its cost budget: ${spent:.4f} of ${cost_cap:.2f} consumed"
+            )
+        return None
 
     async def finish_claim(
         self,
@@ -633,29 +818,55 @@ class SchedulerService:
             already_terminal=already_terminal,
         )
 
-    async def reclaim_expired(self, *, now: datetime | None = None) -> int:
+    async def reclaim_expired(
+        self, *, now: datetime | None = None, limit: int = 200
+    ) -> int:
+        """Return expired leases to READY and release their reservations.
+
+        Lock order here is task-then-lease, the same order every other mutation
+        path uses. Locking the lease first, as this previously did, formed a
+        cycle with ``finish_claim``, ``start_claim``, ``cancel_task`` and
+        reconciliation: reclaim held a lease and waited for a task while a
+        worker held that task and waited for the lease, and PostgreSQL aborted one
+        of them with ``40P01``. Because the reclaim step runs unguarded in the
+        dispatch cycle, that deadlock took out task dispatching for every project
+        on that tick, not just the contended task.
+
+        Candidates are therefore read without a row lock, and each is re-verified
+        under its own lock pair. The scan is bounded: an unbounded batch would
+        hold that many row locks for the whole transaction.
+        """
         current_time = now or datetime.now(UTC)
         reclaimed = 0
         async with self.database.transaction() as session:
-            leases = tuple(
+            candidates = tuple(
                 (
-                    await session.scalars(
-                        select(LeaseRow)
+                    await session.execute(
+                        select(LeaseRow.task_id)
                         .where(LeaseRow.expires_at <= current_time)
                         .order_by(LeaseRow.expires_at, LeaseRow.task_id)
-                        .with_for_update(skip_locked=True)
+                        .limit(limit)
                     )
                 ).all()
             )
-            for lease in leases:
+            for (task_id,) in candidates:
                 task = await session.scalar(
-                    select(TaskRow).where(TaskRow.id == lease.task_id).with_for_update()
+                    select(TaskRow).where(TaskRow.id == task_id).with_for_update()
                 )
-                if task is not None and task.state is TaskStatus.RUNNING:
+                if task is None:
+                    continue
+                lease = await session.scalar(
+                    select(LeaseRow).where(LeaseRow.task_id == task_id).with_for_update()
+                )
+                # Re-verify under the lock: another dispatcher may have renewed or
+                # replaced this lease between the scan and here.
+                if lease is None or lease.expires_at > current_time:
+                    continue
+                if task.state is TaskStatus.RUNNING:
                     # RUNNING work may have a completed or divergent LangGraph checkpoint.
                     # Reconciliation is the only authority allowed to resolve that pair.
                     continue
-                if task is not None and task.state is TaskStatus.LEASED:
+                if task.state is TaskStatus.LEASED:
                     await self.repository.transition_task(
                         session,
                         project_id=task.project_id,
@@ -663,7 +874,7 @@ class SchedulerService:
                         expected_version=task.version,
                         target=TaskStatus.READY,
                     )
-                await self._release_reservations(session, lease.task_id, current_time)
+                await self._release_reservations(session, task_id, current_time)
                 await session.delete(lease)
                 reclaimed += 1
         return reclaimed

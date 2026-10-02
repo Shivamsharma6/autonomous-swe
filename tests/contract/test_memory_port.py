@@ -181,7 +181,15 @@ async def test_http_uams_adapter_satisfies_contract_and_idempotent_remember() ->
 
 
 @pytest.mark.asyncio
-async def test_search_rejects_expired_and_stale_commit_scoped_memory() -> None:
+async def test_search_rejects_expired_memory_but_ranks_commit_proximity() -> None:
+    """Expiry is a filter; commit proximity is a preference.
+
+    Commit equality used to be a hard filter. It made the corpus unreachable:
+    a promoted memory records the commit the run *produced* while a query carries
+    the commit the run *started from*, so every recall came back empty and the
+    paid `recall` node summarised nothing. Proximity now orders the results
+    instead, and `valid_until` is what enforces staleness.
+    """
     now = datetime.now(UTC)
     project_id, repository_id = uuid4(), uuid4()
     current = RetrievedMemory(
@@ -200,8 +208,8 @@ async def test_search_rejects_expired_and_stale_commit_scoped_memory() -> None:
     expired = current.model_copy(
         update={"memory_id": uuid4(), "valid_until": now - timedelta(seconds=1)}
     )
-    stale = current.model_copy(update={"memory_id": uuid4(), "baseline_commit": "d" * 40})
-    port = FakeMemoryPort(seed=(current, expired, stale))
+    adjacent = current.model_copy(update={"memory_id": uuid4(), "baseline_commit": "d" * 40})
+    port = FakeMemoryPort(seed=(current, expired, adjacent))
 
     results = await port.search(
         MemoryQuery(
@@ -213,7 +221,10 @@ async def test_search_rejects_expired_and_stale_commit_scoped_memory() -> None:
         )
     )
 
-    assert results == (current,)
+    assert expired not in results, "an expired memory must never enter context"
+    # The exact-commit match is present and ranked first.
+    assert results[0] is current
+    assert adjacent in results, "a memory from an adjacent commit is still usable"
 
 
 async def test_search_rejects_memories_from_other_repositories() -> None:

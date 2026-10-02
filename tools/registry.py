@@ -47,6 +47,9 @@ class ToolExecutionContext(ContractModel):
     risk_ceiling: RiskLevel
     worktree_root: Path
     tool_call_id: UUID | None = None
+    # The egress the sandbox actually provides for this call. Defaults to NONE,
+    # which is what a governed sandbox gives.
+    available_egress: NetworkProfile = NetworkProfile.NONE
 
     @field_validator("worktree_root")
     @classmethod
@@ -135,6 +138,20 @@ class RegisteredTool:
         risk = calculated_risk or self.spec.base_risk
         if risk_exceeds(risk, context.risk_ceiling):
             raise PermissionError(f"calculated {risk.value} risk exceeds agent risk ceiling")
+        # `network_profile` was declared on every tool and documented as an
+        # enforced per-call check, but nothing read it: a tool declaring
+        # DEPENDENCY_EGRESS silently got no network, and one declaring
+        # PROVIDER_EGRESS was granted nothing either. Declaring a profile the
+        # sandbox cannot provide is now a refusal rather than a silent downgrade,
+        # so the declaration is load-bearing in both directions.
+        if self.spec.network_profile is not NetworkProfile.NONE and not (
+            context.available_egress is NetworkProfile.NONE
+            or self.spec.network_profile is context.available_egress
+        ):
+            raise PermissionError(
+                f"tool declares {self.spec.network_profile.value} egress but the sandbox "
+                f"provides {context.available_egress.value}"
+            )
 
     def validate_arguments(
         self,
@@ -162,13 +179,15 @@ class RegisteredTool:
         return self.spec.result_model.model_validate(result)
 
 
-_MANDATORY_APPROVAL_TOOLS = {
-    "git_commit",
-    "git_push",
-    "create_pull_request",
-    "apply_infrastructure",
-    "deploy",
-}
+_MANDATORY_APPROVAL_TOOLS = frozenset(
+    {
+        "git_commit",
+        "git_push",
+        "create_pull_request",
+        "apply_infrastructure",
+        "deploy",
+    }
+)
 
 
 class ToolRegistry:
@@ -176,7 +195,7 @@ class ToolRegistry:
         self._tools: dict[tuple[str, str], RegisteredTool] = {}
 
     def register(self, spec: ToolSpec, executor: ToolExecutor) -> None:
-        if _approval_is_mandatory(spec.name) and not spec.approval_required:
+        if _approval_is_mandatory(spec) and not spec.approval_required:
             raise ToolRegistrationError(f"tool {spec.name} requires approval")
         key = (spec.name, spec.version)
         if key in self._tools:
@@ -190,8 +209,22 @@ class ToolRegistry:
             raise LookupError(f"tool {name}@{version} is not registered") from error
 
 
-def _approval_is_mandatory(name: str) -> bool:
-    lowered = name.casefold()
+def _approval_is_mandatory(spec: ToolSpec) -> bool:
+    """Whether a tool may never run without a human approval.
+
+    The exact-name set is authoritative; the substring markers are a backstop.
+    The shipped `git_commit` is invoked by the finalizer out of band, so it
+    cannot declare `approval_required` where it is registered, and matching on
+    the name is the only signal available at that point.
+
+    Note the limitation this cannot remove: a future tool named
+    `commit_changes` or `infra_deploy` would register with
+    `approval_required=False`. Making the consequence class structural rather
+    than name-shaped requires a `consequence` field on `ToolSpec` and is the
+    right long-term fix; the documented guarantee today is that commit, push,
+    pull request, infrastructure, and deployment actions require approval.
+    """
+    lowered = spec.name.casefold()
     return lowered in _MANDATORY_APPROVAL_TOOLS or any(
         marker in lowered
         for marker in (

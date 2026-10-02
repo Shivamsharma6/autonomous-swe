@@ -140,11 +140,14 @@ root=Path('/workspace').resolve(); rel=Path(sys.argv[1]); limit=int(sys.argv[2])
 if rel.is_absolute() or '..' in rel.parts: raise SystemExit('unsafe path')
 path=(root/rel).resolve(strict=True); path.relative_to(root)
 if path.is_symlink() or not path.is_file(): raise SystemExit('not a regular file')
-full_data=path.read_bytes(); full_sha=hashlib.sha256(full_data).hexdigest(); full_size=len(full_data)
+full_data=path.read_bytes()
+full_sha=hashlib.sha256(full_data).hexdigest()
+full_size=len(full_data)
 truncated=full_size>limit
 data=full_data[:limit] if truncated else full_data
 text=data.decode('utf-8', errors='replace')
-print(json.dumps({'path':rel.as_posix(),'content':text,'sha256':full_sha,'size_bytes':full_size,'truncated':truncated}))
+print(json.dumps({'path':rel.as_posix(),'content':text,'sha256':full_sha,
+                  'size_bytes':full_size,'truncated':truncated}))
 """
 
 _SEARCH_SCRIPT = """import json,sys
@@ -186,7 +189,8 @@ try:
  os.replace(name,path)
 finally:
  if os.path.exists(name): os.unlink(name)
-print(json.dumps({'path':rel.as_posix(),'sha256':hashlib.sha256(data).hexdigest(),'size_bytes':len(data)}))
+print(json.dumps({'path':rel.as_posix(),'sha256':hashlib.sha256(data).hexdigest(),
+                  'size_bytes':len(data)}))
 """
 
 

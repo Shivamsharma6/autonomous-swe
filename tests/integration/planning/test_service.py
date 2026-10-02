@@ -890,9 +890,14 @@ async def test_planning_timeout_then_success_keeps_usage_and_replay_idempotency(
     assert len(rows) == 2
     assert [row.turn for row in rows] == [1, 2]
     assert [row.failure_class for row in rows] == ["TIMEOUT", None]
-    assert sum(row.input_tokens + row.output_tokens for row in rows) == 60
+    # The timed-out planning attempt is charged for the prompt it sent rather
+    # than recorded as free; the successful attempt reports 40 + 20.
+    timed_out = next(row for row in rows if row.failure_class == "TIMEOUT")
+    assert timed_out.input_tokens > 0 and timed_out.output_tokens == 0
+    charged = sum(row.input_tokens + row.output_tokens for row in rows)
+    assert charged == 60 + timed_out.input_tokens
     assert sum(row.cached_input_tokens for row in rows) == 10
-    assert sum(row.cost_usd for row in rows) == pytest.approx(0.12)
+    assert sum(row.cost_usd for row in rows) == pytest.approx(0.12 + timed_out.cost_usd)
 
     for row in rows:
         recorder = RunStageUsageRecorder(database, stage_attempt_id=row.run_stage_attempt_id)
@@ -920,8 +925,10 @@ async def test_planning_timeout_then_success_keeps_usage_and_replay_idempotency(
             await session.scalars(select(ModelCallRow).where(ModelCallRow.run_id == plan.run_id))
         ).all()
     assert len(replayed) == 2
-    assert sum(row.input_tokens + row.output_tokens for row in replayed) == 60
-    assert sum(row.cost_usd for row in replayed) == pytest.approx(0.12)
+    assert sum(row.input_tokens + row.output_tokens for row in replayed) == charged
+    assert sum(row.cost_usd for row in replayed) == pytest.approx(
+        0.12 + timed_out.cost_usd
+    )
 
 
 async def test_planner_remaps_colliding_task_ids_across_runs(database, planning_case):

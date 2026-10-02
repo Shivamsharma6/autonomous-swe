@@ -1,6 +1,5 @@
 x-platform-environment: &platform-environment
   AUTOSWE_ENV: production
-  AUTOSWE_ADMIN_TOKEN: ${AUTOSWE_ADMIN_TOKEN:-}
   AUTOSWE_DATABASE_URL: postgresql+asyncpg://autoswe:${AUTOSWE_POSTGRES_PASSWORD:-}@postgres:5432/autoswe
   AUTOSWE_REDIS_URL: redis://redis:6379/0
   AUTOSWE_UAMS_URL: ${AUTOSWE_UAMS_URL:-http://host.docker.internal:8000}
@@ -32,6 +31,8 @@ x-platform-environment: &platform-environment
   AUTOSWE_MAX_DYNAMIC_TASKS: ${AUTOSWE_MAX_DYNAMIC_TASKS:-24}
   AUTOSWE_MAX_PLAN_DEPTH: ${AUTOSWE_MAX_PLAN_DEPTH:-12}
   AUTOSWE_MAX_TOTAL_BUDGET_USD: ${AUTOSWE_MAX_TOTAL_BUDGET_USD:-25}
+  # Each lease attempt is a full-cost replay, so this bounds re-dispatch.
+  AUTOSWE_MAX_TASK_ATTEMPTS: ${AUTOSWE_MAX_TASK_ATTEMPTS:-3}
   AUTOSWE_MAX_TOTAL_EXECUTION_SECONDS: ${AUTOSWE_MAX_TOTAL_EXECUTION_SECONDS:-7200}
   AUTOSWE_REQUEST_MAX_BYTES: ${AUTOSWE_REQUEST_MAX_BYTES:-1048576}
   AUTOSWE_API_RATE_LIMIT_PER_MINUTE: ${AUTOSWE_API_RATE_LIMIT_PER_MINUTE:-120}
@@ -86,7 +87,21 @@ services:
 
   redis:
     image: redis:7.4-bookworm@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73
-    command: [redis-server, --appendonly, "yes", --save, "60", "1"]
+    # maxmemory is required, not optional: with the default noeviction policy an
+    # unbounded keyspace is OOM-killed rather than trimmed, and restart replays
+    # the whole AOF. volatile-lru evicts the expiring keys Redis Streams use for
+    # trimming bookkeeping first.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --save
+      - "60"
+      - "1"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - volatile-lru
     volumes:
       - redis-data:/data
     networks: [control]
@@ -138,6 +153,9 @@ services:
     command: [uvicorn, "apps.sandbox_manager.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8090", --no-access-log]
     environment:
       <<: *platform-environment
+      # Only the sandbox manager authenticates container creation, and it does
+      # so with its own service credential rather than the operator token.
+      AUTOSWE_SANDBOX_MANAGER_TOKEN: ${AUTOSWE_SANDBOX_MANAGER_TOKEN:-}
       DOCKER_HOST: tcp://docker-socket-proxy:2375
     volumes:
       - type: bind
@@ -183,6 +201,9 @@ services:
     command: [uvicorn, "apps.api.main:create_production_app", --factory, --host, 0.0.0.0, --port, "8000", --no-access-log, --proxy-headers]
     environment:
       <<: *platform-environment
+      # The operator credential is scoped to the only published HTTP surface so
+      # that an internal service compromise cannot authenticate as an operator.
+      AUTOSWE_ADMIN_TOKEN: ${AUTOSWE_ADMIN_TOKEN:-}
       FORWARDED_ALLOW_IPS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
     volumes:
       - type: bind
@@ -242,7 +263,11 @@ services:
       dockerfile: Dockerfile
       target: platform
     command: [python, -m, apps.worker.main]
-    environment: *platform-environment
+    environment:
+      <<: *platform-environment
+      # Workers are the only caller of the sandbox manager, so they hold the
+      # sandbox service credential and nothing else privileged.
+      AUTOSWE_SANDBOX_MANAGER_TOKEN: ${AUTOSWE_SANDBOX_MANAGER_TOKEN:-}
     volumes:
       - type: bind
         source: ${AUTOSWE_HOST_RUNTIME_ROOT:-/var/lib/autoswe}

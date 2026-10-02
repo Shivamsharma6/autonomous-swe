@@ -110,9 +110,31 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 ```
 
 Prometheus and the OpenTelemetry collector are internal. Grafana is bound to the configured local
-port and uses the generated admin password. The reliability dashboard covers state age, queue
-blocking, reservations versus actual use, delivery latency/dead letters, UAMS waits, sandbox
-resources, artifact integrity, and SLO burn rate.
+port and uses the generated admin password.
+
+The reliability dashboard covers state age, queue depth, reservations versus actual use, event
+delivery latency, unresolved dead letters, UAMS waits, dispatch latency, sandbox resource usage,
+and artifact integrity failures. Every one of those series is emitted by a production call site.
+
+Two things the dashboard deliberately does **not** show, because nothing measures them:
+
+- **SLO burn rate.** `observability/slo.py` defines the objectives but computes no burn rate, so
+  treat the SLO table in that module as a target, not as an instrumented guarantee. In particular
+  `cancellation_propagation` is not met today: cancellation is cooperative and does not interrupt
+  an in-flight model call or a running sandbox container.
+- **API availability.** There is no request counter, so availability cannot be computed from
+  emitted data.
+
+Correlation identifiers (`run_id`, `task_id`, `trace_id`) are attached to every structured log
+line, so the first step for a stuck run is to find its lines by `run_id` rather than by message
+text:
+
+```sh
+docker compose logs dispatcher | grep '"run_id": "<run-id>"'
+```
+
+OpenTelemetry is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so do not rely on traces being
+present.
 
 ## Upgrade and shutdown
 

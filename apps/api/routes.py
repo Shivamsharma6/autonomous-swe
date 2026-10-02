@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 import re
@@ -16,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.api.auth import AdminPrincipal
 from apps.api.dependencies import (
     ControlPlaneServices,
     get_services,
@@ -47,7 +49,7 @@ from apps.api.schemas import (
     TaskResponse,
 )
 from apps.api.websocket import EventCursor, PostgresTaskEventSource
-from domain.enums import RunStatus
+from domain.enums import RunStatus, TaskStatus
 from execution.scheduler.service import RUN_TERMINAL_VALUES
 from observability.logging import get_structured_logger
 from persistence.artifacts import ArtifactIntegrityError, ArtifactPathError
@@ -61,12 +63,14 @@ from persistence.tables import (
     ModelCallRow,
     PlanRevisionRow,
     ProjectRow,
+    RepositoryRow,
     RunRow,
     RunStageAttemptRow,
     TaskRow,
     ToolExecutionRow,
     utc_now,
 )
+from policies.guardrails.secret_redactor import SecretRedactor
 from tools.approval import ApprovalBindingError, ApprovalExpired
 
 router = APIRouter(
@@ -98,18 +102,39 @@ def _parses_as_json(value: str) -> bool:
     return True
 
 
-def _run_git(
-    target_dir: Path, *arguments: str
-) -> subprocess.CompletedProcess[str]:
+# Git is a blocking child process and onboarding runs it over whatever the
+# operator uploaded. On a cold cache across the host bind mount, `add --all`
+# must stat and hash every blob, which takes minutes for a large tree. Without
+# both a timeout and a thread hand-off, one such request stalls the entire API
+# event loop: health probes, WebSocket polling, artifact downloads and every
+# other request all stop, and a hung git child would pin the loop with no
+# shutdown escape.
+_GIT_TIMEOUT_SECONDS = 300
+
+
+async def _run_git(target_dir: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     if _GIT_EXECUTABLE is None:
         raise RuntimeError("the git executable is not available")
-    return subprocess.run(  # noqa: S603 - all values are policy-generated
-        (_GIT_EXECUTABLE, *arguments),
-        cwd=target_dir,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                subprocess.run,  # noqa: S603 - all values are policy-generated
+                (_GIT_EXECUTABLE, *arguments),
+                cwd=target_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                shell=False,
+            ),
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, subprocess.SubprocessError) as error:
+        raise HTTPException(
+            status_code=504,
+            detail="the git operation did not complete within the onboarding budget",
+        ) from error
+
 
 
 @router.get("/status")
@@ -136,6 +161,69 @@ def _detect_provider(url: str) -> str:
     if "127.0.0.1" in low or "localhost" in low or "host.docker.internal" in low:
         return "Local Endpoint"
     return "Custom OpenAI"
+
+
+def _reject_unusable_backend_url(url: str) -> str | None:
+    """Return a reason string when a caller-supplied URL must not be dialled.
+
+    Shared by every route that fetches a base URL. `probe` and `test` dial a
+    caller-chosen address from inside the API container, which is on the edge,
+    control, and external-services networks, so an unvalidated value is an
+    authenticated reachability oracle for arbitrary internal endpoints and a way
+    to hold sockets open for as long as the request timeout allows.
+    """
+    endpoint = _normalize_backend_url(url)
+    try:
+        parsed = httpx.URL(endpoint)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.host
+            or parsed.userinfo
+            or parsed.query
+            or parsed.fragment
+        ):
+            return (
+                "Invalid provider URL. Enter a valid HTTP or HTTPS base URL "
+                "without credentials, query or fragment."
+            )
+    except (httpx.InvalidURL, ValueError):
+        return (
+            "Invalid provider URL. Enter a valid HTTP or HTTPS base URL "
+            "without credentials, query or fragment."
+        )
+    return None
+
+
+def _validated_backend_url(url: str) -> str:
+    """Validate a caller-supplied provider base URL before it is dialled.
+
+    Applied to every route that takes a base URL, not just the one that stores
+    it. `probe` and `test` fetch a caller-chosen URL from inside the API
+    container, which is on the edge, control, and external-services networks, so
+    an unvalidated value is an authenticated reachability oracle for arbitrary
+    internal endpoints (for example the cloud metadata address) and a way to hold
+    sockets open for an hour via `timeout_seconds`.
+    """
+    endpoint = _normalize_backend_url(url)
+    try:
+        parsed = httpx.URL(endpoint)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.host
+            or parsed.userinfo
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("invalid endpoint")
+    except (httpx.InvalidURL, ValueError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Enter a valid HTTP or HTTPS provider base URL "
+                "without credentials, query or fragment."
+            ),
+        ) from error
+    return endpoint
 
 
 def _normalize_backend_url(url: str) -> str:
@@ -171,22 +259,7 @@ async def update_model_config(
     request: ModelConfigRequest,
     services: Services,
 ) -> ModelConfigResponse:
-    endpoint = _normalize_backend_url(request.base_url)
-    try:
-        url = httpx.URL(endpoint)
-        if (
-            url.scheme not in {"http", "https"} or not url.host
-            or url.userinfo or url.query or url.fragment
-        ):
-            raise ValueError("invalid endpoint")
-    except (httpx.InvalidURL, ValueError) as error:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Enter a valid HTTP or HTTPS provider base URL "
-                "without credentials, query or fragment."
-            ),
-        ) from error
+    endpoint = _validated_backend_url(request.base_url)
     previous = await services.model_settings.load()
     key = request.api_key
     if not key and endpoint == _normalize_backend_url(previous.base_url):
@@ -212,7 +285,15 @@ async def _model_check_headers(base_url: str, api_key: str, services: Services) 
 
 @router.post("/models/probe", response_model=ModelProbeResponse)
 async def probe_models(request: ModelProbeRequest, services: Services) -> ModelProbeResponse:
-    base_url = _normalize_backend_url(request.base_url)
+    rejection = _reject_unusable_backend_url(request.base_url)
+    if rejection is not None:
+        return ModelProbeResponse(
+            reachable=False,
+            models=[],
+            latency_ms=0.0,
+            error=rejection,
+        )
+    base_url = _validated_backend_url(request.base_url)
     headers = await _model_check_headers(base_url, request.api_key, services)
     start_t = time.perf_counter()
     errors: list[str] = []
@@ -278,7 +359,7 @@ async def probe_models(request: ModelProbeRequest, services: Services) -> ModelP
 
 @router.post("/models/test", response_model=ModelTestResponse)
 async def test_model(request: ModelTestRequest, services: Services) -> ModelTestResponse:
-    base_url = _normalize_backend_url(request.base_url)
+    base_url = _validated_backend_url(request.base_url)
     headers = await _model_check_headers(base_url, request.api_key, services)
     saved = await services.model_settings.load()
     timeout_seconds = request.timeout_seconds or saved.timeout_seconds
@@ -358,7 +439,7 @@ async def onboard_project(
     services: Services,
 ) -> ProjectOnboardResponse:
     import_root = services.settings.repository_import_root.resolve(strict=False)
-    branch_check = _run_git(
+    branch_check = await _run_git(
         import_root if import_root.is_dir() else Path.cwd(),
         "check-ref-format",
         "--branch",
@@ -421,7 +502,7 @@ async def onboard_project(
                 with destination.open("x", encoding="utf-8") as stream:
                     stream.write(content)
 
-        baseline_sha = _ensure_git_repository(
+        baseline_sha = await _ensure_git_repository(
             target_dir, request.default_branch, initialize=bool(uploaded)
         )
         async with services.database.transaction() as session:
@@ -498,6 +579,16 @@ async def create_run(
 ) -> RunCreated:
     event_id = uuid4()
     async with services.database.transaction() as session:
+        # `runs.project_id` and `runs.repository_id` are two independent foreign
+        # keys with no composite constraint, so a transposed pair is accepted by
+        # PostgreSQL and the run would then execute against one project's
+        # repository while its artifacts were recorded under another.
+        repository = await session.get(RepositoryRow, request.repository_id)
+        if repository is None or repository.project_id != request.project_id:
+            raise HTTPException(
+                status_code=404,
+                detail="repository does not exist in this project",
+            )
         try:
             run = await services.database_repository.create_run(
                 session,
@@ -698,7 +789,10 @@ async def list_run_approvals(
             call_hash=approval.call_hash,
             tool_name=execution.tool_name,
             requested_by=execution.requested_by,
-            arguments=execution.arguments,
+            # The call arguments are model-authored and can carry secrets that a
+            # prompt-injected agent copied out of the repository. They are
+            # redacted on the way out as well as on the way in.
+            arguments=SecretRedactor().redact(dict(execution.arguments)),
             expires_at=approval.expires_at.isoformat(),
             created_at=approval.created_at.isoformat(),
             decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
@@ -706,6 +800,11 @@ async def list_run_approvals(
         )
         for approval, execution in rows
     )
+
+
+_TERMINAL_TASK_STATES = frozenset(
+    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+)
 
 
 @router.get("/runs/{run_id}/artifacts", response_model=tuple[ArtifactMetadataResponse, ...])
@@ -918,11 +1017,19 @@ async def decide_approval(
     approval_id: UUID,
     decision: ApprovalDecisionRequest,
     services: Services,
+    principal: AdminPrincipal = Depends(require_admin),
 ) -> dict[str, str]:
+    # The recorded approver is the authenticated principal, not caller-supplied
+    # text. `approver` is accepted only as a human-readable label and is stored
+    # alongside the principal, so the audit trail can name both who authenticated
+    # and who acted. Previously a free-form string was written straight into an
+    # immutable audit event for a `git_commit`, which made attribution
+    # unverifiable.
+    approver = f"{principal.subject} ({decision.approver})".strip()
     try:
         await services.approvals.decide(
             approval_id,
-            approver=decision.approver,
+            approver=approver[:255],
             approved=decision.approved,
             expected_call_hash=decision.expected_call_hash,
         )
@@ -938,6 +1045,12 @@ async def decide_approval(
     }
 
 
+# Artifact objects are node results, plans, and release decisions: kilobytes to a
+# few megabytes. Anything larger is a sign the writer is unbounded, so it is
+# refused at the door rather than buffered into the API container's memory.
+_MAX_ARTIFACT_DOWNLOAD_BYTES = 16 * 1024 * 1024
+
+
 @router.get("/projects/{project_id}/artifacts/{artifact_id}")
 async def download_artifact(
     project_id: UUID,
@@ -945,7 +1058,11 @@ async def download_artifact(
     services: Services,
 ) -> Response:
     try:
-        async with services.database.transaction() as session:
+        # The row lock is held only for the metadata lookup. Verification reads
+        # and hashes the whole object synchronously, so holding a SELECT FOR
+        # UPDATE across it serialised concurrent downloads of the same artifact
+        # and blocked every state transition touching that row for the duration.
+        async with services.database.sessions() as session:
             row = await services.database_repository.get_artifact(
                 session,
                 project_id=project_id,
@@ -953,12 +1070,27 @@ async def download_artifact(
             )
             if row is None:
                 raise LookupError
-            content = await services.artifacts.get_verified(
-                session,
-                project_id=project_id,
-                artifact_id=artifact_id,
-            )
             media_type = row.media_type
+            size_bytes = row.size_bytes
+        if size_bytes > _MAX_ARTIFACT_DOWNLOAD_BYTES:
+            # Refuse rather than buffer. A single authenticated GET must not be
+            # able to exhaust the API container's memory.
+            raise HTTPException(
+                status_code=413,
+                detail="artifact exceeds the maximum downloadable size",
+            )
+        # Off the event loop: the verified read hashes the whole object.
+        try:
+            content = await asyncio.to_thread(
+                services.artifacts.read_verified_bytes, row
+            )
+        except (ArtifactIntegrityError, ArtifactPathError, FileNotFoundError) as exc:
+            await services.artifacts.quarantine_corrupt(
+                project_id=project_id, artifact_id=artifact_id, row=row
+            )
+            raise HTTPException(
+                status_code=409, detail="artifact failed integrity verification"
+            ) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     except (ArtifactIntegrityError, ArtifactPathError, FileNotFoundError) as exc:
@@ -1038,12 +1170,19 @@ async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> 
         )
         return
     services: ControlPlaneServices = websocket.app.state.services
+    # The lookup looked like an authorisation check but its result was discarded,
+    # so a connection was accepted for any project/task id, including ids that do
+    # not exist, and each one polled PostgreSQL forever.
     async with services.database.sessions() as session:
         task = await services.database_repository.get_task(
             session,
             project_id=project_id,
             task_id=task_id,
         )
+    if task is None:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=4404, reason="unknown task")
+        return
     subprotocol = websocket.headers.get("sec-websocket-protocol")
     if subprotocol:
         selected_subprotocol = subprotocol.split(",")[0].strip()
@@ -1061,9 +1200,32 @@ async def task_events(websocket: WebSocket, project_id: UUID, task_id: UUID) -> 
                     created_at=datetime.fromisoformat(str(event["created_at"])),
                     event_id=UUID(str(event["event_id"])),
                 )
-    except Exception:
+            # A settled task has nothing further to emit. Without this the socket
+            # polled at 2 Hz until the client happened to disconnect.
+            if task.state in _TERMINAL_TASK_STATES:
+                await websocket.send_json(
+                    {
+                        "event_type": "stream.closed",
+                        "task_id": str(task_id),
+                        "state": task.state.value,
+                    }
+                )
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        # Previously swallowed with no log line at all, so a socket that kept
+        # dropping left no server-side evidence of why.
+        logger.warning(
+            "websocket_event_stream_failed",
+            error_type=type(error).__name__,
+            error_message=str(error),
+            project_id=str(project_id),
+            task_id=str(task_id),
+        )
         with contextlib.suppress(Exception):
             await websocket.close()
+    return
 
 
 def _task_response(row: TaskRow) -> TaskResponse:
@@ -1095,7 +1257,7 @@ async def _require_run(session: AsyncSession, run_id: UUID) -> RunRow:
     return row
 
 
-def _ensure_git_repository(
+async def _ensure_git_repository(
     target_dir: Path, default_branch: str = "main", *, initialize: bool = False
 ) -> str:
     if initialize:
@@ -1105,7 +1267,7 @@ def _ensure_git_repository(
             ("commit", "-m", "Initial imported baseline", "--allow-empty"),
         )
         for command in commands:
-            result = _run_git(
+            result = await _run_git(
                 target_dir,
                 "-c",
                 "core.hooksPath=/dev/null",
@@ -1124,16 +1286,17 @@ def _ensure_git_repository(
     else:
         # Git can discover a parent repository from an arbitrary child folder.
         # Require the selected folder itself to be the repository root.
-        bare = _run_git(target_dir, "rev-parse", "--is-bare-repository")
-        location = _run_git(
+        bare = await _run_git(target_dir, "rev-parse", "--is-bare-repository")
+        location = await _run_git(
             target_dir,
             "rev-parse",
             "--absolute-git-dir" if bare.stdout.strip() == "true" else "--show-toplevel",
         )
-        if location.returncode or Path(location.stdout.strip()).resolve() != target_dir:
+        resolved = await asyncio.to_thread(Path(location.stdout.strip()).resolve)
+        if location.returncode or resolved != target_dir:
             raise HTTPException(status_code=422, detail="Select an existing Git repository root.")
 
-    result = _run_git(
+    result = await _run_git(
         target_dir, "rev-parse", "--verify", f"refs/heads/{default_branch}^{{commit}}"
     )
     baseline = result.stdout.strip()

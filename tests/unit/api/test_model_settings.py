@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr
 
 from apps.api.dependencies import get_services, require_admin
@@ -164,3 +164,39 @@ async def test_model_checks_use_saved_credentials_only_for_the_same_endpoint(
     async with api_client as client:
         assert (await client.post(f"/api/v1/models/{action}", json=payload)).status_code == 200
     assert requests[0].headers.get("Authorization") == expected
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "file:///etc/passwd",
+        "ftp://internal/repo",
+        "http://user:pass@internal:8080/v1",
+        "http://internal:8080/v1?x=1",
+        "http://internal:8080/v1#frag",
+        "not-a-url",
+    ],
+)
+async def test_probe_refuses_to_dial_an_unusable_url(services, base_url):
+    """Every URL-fetching route must validate before it makes a request.
+
+    `probe` and `test` dial a caller-chosen address from inside the API
+    container, which is attached to the edge, control, and external-services
+    networks. An unvalidated base URL is therefore an authenticated reachability
+    oracle for arbitrary internal endpoints and a way to hold sockets open.
+    """
+    response = await probe_models(ModelProbeRequest(base_url=base_url), services)
+
+    assert response.reachable is False
+    assert response.error is not None
+    assert "URL" in response.error
+
+
+@pytest.mark.parametrize("base_url", ["file:///etc/passwd", "http://u:p@internal:8080/v1"])
+async def test_model_test_refuses_an_unusable_url(services, base_url):
+    with pytest.raises(HTTPException) as raised:
+        await run_model_test(
+            ModelTestRequest(base_url=base_url, model="any"), services
+        )
+
+    assert raised.value.status_code == 422

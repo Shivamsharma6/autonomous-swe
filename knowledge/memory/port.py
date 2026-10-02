@@ -96,17 +96,45 @@ class MemoryPort(Protocol):
 
 
 def is_fresh(memory: RetrievedMemory, query: MemoryQuery) -> bool:
+    """Decide whether a retrieved memory may enter the agent's context.
+
+    Two rules are hard:
+
+    * **Expiry.** ``valid_until`` is the enforced staleness mechanism.
+    * **Repository identity.** A memory learned in one repository must never
+      answer a question about another. This is the rule that actually protects
+      against cross-repository contamination.
+
+    Commit equality is deliberately *not* a filter. A promoted memory records
+    the commit the run produced, while a query carries the commit the run
+    started from, so requiring equality made the entire corpus unreachable:
+    recall always returned empty and the paid ``recall`` node summarised
+    nothing. Knowledge recorded at commit X stays applicable to descendants of X,
+    and this layer has no Git access to prove ancestry. Recency is therefore
+    enforced by ``valid_until``, which promotion populates, and by the ranking
+    preference in ``recall_preference``.
+    """
     if memory.valid_until is not None and memory.valid_until <= query.now:
         return False
-    if query.repository_id is not None and query.baseline_commit is not None:
-        if memory.repository_id is None or memory.baseline_commit is None:
+    if query.repository_id is not None:
+        if memory.repository_id is None or memory.repository_id != query.repository_id:
             return False
-        if memory.repository_id != query.repository_id:
-            # Memories from a different repository must never pass a
-            # repository+baseline scoped query.
-            return False
-        return memory.baseline_commit == query.baseline_commit
+    if query.baseline_commit is not None and memory.baseline_commit is None:
+        # An unanchored memory cannot be placed relative to the query at all.
+        return False
     return True
+
+
+def recall_preference(memory: RetrievedMemory, query: MemoryQuery) -> tuple[int, int]:
+    """Rank a memory: an exact-commit match first, then the most recent.
+
+    This is where commit proximity belongs. Filtering on it made recall empty;
+    ordering by it keeps the closest knowledge in front without discarding the
+    rest.
+    """
+    exact = 0 if memory.baseline_commit == query.baseline_commit else 1
+    observed = memory.observed_at.timestamp() if memory.observed_at else 0.0
+    return (exact, -int(observed))
 
 
 def render_context(memories: tuple[RetrievedMemory, ...], *, budget_tokens: int) -> MemoryContext:

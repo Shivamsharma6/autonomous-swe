@@ -45,7 +45,7 @@ def create_app(services: ControlPlaneServices) -> FastAPI:
     )
     application.state.services = services
     application.state.authenticator = AdminAuthenticator(
-        services.settings.admin_token.get_secret_value()
+        services.settings.require_admin_token()
     )
     application.add_middleware(CorrelationMiddleware)
     application.add_middleware(
@@ -101,6 +101,7 @@ def create_production_app() -> FastAPI:
     artifacts = ArtifactService(
         store=ArtifactStore(settings.artifact_root),
         repository=repository,
+        database=database,
     )
     scheduler = SchedulerService(
         database=database,

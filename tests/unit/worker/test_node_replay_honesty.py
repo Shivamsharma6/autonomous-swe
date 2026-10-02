@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from agents.base import _MAX_PAYLOAD_CHARS, _bounded_json
@@ -49,9 +50,13 @@ def test_fingerprint_ignores_paths_outside_worktree(tmp_path: Path) -> None:
     assert escaped == {}
 
 
-def test_bounded_json_keeps_small_payloads_verbatim() -> None:
+def test_bounded_json_keeps_small_payloads_intact() -> None:
     payload = {"goal": "ship it", "refs": ["a", "b"]}
-    assert _bounded_json(payload) == '{"goal": "ship it", "refs": ["a", "b"]}'
+    rendered = _bounded_json(payload)
+    # Compact separators: the payload is a byte budget, so whitespace is waste.
+    # The contract is that nothing is lost, not that formatting is stable.
+    assert json.loads(rendered) == payload
+    assert rendered == '{"goal":"ship it","refs":["a","b"]}'
 
 
 def test_bounded_json_truncates_oversize_strings_and_total() -> None:

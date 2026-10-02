@@ -88,6 +88,20 @@ class ModelRequest(ContractModel):
     tools: tuple[ToolDefinition, ...] = Field(default_factory=tuple, max_length=128)
     timeout_seconds: float = Field(default=60.0, gt=0, le=3_600)
     temperature: float = Field(default=0.0, ge=0, le=2)
+    # An explicit generation ceiling. Without it the provider's own default
+    # bounds a single response, so one turn could consume an entire token
+    # budget before the post-hoc check ever ran.
+    max_output_tokens: int = Field(default=16_000, ge=256, le=200_000)
+
+
+# When an operator configures no price table the gateway used to charge $0.00,
+# which made `cost_budget_usd` pure decoration: the budget arm of the agent
+# budget check could never trip. Unpriced deployments now fall back to an
+# explicit, deliberately conservative rate so the ceiling still binds and the
+# recorded cost is an upper bound rather than a fiction.
+DEFAULT_INPUT_COST_PER_MILLION = 3.0
+DEFAULT_CACHED_INPUT_COST_PER_MILLION = 0.3
+DEFAULT_OUTPUT_COST_PER_MILLION = 15.0
 
 
 class ModelUsage(ContractModel):
@@ -176,7 +190,19 @@ class OpenAICompatibleGateway:
             if cached_input_cost_per_million is None
             else cached_input_cost_per_million
         )
-        self._output_cost = output_cost_per_million
+        self._output_cost = (
+            output_cost_per_million
+            if output_cost_per_million > 0
+            else DEFAULT_OUTPUT_COST_PER_MILLION
+        )
+        self._input_cost = (
+            self._input_cost if self._input_cost > 0 else DEFAULT_INPUT_COST_PER_MILLION
+        )
+        self._cached_input_cost = (
+            self._cached_input_cost
+            if self._cached_input_cost > 0
+            else DEFAULT_CACHED_INPUT_COST_PER_MILLION
+        )
         self._default_capabilities = default_capabilities
         self._capability_cache: dict[str, ProviderCapabilities] = {}
         self._client = client or httpx.AsyncClient(base_url=self._base_url)
@@ -328,12 +354,17 @@ class OpenAICompatibleGateway:
                         failure_class=FailureClass.TRANSIENT,
                     ) from error
 
+    @property
+    def input_cost_per_million(self) -> float:
+        return self._input_cost
+
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": [_message_payload(message) for message in request.messages],
             "temperature": request.temperature,
             "stream": stream,
+            "max_completion_tokens": request.max_output_tokens,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {

@@ -81,7 +81,10 @@ class ModelTestRequest(ContractModel):
     base_url: str = Field(min_length=1, max_length=2_000)
     api_key: str = Field(default="", max_length=1_000)
     model: str = Field(min_length=1, max_length=200)
-    timeout_seconds: float | None = Field(default=None, gt=0, le=3_600)
+    # An interactive connectivity check does not need an hour, and each request
+    # holds an outbound socket for its whole duration, so the ceiling is what
+    # bounds how many an operator (or a stolen token) can leave open.
+    timeout_seconds: float | None = Field(default=None, gt=0, le=120)
 
 
 class ModelTestResponse(ContractModel):

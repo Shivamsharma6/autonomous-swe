@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -16,31 +17,97 @@ from policies.guardrails.secret_redactor import SecretRedactor, is_sensitive_key
 from policies.risk.policy_engine import ToolRiskPolicy
 
 
-@pytest.mark.asyncio
-async def test_rate_limit_middleware_bounds_memory_and_evicts_stale() -> None:
-    app = FastAPI()
-
-    @app.get("/test")
-    async def handler() -> PlainTextResponse:
-        return PlainTextResponse("ok")
-
-    middleware = RateLimitMiddleware(app, requests_per_minute=100, max_tracked_keys=50)
-
-    # Generate requests with 200 distinct keys
-    for i in range(200):
-        scope = {
+def _request(path: str, *, token: bytes = b"credential") -> Request:
+    return Request(
+        {
             "type": "http",
             "method": "GET",
-            "path": f"/path/{i}",
-            "headers": [(b"host", b"testserver")],
+            "path": path,
+            "headers": [(b"host", b"testserver"), (b"authorization", token)],
             "client": ("127.0.0.1", 12345),
         }
-        req = Request(scope)
-        call_next = AsyncMock(return_value=PlainTextResponse("ok"))
-        await middleware.dispatch(req, call_next)
+    )
 
-    # Verify tracked keys dictionary is bounded to max_tracked_keys or cleaned up
-    assert len(middleware._requests) <= 100
+
+@pytest.mark.asyncio
+async def test_rate_limit_blocks_a_single_credential_across_many_paths() -> None:
+    """The limiter must be a per-client budget, not a per-route quota.
+
+    The previous implementation keyed on `request.url.path`, so one credential
+    received a fresh budget for every endpoint it touched and was effectively
+    never throttled. This drives the same credential across distinct paths and
+    asserts the budget is shared.
+    """
+    app = FastAPI()
+    middleware = RateLimitMiddleware(app, requests_per_minute=10, max_tracked_keys=100)
+    call_next = AsyncMock(return_value=PlainTextResponse("ok"))
+
+    statuses = []
+    for index in range(25):
+        response = await middleware.dispatch(_request(f"/path/{index}"), call_next)
+        statuses.append(response.status_code)
+
+    assert statuses.count(429) == 15
+    assert statuses[:10] == [200] * 10
+
+
+@pytest.mark.asyncio
+async def test_distinct_credentials_have_independent_budgets() -> None:
+    app = FastAPI()
+    middleware = RateLimitMiddleware(app, requests_per_minute=3, max_tracked_keys=100)
+    call_next = AsyncMock(return_value=PlainTextResponse("ok"))
+
+    for _ in range(3):
+        first = await middleware.dispatch(_request("/x", token=b"token-a"), call_next)
+        second = await middleware.dispatch(_request("/x", token=b"token-b"), call_next)
+        assert first.status_code == 200, "token A must not be charged for token B"
+        assert second.status_code == 200, "token B must not be charged for token A"
+
+    assert (
+        await middleware.dispatch(_request("/x", token=b"token-a"), call_next)
+    ).status_code == 429
+    assert (
+        await middleware.dispatch(_request("/x", token=b"token-b"), call_next)
+    ).status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_capacity_refuses_rather_than_evicting_a_victims_budget() -> None:
+    """Eviction let an unauthenticated caller reset any budget by filling the table.
+
+    The limiter runs before authentication, so filling `max_tracked_keys` needed
+    no credential and dropped the oldest bucket, restarting a live client from
+    zero. At capacity with nothing idle the limiter now refuses.
+    """
+    app = FastAPI()
+    middleware = RateLimitMiddleware(app, requests_per_minute=100, max_tracked_keys=5)
+    call_next = AsyncMock(return_value=PlainTextResponse("ok"))
+
+    victim = await middleware.dispatch(_request("/victim", token=b"victim"), call_next)
+    assert victim.status_code == 200
+    victim_key = f"127.0.0.1:{hashlib.sha256(b'victim').hexdigest()[:16]}"
+    budget_before = len(middleware._requests[victim_key])
+
+    for index in range(20):
+        await middleware.dispatch(
+            _request(f"/flood/{index}", token=f"flood-{index}".encode()), call_next
+        )
+
+    victim_key = f"127.0.0.1:{hashlib.sha256(b'victim').hexdigest()[:16]}"
+    assert victim_key in middleware._requests, "a live budget must not be evicted"
+    assert len(middleware._requests[victim_key]) == budget_before
+
+
+@pytest.mark.asyncio
+async def test_tracked_buckets_stay_bounded() -> None:
+    app = FastAPI()
+    middleware = RateLimitMiddleware(app, requests_per_minute=1000, max_tracked_keys=50)
+    call_next = AsyncMock(return_value=PlainTextResponse("ok"))
+
+    for index in range(500):
+        await middleware.dispatch(_request(f"/p/{index}", token=f"t{index}".encode()), call_next)
+
+    assert len(middleware._requests) <= 50
 
 
 def test_tool_risk_policy_nested_and_traversal_paths() -> None:

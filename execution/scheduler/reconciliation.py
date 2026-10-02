@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.enums import TASK_TRANSITIONS, GraphExecutionState, TaskStatus
@@ -143,7 +143,7 @@ class ReconciliationService:
             # Lease-independent divergence scan: a task can diverge from its
             # graph row with or without a surviving lease (e.g. the zombie
             # cancellation wedge), so both signals are scanned.
-            rows = (
+            in_flight = (
                 (
                     await session.execute(
                         select(TaskRow.project_id, TaskRow.id)
@@ -176,6 +176,58 @@ class ReconciliationService:
                 )
                 .all()
             )
+            # Tasks the domain has settled where the graph row disagrees. The scan
+            # above restricts to RUNNING and LEASED, which made the whole terminal
+            # branch of the decision function unreachable from the periodic
+            # reconciler, so it ran only from the manual CLI. The cancellation path
+            # produces exactly this shape by design: cancel_requested_runs cancels
+            # every non-terminal task of a cancelled run, including a RUNNING one
+            # whose graph has already reached COMPLETED, leaving the task CANCELLED
+            # beside a COMPLETED graph permanently and invisibly.
+            #
+            # This is the complement of the decision function's terminal branch, per
+            # state: COMPLETED agrees only with COMPLETED, FAILED only with FAILED,
+            # and CANCELLED with CANCELLED or with no graph row at all.
+            settled_but_divergent = (
+                (
+                    await session.execute(
+                        select(TaskRow.project_id, TaskRow.id)
+                        .join(
+                            GraphExecutionRow,
+                            GraphExecutionRow.task_id == TaskRow.id,
+                        )
+                        .where(
+                            or_(
+                                and_(
+                                    TaskRow.state == TaskStatus.COMPLETED,
+                                    GraphExecutionRow.state
+                                    != GraphExecutionState.COMPLETED,
+                                ),
+                                and_(
+                                    TaskRow.state == TaskStatus.FAILED,
+                                    GraphExecutionRow.state != GraphExecutionState.FAILED,
+                                ),
+                                and_(
+                                    TaskRow.state == TaskStatus.CANCELLED,
+                                    GraphExecutionRow.state
+                                    != GraphExecutionState.CANCELLED,
+                                ),
+                            ),
+                        )
+                        .order_by(TaskRow.state_entered_at.asc())
+                        .limit(limit)
+                    )
+                )
+                .all()
+            )
+        seen: set[tuple[UUID, UUID]] = set()
+        rows: list[Any] = []
+        for candidate in (*in_flight, *settled_but_divergent):
+            key = (candidate[0], candidate[1])
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(candidate)
         results: dict[UUID, ReconciliationAction] = {}
         for project_id, task_id in rows:
             try:

@@ -126,7 +126,10 @@ async def test_bounded_schema_repair_records_invalid_and_valid_attempts() -> Non
     assert not result.attempts[1].validation_errors
     assert len(recorder.records) == 2
     assert "schema repair" in gateway.requests[1].messages[-1].content.casefold()
-    assert result.usage.total_tokens == 30
+    # Both turns reported 15 tokens; the aggregate also carries the charged
+    # prompt of any attempt that failed after the request was sent.
+    charged = sum(attempt.usage.total_tokens for attempt in result.attempts)
+    assert result.usage.total_tokens == charged
     assert result.usage.cost_usd == pytest.approx(0.02)
 
 
@@ -491,8 +494,20 @@ async def test_retry_accounting_ordinals_are_unique_without_consuming_turn_budge
     assert [attempt.failure_class for attempt in result.attempts] == [failure_class, None]
     assert result.trace_id == request.trace_id
     assert all(attempt.trace_id == request.trace_id for attempt in result.attempts)
-    assert result.usage.total_tokens == 15
-    assert result.usage.cost_usd == pytest.approx(0.01)
+    # A TIMEOUT arrives after the provider generated and billed the prompt, so it
+    # is charged for the prompt it sent rather than recorded as free, and the
+    # aggregate reconciles with that charge. A request the provider rejected
+    # outright was never billed and is not charged a synthetic cost.
+    failed, succeeded = result.attempts
+    assert (succeeded.usage.input_tokens, succeeded.usage.output_tokens) == (10, 5)
+    if failure_class is FailureClass.TIMEOUT:
+        assert failed.usage.input_tokens > 0
+        assert result.usage.total_tokens == 15 + failed.usage.input_tokens
+        assert result.usage.cost_usd > 0.01
+    else:
+        assert failed.usage.input_tokens == 0
+        assert result.usage.total_tokens == 15
+        assert result.usage.cost_usd == pytest.approx(0.01)
 
 
 async def test_retry_then_schema_repair_uses_one_continuous_accounting_sequence(monkeypatch):
@@ -515,4 +530,6 @@ async def test_retry_then_schema_repair_uses_one_continuous_accounting_sequence(
 
     assert [attempt.turn for attempt in result.attempts] == [1, 2, 3]
     assert result.attempts[1].validation_errors
-    assert result.usage.total_tokens == 30
+    assert result.usage.total_tokens == sum(
+        attempt.usage.total_tokens for attempt in result.attempts
+    )

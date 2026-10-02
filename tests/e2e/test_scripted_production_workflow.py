@@ -296,9 +296,17 @@ def _trace_identity(trace_id: str) -> tuple[UUID, str]:
 
 
 def _latest_tool_result(request: ModelRequest) -> dict[str, Any] | None:
+    """Decode the leading JSON object of the most recent tool message.
+
+    The runtime deliberately appends a human-readable coaching instruction to a
+    tool result ("[Instruction: Patch applied successfully...]"), so the message
+    is JSON followed by prose rather than pure JSON. Parsing the whole string
+    fails once a tool happens to be the last message in the conversation.
+    """
+    decoder = json.JSONDecoder()
     for message in reversed(request.messages):
         if message.role == "tool":
-            parsed = json.loads(message.content)
+            parsed, _end = decoder.raw_decode(message.content.lstrip())
             assert isinstance(parsed, dict)
             return parsed
     return None
@@ -863,7 +871,12 @@ async def test_scripted_branching_repair_approval_and_uams_promotion_use_product
         assert memory_row is not None and memory_row.status == "PROMOTED"
         assert release_artifact is not None and release_artifact.verified_at is not None
         assert repair_event is not None
-        assert approval_row is not None and approval_row.approver == "e2e-operator@example.invalid"
+        # The recorded approver is the authenticated principal, with the operator's
+        # own label appended. A bare caller-supplied string would make attribution
+        # for a `git_commit` unverifiable in the immutable audit trail.
+        assert approval_row is not None
+        assert approval_row.approver.startswith("single-machine-admin")
+        assert "e2e-operator@example.invalid" in approval_row.approver
         assert len(uams_writes) == 1
         expected_criteria = {
             criterion

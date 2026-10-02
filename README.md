@@ -399,10 +399,15 @@ Sandbox policy includes:
 - canonical path, traversal, and symlink escape checks;
 - persisted container identity for cancellation and orphan cleanup.
 
-Each `SandboxExecution` records actual CPU time, peak memory, peak and created processes, stdout and
-stderr bytes, duration, network requests and bytes, exit code/reason, triggered limit, measurement
-source, and whether measurement was complete. Scheduler and abuse controls can therefore compare
-estimates, reservations, and real consumption.
+Each `SandboxExecution` records actual CPU time, peak memory, peak processes, stdout and stderr
+bytes, duration, network bytes, exit code/reason, triggered limit, measurement source, and whether
+measurement was complete. Scheduler and abuse controls can therefore compare estimates,
+reservations, and real consumption.
+
+`processes_created` and `network_requests` are currently recorded as `None`/`0` because the sandbox
+does not observe them: Docker exposes no per-container created-process count, and request counting
+requires an egress proxy, which no deployment currently runs. They are reported as unmeasured
+rather than as zero so a consumer cannot mistake "not observed" for "did not happen".
 
 ## Durability and state
 
@@ -659,8 +664,8 @@ The base stack is intentionally deployable on one machine:
 | `docker-socket-proxy` | Restricted Docker Engine API | Docker socket; internal only |
 | `sandbox-manager` | Sandbox lifecycle and telemetry | Controlled runtime bind; internal only |
 | `migrations` | One-shot Alembic upgrade and drift check | None |
-| `api` | Authenticated control plane | Loopback `8080` by default |
-| `dispatcher` | Planning, scheduling, outbox/finalization advancement | None |
+| `api` | Authenticated control plane | Loopback `8080` by default; controlled runtime bind |
+| `dispatcher` | Planning, scheduling, outbox/finalization advancement, release commits | Controlled runtime bind |
 | `workers` | Parallel task/LangGraph/agent execution | Controlled runtime bind |
 | `web` | Static operational dashboard | Loopback `3000` by default |
 

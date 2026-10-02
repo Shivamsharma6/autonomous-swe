@@ -42,7 +42,7 @@ async def run_worker() -> None:
     model_factory = ModelRuntimeFactory(settings)
     sandbox = SandboxManagerClient(
         base_url=settings.sandbox_manager_url,
-        token=settings.admin_token.get_secret_value(),
+        token=settings.require_sandbox_manager_token(),
     )
     repository = DomainRepository()
     artifacts = ArtifactService(
@@ -57,6 +57,8 @@ async def run_worker() -> None:
             max_parallel_tasks_per_project=settings.max_parallel_tasks_per_project,
             max_model_concurrency=settings.max_model_concurrency,
             max_sandbox_concurrency=settings.max_sandbox_concurrency,
+            max_task_attempts=settings.max_task_attempts,
+            max_run_cost_usd=settings.max_total_budget_usd,
         ),
         lease_ttl=timedelta(seconds=30),
         repository=repository,

@@ -19,6 +19,7 @@ from knowledge.memory.port import (
     RememberReceipt,
     RetrievedMemory,
     is_fresh,
+    recall_preference,
     render_context,
 )
 from observability.tracing import current_correlation
@@ -85,8 +86,10 @@ class UAMSMemoryAdapter:
             if is_fresh(record, query):
                 results.append(record)
         # Deterministic relevance order so budget packing is stable and
-        # aligned with the contract-test port behaviour.
-        results.sort(key=lambda record: record.score, reverse=True)
+        # aligned with the contract-test port behaviour. Commit proximity
+        # breaks ties ahead of recency: an exact-commit match is the knowledge
+        # closest to the state being worked on.
+        results.sort(key=lambda record: (-record.score, *recall_preference(record, query)))
         return tuple(results)
 
     async def get_context(self, request: ContextRequest) -> MemoryContext:
@@ -127,7 +130,9 @@ class UAMSMemoryAdapter:
             return self._receipt(assigned_id, status)
         return RememberReceipt(
             memory_id=assigned_id,
-            revision_id=str(response.get("revision_id") or response.get("path") or f"rev-{assigned_id}"),
+            revision_id=str(
+                response.get("revision_id") or response.get("path") or f"rev-{assigned_id}"
+            ),
             status=str(response.get("index_status") or "indexed"),
             searchable=bool(response.get("searchable", True)),
             source_id=str(response.get("path")) if response.get("path") else None,
@@ -140,7 +145,10 @@ class UAMSMemoryAdapter:
         current = status.get("current_revision_id")
         latest = status.get("latest_revision_id")
         searchable = bool(
-            (status.get("index_status") in {"indexed", "pending"} or status.get("document_status") == "active")
+            (
+                status.get("index_status") in {"indexed", "pending"}
+                or status.get("document_status") == "active"
+            )
             and (current or latest)
         )
         return RememberReceipt(

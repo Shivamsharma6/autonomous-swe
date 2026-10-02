@@ -20,6 +20,16 @@ CORS, no-store/security headers, scoped UUID lookups, redacted errors, and exact
 Approval hashes bind normalized arguments, repository, baseline commit, approver, and expiry.
 Changing any field invalidates authorization.
 
+For the release commit, the bound arguments include the **worktree tree hash**: the operator
+authorises a specific set of files, not a worktree name. The tree is staged into a scratch index
+and its hash is re-verified inside the commit operation itself, so content that appears in the
+worktree between the decision and the commit is refused rather than swept in by a blanket
+`git add --all`. Content that lands in the worktree is often repository-controlled: `run_tests`
+executes code from the imported repository in that same worktree while approval is pending.
+
+The recorded approver is the authenticated principal, with any operator-supplied label appended
+for readability. The label alone is not trusted for attribution.
+
 Tool calls require a declared capability, eligible role, bounded schema, risk ceiling, replay
 policy, side-effect class, timeout, and contained paths. Commit, push, pull request, infrastructure,
 and deployment actions require approval. An unknown external outcome is quarantined instead of
@@ -44,6 +54,20 @@ artifact boundaries.
 `edge` contains loopback-published API/web endpoints. `control` and `docker-api` are internal
 networks. `external-services` permits only components that need model/UAMS egress. The Docker
 socket proxy exposes a restricted Engine API and is the sole socket mount.
+
+**What "restricted" means here.** The proxy is a *denylist*: it disables whole Engine subsystems
+(`/volumes`, `/build`, `/images/*/build`, `/commit`, `/swarm`, `/system`) while leaving
+`POST /containers/*` reachable, because container creation is what the sandbox manager needs.
+It therefore reduces blast radius by removing subsystems, but it does **not** constrain what a
+container can be created as. The boundary that actually holds is `SandboxBoundary` inside the
+sandbox manager, which re-derives the mount paths, image reference, and container user from the
+manager's own configuration instead of trusting the request body. Treat the proxy as depth, not
+as the control.
+
+**Credential separation.** The sandbox manager authenticates with its own service credential
+(`AUTOSWE_SANDBOX_MANAGER_TOKEN`), which is held only by `workers` and `sandbox-manager`. The
+operator credential (`AUTOSWE_ADMIN_TOKEN`) is scoped to the API, the only published HTTP surface,
+so compromising the API does not also yield the ability to create containers.
 
 ## Residual risks and operator duties
 

@@ -6,6 +6,7 @@ from contextvars import ContextVar, Token
 from typing import Any, ClassVar, Self
 from uuid import UUID
 
+import structlog
 from pydantic import BaseModel, SecretStr
 
 
@@ -74,7 +75,15 @@ _correlation: ContextVar[CorrelationContext | None] = ContextVar(
 
 
 def bind_correlation(context: CorrelationContext) -> Token[CorrelationContext | None]:
-    return _correlation.set(context)
+    token = _correlation.set(context)
+    # structlog's processor chain reads contextvars, not this module's own, and
+    # nothing ever called bind_contextvars. Without this, every log line in the
+    # platform carried only the event name and whatever the caller passed
+    # explicitly, so a stuck run could not be traced from its emitted logs. The
+    # documented debugging procedure in docs/task-failure-investigation.md
+    # depends on this binding.
+    structlog.contextvars.bind_contextvars(**_loggable(context))
+    return token
 
 
 def current_correlation() -> CorrelationContext:
@@ -82,7 +91,22 @@ def current_correlation() -> CorrelationContext:
 
 
 def reset_correlation(token: Token[CorrelationContext | None]) -> None:
+    # Read the bound fields before resetting: afterwards current_correlation()
+    # returns an empty context and there would be nothing to unbind, leaking the
+    # previous scope's identifiers into the next unit of work.
+    bound = _loggable(_correlation.get() or CorrelationContext())
     _correlation.reset(token)
+    if bound:
+        structlog.contextvars.unbind_contextvars(*bound)
+
+
+def _loggable(context: CorrelationContext) -> dict[str, str]:
+    """The correlation fields worth emitting on every line, without noise."""
+    fields = context.model_dump(exclude_none=True, mode="json")
+    # graph_thread_id is derivable from the other identifiers and is long; it
+    # stays available through to_headers() for outbound propagation.
+    fields.pop("graph_thread_id", None)
+    return {key: str(value) for key, value in fields.items()}
 
 
 class ObservabilityConfig(BaseModel):

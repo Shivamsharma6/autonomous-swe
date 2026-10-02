@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.models import ContractModel
 from execution.sandbox.runner import SandboxRequest, SandboxResult
-from observability.metrics import track_actual_resource
+from observability.metrics import platform_metrics, track_actual_resource
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import SandboxContainerRow, SandboxExecutionRow, utc_now
@@ -268,6 +268,14 @@ class SandboxManager:
                 )
                 result = result.model_copy(update={"execution": execution})
             await self._store.finish(request, result)
+            # Sandbox resource histograms existed but nothing ever observed an
+            # execution, so the "sandbox resources" dashboard panel was empty.
+            platform_metrics.observe_sandbox_usage(
+                cpu_seconds=result.execution.cpu_time_ms / 1000.0,
+                peak_memory_bytes=result.execution.peak_memory_bytes,
+                duration_seconds=result.execution.duration_ms / 1000.0,
+                exit_reason=result.execution.exit_reason,
+            )
             return result
         except BaseException as exc:
             if registered:

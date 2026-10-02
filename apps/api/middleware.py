@@ -94,20 +94,32 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         credential_digest = hashlib.sha256(
             request.headers.get("authorization", "anonymous").encode("utf-8")
         ).hexdigest()[:16]
-        key = f"{host}:{request.url.path}:{credential_digest}"
+        # Keyed per client and per credential, never per endpoint. Including the
+        # path made the limit a per-route quota, so a single valid credential
+        # could issue roughly (paths x limit) requests a minute and never be
+        # throttled.
+        key = f"{host}:{credential_digest}"
         now = time.monotonic()
         async with self._lock:
             if len(self._requests) >= self._max_tracked_keys:
-                stale_keys = [
+                expired = [
                     k
                     for k, timestamps in self._requests.items()
                     if not timestamps or timestamps[-1] <= now - 60
                 ]
-                for k in stale_keys:
-                    self._requests.pop(k, None)
-                while len(self._requests) >= self._max_tracked_keys:
-                    oldest_key = next(iter(self._requests))
-                    self._requests.pop(oldest_key, None)
+                for k in expired:
+                    del self._requests[k]
+                if len(self._requests) >= self._max_tracked_keys:
+                    # At capacity with nothing idle, refuse rather than evict.
+                    # Evicting the least-recently-inserted bucket let an attacker
+                    # reset an arbitrary victim's budget by filling the table,
+                    # and the table is only reachable before authentication, so
+                    # no credential was needed to do it.
+                    return JSONResponse(
+                        {"detail": "rate limiter at capacity"},
+                        status_code=503,
+                        headers={"Retry-After": "60"},
+                    )
 
             entries = self._requests.get(key)
             if entries is None:

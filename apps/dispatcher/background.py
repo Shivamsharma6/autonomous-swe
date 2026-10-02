@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -8,11 +9,15 @@ from messaging.consumer import DeliveryConsumer, DeliveryOutcome
 from messaging.redis_streams import RedisStreamsTransport
 from messaging.retention import RetentionPolicy, RetentionService
 from observability.logging import get_structured_logger
+from observability.metrics import platform_metrics
 from persistence.database import Database
 
 logger = get_structured_logger("autoswe.dispatcher.background")
 
 CONSUMER_GROUP = "autoswe"
+# Every topic the outbox publishes to. Kept in one place because the retention
+# loop trims exactly this set: a stream that is published to but absent here
+# would grow without bound, and five topics were in precisely that state.
 EVENT_STREAMS: tuple[str, ...] = (
     "task-state",
     "workflow-state",
@@ -23,6 +28,11 @@ EVENT_STREAMS: tuple[str, ...] = (
     "plan-created",
     "memory-promoted",
     "release-review",
+    "approvals",
+    "sandbox-executions",
+    "plan-repair",
+    "run-requests",
+    "agent-messages",
 )
 
 
@@ -63,6 +73,21 @@ class EventConsumptionLoop:
             for stream in streams
         }
 
+    async def _unresolved_dead_letters(self) -> int:
+        from sqlalchemy import func, select
+
+        from persistence.tables import DeadLetterRow
+
+        async with self._database.sessions() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(DeadLetterRow)
+                    .where(DeadLetterRow.resolved_at.is_(None))
+                )
+                or 0
+            )
+
     async def _apply_event(self, session: Any, payload: dict[str, Any]) -> None:
         # Canonical domain truth already lives in PostgreSQL; the durable
         # consumer receipt written by DeliveryConsumer is the required effect.
@@ -88,9 +113,20 @@ class EventConsumptionLoop:
                 block_ms=self._block_ms,
             )
             for record in (*stale, *fresh):
+                started = time.perf_counter()
                 outcome = await consumer.process(record, self._apply_event)
+                # Delivery latency was an instrument with no producer, so the
+                # dashboard panel for it could never show a value.
+                platform_metrics.observe_event_delivery(
+                    time.perf_counter() - started, outcome=outcome.value
+                )
                 if outcome is not DeliveryOutcome.DEFERRED:
                     processed += 1
+            platform_metrics.set_unresolved_dead_letters(await self._unresolved_dead_letters())
+            # Deliveries whose retry clock has run out are resolved rather than
+            # left to the transport's idle reaper, so no event can be stranded
+            # in RETRY with attempts below the cap and no dead letter.
+            processed += await consumer.sweep_stalled()
         return processed
 
     async def run(self, stop: asyncio.Event) -> None:

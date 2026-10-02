@@ -4,6 +4,7 @@ import hashlib
 import os
 import stat
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -13,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.enums import ArtifactState
 from domain.models import ArtifactRef
+from observability.metrics import platform_metrics
+from persistence.database import Database
 from persistence.repositories import DomainRepository
+from persistence.tables import ArtifactRow
 
 
 class ArtifactError(RuntimeError):
@@ -188,9 +192,18 @@ class ArtifactStore:
 
 
 class ArtifactService:
-    def __init__(self, *, store: ArtifactStore, repository: DomainRepository) -> None:
+    def __init__(
+        self,
+        *,
+        store: ArtifactStore,
+        repository: DomainRepository,
+        database: Database | None = None,
+    ) -> None:
         self.store = store
         self.repository = repository
+        # Optional: only the lock-free read path needs to open its own session.
+        # It is required by `get_verified_bytes`, which raises if absent.
+        self.database = database
 
     async def put(
         self,
@@ -223,6 +236,44 @@ class ArtifactService:
         )
         return stored
 
+    @staticmethod
+    def _stored(row: ArtifactRow) -> StoredArtifact:
+        return StoredArtifact(
+            artifact_id=row.id,
+            sha256=row.sha256,
+            media_type=row.media_type,
+            size_bytes=row.size_bytes,
+            storage_key=row.storage_key,
+        )
+
+    def read_verified_bytes(self, row: ArtifactRow) -> bytes:
+        """Verify and read an artifact object. Synchronous and lock-free.
+
+        Integrity verification is a whole-object read plus SHA-256, so this
+        belongs on a worker thread: inline it blocked the event loop for the
+        duration. It deliberately takes an already-loaded row so the caller
+        decides the transaction scope and does not hold a row lock across it.
+        """
+        if row.state is not ArtifactState.VALID:
+            raise ArtifactIntegrityError(f"artifact {row.id} is not valid evidence")
+        return self.store.read_verified(self._stored(row))
+
+    async def quarantine_corrupt(
+        self, *, project_id: UUID, artifact_id: UUID, row: ArtifactRow
+    ) -> None:
+        """Record and quarantine an artifact whose stored bytes failed the hash."""
+        if self.database is None:
+            raise RuntimeError(
+                "artifact service was constructed without a database session factory"
+            )
+        platform_metrics.record_artifact_integrity_failure()
+        async with self.database.transaction() as session:
+            await self.repository.mark_artifact_corrupt(
+                session, project_id=project_id, artifact_id=artifact_id
+            )
+        with suppress(ArtifactError, FileNotFoundError):
+            self.store.quarantine(self._stored(row))
+
     async def get_verified(
         self,
         session: AsyncSession,
@@ -237,16 +288,11 @@ class ArtifactService:
             raise LookupError(f"artifact {artifact_id} does not exist in project {project_id}")
         if row.state is not ArtifactState.VALID:
             raise ArtifactIntegrityError(f"artifact {artifact_id} is not valid evidence")
-        stored = StoredArtifact(
-            artifact_id=row.id,
-            sha256=row.sha256,
-            media_type=row.media_type,
-            size_bytes=row.size_bytes,
-            storage_key=row.storage_key,
-        )
+        stored = self._stored(row)
         try:
             return self.store.read_verified(stored)
         except (ArtifactIntegrityError, ArtifactPathError, FileNotFoundError):
+            platform_metrics.record_artifact_integrity_failure()
             await self.repository.mark_artifact_corrupt(
                 session,
                 project_id=project_id,

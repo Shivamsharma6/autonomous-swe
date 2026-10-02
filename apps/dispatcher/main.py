@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from redis.asyncio import Redis
 
 from agents.configuration import ModelRuntimeFactory
-from apps.dispatcher.background import EventConsumptionLoop, RetentionLoop
+from apps.dispatcher.background import EVENT_STREAMS, EventConsumptionLoop, RetentionLoop
 from domain.models import ContractModel, PlanLimits
 from execution.sandbox.worktrees import GitWorktreeManager
 from execution.scheduler.reconciliation import ReconciliationService
@@ -222,6 +222,8 @@ async def run_dispatcher() -> None:
             max_parallel_tasks_per_project=settings.max_parallel_tasks_per_project,
             max_model_concurrency=settings.max_model_concurrency,
             max_sandbox_concurrency=settings.max_sandbox_concurrency,
+            max_task_attempts=settings.max_task_attempts,
+            max_run_cost_usd=settings.max_total_budget_usd,
         ),
         lease_ttl=timedelta(seconds=30),
         repository=repository,
@@ -277,7 +279,10 @@ async def run_dispatcher() -> None:
         database=database,
         transport=transport,
         consumer_name=f"events:{owner}",
-        streams=("task-state", "workflow-state", "artifact-integrity", "reconciliation"),
+        # Every published topic, not a hand-picked subset: a topic absent here
+        # never gets a consumer group, never gets a receipt, and is invisible to
+        # the recovery story in docs/recovery-guide.md.
+        streams=EVENT_STREAMS,
     )
     retention = RetentionLoop(database=database, transport=transport)
     stop = asyncio.Event()

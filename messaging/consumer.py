@@ -108,6 +108,58 @@ class DeliveryConsumer:
                 and delivery.next_attempt_at > now
             )
 
+    async def sweep_stalled(self, *, now: datetime | None = None) -> int:
+        """Dead-letter deliveries whose retry clock can no longer be trusted.
+
+        A failed delivery stays in the Redis pending-entry list and is only
+        redelivered when the transport's idle reaper notices it, so the actual
+        retry schedule is paced by that idle timer rather than by the
+        ``next_attempt_at`` this table records. When the two drift apart the
+        entry can sit unacknowledged and unretried indefinitely, and nothing
+        else would ever resolve it: ``XTRIM`` eventually removes it from Redis
+        while its ``consumer_deliveries`` row stays at ``RETRY`` with attempts
+        below the cap, so the event is lost with no dead letter and no alert.
+
+        This makes the state machine total. Any delivery whose next attempt was
+        due more than one full backoff ceiling ago is past its chance and is
+        dead-lettered, so a retry either happens or is recorded as failed.
+        """
+        timestamp = now or datetime.now(UTC)
+        horizon = timestamp - self._retry_policy.max_delay
+        swept = 0
+        async with self._database.transaction() as session:
+            stalled = tuple(
+                (
+                    await session.scalars(
+                        select(ConsumerDeliveryRow).where(
+                            ConsumerDeliveryRow.status == "RETRY",
+                            ConsumerDeliveryRow.next_attempt_at <= horizon,
+                        )
+                    )
+                ).all()
+            )
+            for delivery in stalled:
+                delivery.status = "DEAD_LETTERED"
+                delivery.attempts = max(delivery.attempts, self._retry_policy.max_attempts)
+                await session.execute(
+                    insert(DeadLetterRow)
+                    .values(
+                        event_id=delivery.event_id,
+                        consumer=self._consumer,
+                        topic=delivery.topic,
+                        payload={},
+                        attempts=delivery.attempts,
+                        last_error=(
+                            f"stalled in RETRY past its backoff horizon: "
+                            f"{delivery.last_error or 'unknown'}"
+                        ),
+                        causation_chain=[str(delivery.event_id)],
+                    )
+                    .on_conflict_do_nothing(constraint="uq_dead_letter_consumer_event")
+                )
+                swept += 1
+        return swept
+
     async def _record_failure(
         self, record: RedisStreamRecord, *, error: Exception, now: datetime
     ) -> int:

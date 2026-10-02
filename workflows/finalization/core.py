@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 
-from agents.base import AgentInvocation, AgentRuntime
+from agents.base import AgentInvocation, AgentRunResult, AgentRuntime
 from agents.configuration import ModelRuntimeFactory
 from agents.gateway import ModelGateway
 from agents.specs import AgentRole, build_agent_specs
@@ -48,6 +49,7 @@ from persistence.tables import (
     RunStageAttemptRow,
     TaskAttemptRow,
     TaskRow,
+    ToolExecutionRow,
     utc_now,
 )
 from planning.service import RunStageUsageRecorder
@@ -67,6 +69,14 @@ from workflows.review import ReleaseReviewer, ReleaseReviewRequest
 
 class RunFinalizationService:
     """Verify completed DAGs, bound repair, exact approval, Git, and UAMS promotion."""
+
+    # A finalization stage performs no model call of its own, but the approval
+    # path does commit and promote. The fence row records no agent spec, so it
+    # carries a fixed, obviously-synthetic hash rather than borrowing a real one.
+    _ADVANCE_FENCE_HASH = "0" * 64
+    # Long enough that a live owner is never displaced mid-commit, short enough
+    # that a crashed owner is reclaimed promptly.
+    _stage_stale_after = timedelta(minutes=15)
 
     def __init__(
         self,
@@ -120,6 +130,16 @@ class RunFinalizationService:
         )
 
     async def advance_next(self) -> str | None:
+        """Advance exactly one run, under an ownership fence.
+
+        Selecting a run without a fence let two dispatchers advance the same run
+        at once. The planner already fences its stage with a ``started_at``
+        timestamp that is re-checked before it persists; finalization did not,
+        and its side effects are not replay-safe: two dispatchers could both
+        observe an approved commit call, both run ``git add --all`` and both
+        promote to the external memory system, and both invoke the final reviewer
+        and the repair debugger for the same stage.
+        """
         async with self._database.sessions() as session:
             run = await session.scalar(
                 select(RunRow)
@@ -139,11 +159,72 @@ class RunFinalizationService:
                 return None
             run_id = run.id
             state = run.state
-        if state == RunStatus.EXECUTING.value:
-            return await self._advance_executing(run_id)
-        if state == RunStatus.WAITING_FOR_APPROVAL.value:
-            return await self._advance_approval(run_id)
-        return await self._advance_memory(run_id)
+        fence = await self._claim_stage(run_id, state)
+        if fence is None:
+            # Another dispatcher holds this run's stage, or took it first.
+            return None
+        try:
+            if state == RunStatus.EXECUTING.value:
+                return await self._advance_executing(run_id)
+            if state == RunStatus.WAITING_FOR_APPROVAL.value:
+                return await self._advance_approval(run_id, fence=fence)
+            return await self._advance_memory(run_id)
+        finally:
+            await self._release_stage(run_id, state, fence)
+
+    async def _claim_stage(self, run_id: UUID, state: str) -> datetime | None:
+        """Take ownership of a run's finalization stage, or report it is taken."""
+        now = datetime.now(UTC)
+        stale_before = now - self._stage_stale_after
+        stage = f"advance:{state}"
+        async with self._database.transaction() as session:
+            claimed = await session.scalar(
+                insert(RunStageAttemptRow)
+                .values(
+                    id=uuid5(NAMESPACE_URL, f"run-stage:{run_id}:{stage}"),
+                    run_id=run_id,
+                    stage=stage,
+                    agent_spec_hash=RunFinalizationService._ADVANCE_FENCE_HASH,
+                    status="RUNNING",
+                    started_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[RunStageAttemptRow.run_id, RunStageAttemptRow.stage],
+                    # A stale takeover restarts the stage clock, exactly as the
+                    # planner does, so a crashed owner does not wedge the run.
+                    set_={"status": "RUNNING", "started_at": now, "ended_at": None},
+                    where=or_(
+                        RunStageAttemptRow.status != "RUNNING",
+                        RunStageAttemptRow.started_at <= stale_before,
+                    ),
+                )
+                .returning(RunStageAttemptRow.started_at)
+            )
+        # The returned timestamp is the fence. A concurrent claimer that won the
+        # conflict updated the row to its own clock, so ours will not match.
+        return claimed if claimed == now else None
+
+    async def _holds_stage(self, run_id: UUID, state: str, fence: datetime) -> bool:
+        async with self._database.sessions() as session:
+            row = await session.scalar(
+                select(RunStageAttemptRow.started_at).where(
+                    RunStageAttemptRow.run_id == run_id,
+                    RunStageAttemptRow.stage == f"advance:{state}",
+                )
+            )
+        return row == fence
+
+    async def _release_stage(self, run_id: UUID, state: str, fence: datetime) -> None:
+        async with self._database.transaction() as session:
+            await session.execute(
+                update(RunStageAttemptRow)
+                .where(
+                    RunStageAttemptRow.run_id == run_id,
+                    RunStageAttemptRow.stage == f"advance:{state}",
+                    RunStageAttemptRow.started_at == fence,
+                )
+                .values(status="COMPLETED", ended_at=datetime.now(UTC))
+            )
 
     async def _advance_executing(self, run_id: UUID) -> str | None:
         async with self._database.sessions() as session:
@@ -299,11 +380,37 @@ class RunFinalizationService:
                     },
                 )
             )
+            # The reviewer's entire obligation is to map each criterion to the
+            # specific artifact IDs that satisfy it. A criterion the reviewer
+            # did not map is an unmet criterion: substituting "every verified
+            # artifact in the run" would manufacture evidence the model never
+            # asserted and would satisfy the gate with unrelated artifacts.
             evidence_map = dict(result.output.acceptance_evidence)
-            if result.output.approved:
-                for criterion in criteria:
-                    if criterion not in evidence_map or not evidence_map[criterion]:
-                        evidence_map[criterion] = evidence_ids
+            unmapped = tuple(
+                criterion
+                for criterion in criteria
+                if not evidence_map.get(criterion)
+            )
+            if unmapped and result.output.approved:
+                review_output = result.output.model_copy(
+                    update={
+                        "approved": False,
+                        "failure_reasons": (
+                            *result.output.failure_reasons,
+                            "final reviewer left acceptance criteria without "
+                            "artifact evidence: " + "; ".join(unmapped[:10]),
+                        ),
+                    }
+                )
+                result = AgentRunResult(
+                    output=review_output,
+                    trace_id=result.trace_id,
+                    attempts=result.attempts,
+                    usage=result.usage,
+                    tool_calls=result.tool_calls,
+                    context_memory_ids=result.context_memory_ids,
+                    agent_spec_hash=result.agent_spec_hash,
+                )
             audited = await ReleaseReviewer(
                 database=self._database,
                 artifacts=self._artifacts,
@@ -535,15 +642,20 @@ class RunFinalizationService:
         if run is None or attempt is None:
             raise RuntimeError("integration sink or attempt is missing")
         worktree = self._worktrees.managed_root / f"task-{sink.id}"
-        call = self._commit_call(run, sink, attempt, worktree)
+        tree_hash = await asyncio.to_thread(self._worktrees.worktree_tree_hash, worktree)
+        call = self._commit_call(run, sink, attempt, worktree, tree_hash=tree_hash)
         await self._approvals.request(
             call,
             context=self._approval_context(run, sink, attempt, worktree),
         )
         await self._transition_run(run_id, RunStatus.WAITING_FOR_APPROVAL)
 
-    async def _advance_approval(self, run_id: UUID) -> str | None:
-        run, sink, attempt, worktree, call = await self._approval_identity(run_id)
+    async def _advance_approval(self, run_id: UUID, *, fence: datetime) -> str | None:
+        identity = await self._approval_identity(run_id)
+        if identity is None:
+            # No release commit has been requested yet; nothing to advance.
+            return None
+        run, sink, attempt, worktree, call = identity
         async with self._database.sessions() as session:
             approval = await session.scalar(
                 select(ApprovalRow).where(ApprovalRow.call_id == call.call_id)
@@ -553,18 +665,29 @@ class RunFinalizationService:
         if approval.status is not ApprovalStatus.APPROVED:
             await self._transition_run(run_id, RunStatus.FAILED)
             return "FAILED"
+        # Last check before the first irreversible side effect. If ownership moved
+        # while the approval was being read, another dispatcher is about to commit
+        # and promote; standing down keeps the git commit and the external memory
+        # write single-shot.
+        if not await self._holds_stage(run_id, RunStatus.WAITING_FOR_APPROVAL.value, fence):
+            return None
         await self._approvals.authorize(
             approval.id,
             call,
             context=self._approval_context(run, sink, attempt, worktree),
         )
+        approved_tree_hash = str(call.arguments["tree_hash"])
         summary_goal = " ".join(run.goal.split())
         if len(summary_goal) > 200:
             summary_goal = summary_goal[:197] + "..."
+        # Staging happens in a scratch index and the resulting tree is compared
+        # against the approved hash inside the same operation, so content that
+        # appeared after the operator decided is never committed.
         commit = await asyncio.to_thread(
             self._worktrees.commit_task_worktree,
             worktree,
             message=f"AutoSWE run {run.id}: {summary_goal}",
+            expected_tree_hash=approved_tree_hash,
         )
         # Finalize the consequential call through the gateway so the durable
         # audit record and outbox event are produced by the same authority
@@ -638,6 +761,7 @@ class RunFinalizationService:
                 run=run,
                 sink=sink,
                 attempt=attempt,
+                plan=await self._current_plan(run.id),
                 commit=commit,
                 artifacts=artifacts,
                 messages=messages,
@@ -710,35 +834,42 @@ class RunFinalizationService:
 
     async def _approval_identity(
         self, run_id: UUID
-    ) -> tuple[RunRow, TaskRow, TaskAttemptRow, Path, ToolCallRequest]:
+    ) -> tuple[RunRow, TaskRow, TaskAttemptRow, Path, ToolCallRequest] | None:
+        """Resolve the pending release commit from durable state only.
+
+        The call is read back from the stored tool execution rather than
+        recomputed from the current plan. Recomputation was the source of two
+        defects: a repair revision landing between request and decision derived
+        a different ``call_id`` and orphaned the operator's approval, and any
+        recomputed value could differ from what the operator actually reviewed.
+        """
         async with self._database.sessions() as session:
             run = await session.get(RunRow, run_id)
             if run is None:
                 raise LookupError(f"run {run_id} does not exist")
-            revision = await session.scalar(
-                select(func.max(TaskRow.plan_revision)).where(TaskRow.run_id == run_id)
+            stored = await session.scalar(
+                select(ToolExecutionRow).where(
+                    ToolExecutionRow.run_id == run_id,
+                    ToolExecutionRow.tool_name == "git_commit",
+                )
             )
-            tasks = tuple(
-                (
-                    await session.scalars(
-                        select(TaskRow).where(
-                            TaskRow.run_id == run_id,
-                            TaskRow.plan_revision == revision,
-                        )
-                    )
-                ).all()
-            )
-            sink = self._integration_sink(tasks)
-            attempt = await session.scalar(
-                select(TaskAttemptRow)
-                .where(TaskAttemptRow.task_id == sink.id)
-                .order_by(TaskAttemptRow.started_at.desc())
-                .limit(1)
-            )
-        if attempt is None:
-            raise RuntimeError("integration attempt is missing")
+            if stored is None:
+                return None
+            sink = await session.get(TaskRow, stored.task_id)
+            attempt = await session.get(TaskAttemptRow, stored.attempt_id)
+        if sink is None or attempt is None:
+            return None
         worktree = self._worktrees.managed_root / f"task-{sink.id}"
-        return run, sink, attempt, worktree, self._commit_call(run, sink, attempt, worktree)
+        return run, sink, attempt, worktree, ToolCallRequest(
+            call_id=stored.id,
+            run_id=stored.run_id,
+            task_id=stored.task_id,
+            attempt_id=stored.attempt_id,
+            requested_by=stored.requested_by,
+            tool_name=stored.tool_name,
+            arguments=dict(stored.arguments),
+            idempotency_key=stored.idempotency_key,
+        )
 
     @staticmethod
     def _integration_sink(tasks: tuple[TaskRow, ...]) -> TaskRow:
@@ -762,8 +893,20 @@ class RunFinalizationService:
 
     @staticmethod
     def _commit_call(
-        run: RunRow, sink: TaskRow, attempt: TaskAttemptRow, worktree: Path
+        run: RunRow,
+        sink: TaskRow,
+        attempt: TaskAttemptRow,
+        worktree: Path,
+        *,
+        tree_hash: str,
     ) -> ToolCallRequest:
+        """Describe the release commit, bound to the reviewed tree content.
+
+        The approval hash covers ``tree_hash`` so the operator authorises a
+        specific set of files, not merely a worktree name. Without it, anything
+        that lands in the worktree between the review and the decision would be
+        swept into the release by ``add --all``.
+        """
         call_id = uuid5(NAMESPACE_URL, f"final-git-commit:{run.id}:{sink.id}")
         return ToolCallRequest(
             call_id=call_id,
@@ -776,6 +919,7 @@ class RunFinalizationService:
                 "worktree": worktree.name,
                 "message": f"AutoSWE run {run.id}: {' '.join(run.goal.split())[:200]}",
                 "baseline_commit": run.baseline_commit,
+                "tree_hash": tree_hash,
             },
             idempotency_key=f"final-git-commit:{run.id}:{sink.id}",
         )

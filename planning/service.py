@@ -31,6 +31,7 @@ from domain.task_policy import (
 )
 from execution.repositories import RepositoryAdapterRegistry
 from knowledge.memory.port import MemoryPort
+from observability.logging import get_structured_logger
 from persistence.database import Database
 from persistence.repositories import DomainRepository
 from persistence.tables import (
@@ -41,7 +42,6 @@ from persistence.tables import (
     TaskRow,
     utc_now,
 )
-from observability.logging import get_structured_logger
 from planning.validator import TaskPlanValidator, ValidationIssue
 
 logger = get_structured_logger("planning")

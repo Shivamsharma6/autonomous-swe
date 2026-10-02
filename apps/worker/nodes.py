@@ -188,7 +188,8 @@ class GatewayToolDispatcher(ToolDispatcher):
                 f"agent-tool:{invocation.attempt_id}:{invocation.trace_id}:{call.call_id}"
             ),
         )
-        # Prevent repetitive duplicate test executions when no code has changed since the last test run.
+        # Prevent repetitive duplicate test executions when no code has
+        # changed since the last test run.
         if call.name == "run_tests":
             last_patch_index = -1
             for idx, res in enumerate(self.results):
@@ -209,7 +210,8 @@ class GatewayToolDispatcher(ToolDispatcher):
                         if res.output.get("passed") is True
                         else "Tests have already run on the current code. "
                         "If you need to modify code to fix test failures, call 'apply_patch'. "
-                        "Otherwise, do not call further tools and return the final NodeAgentOutput JSON."
+                        "Otherwise, do not call further tools and return the final"
+                        "NodeAgentOutput JSON."
                     )
                     cached_output["note"] = note
                     result = ToolCallResult(
@@ -245,9 +247,11 @@ class GatewayToolDispatcher(ToolDispatcher):
                     and str(res.output.get("path", "")).strip() == req_path
                 ):
                     directive = (
-                        "You MUST now call 'apply_patch' to apply your code changes. Do not call read_file."
+                        "You MUST now call 'apply_patch' to apply your code changes. Do not"
+                        "call read_file."
                         if "apply_patch" in self._agent_capabilities
-                        else "Stop calling tools and immediately return the final NodeAgentOutput JSON."
+                        else "Stop calling tools and immediately return the final "
+                        "NodeAgentOutput JSON."
                     )
                     result = ToolCallResult(
                         call_id=request.call_id,
@@ -256,7 +260,10 @@ class GatewayToolDispatcher(ToolDispatcher):
                         status=ToolExecutionStatus.COMPLETED,
                         output={
                             "path": req_path,
-                            "error": f"File '{req_path}' has already been read into context. {directive}",
+                            "error": (
+                                f"File '{req_path}' has already been read into "
+                                f"context. {directive}"
+                            ),
                         },
                         error=None,
                         risk=self._risk_ceiling,
@@ -504,7 +511,10 @@ class ProductionNodeExecutor:
                 for res in (*prior_results, *dispatcher.results):
                     if res.tool_name == "apply_patch":
                         latest_test = None
-                    elif res.tool_name == "run_tests" and res.status is ToolExecutionStatus.COMPLETED:
+                    elif (
+                        res.tool_name == "run_tests"
+                        and res.status is ToolExecutionStatus.COMPLETED
+                    ):
                         latest_test = res
                 if (
                     latest_test is not None
@@ -563,8 +573,10 @@ class ProductionNodeExecutor:
                         "call apply_patch before returning final output. "
                         "Test stages must call run_tests. Only report "
                         "changed paths and verification backed by successful tool results. "
-                        "When required tool evidence for this stage is obtained, stop calling tools "
-                        "and immediately return the structured output JSON conforming to NodeAgentOutput. "
+                        "When required tool evidence for this stage is obtained, stop calling"
+                        "tools "
+                        "and immediately return the structured output JSON conforming to"
+                        "NodeAgentOutput. "
                         "Recall summarizes supplied context only; "
                         "it must not claim to have read files, changed code, or run tests. "
                         "Do not invent bug reports, files, issue trackers, or playtest results."
@@ -620,13 +632,22 @@ class ProductionNodeExecutor:
     ) -> NodeExecutionResult:
         artifact_id = request.idempotency_uuid("artifact")
         message_id = request.idempotency_uuid("message")
+        # Model output is data, not a trusted channel. A prompt injection in an
+        # imported repository can steer an agent into reading `.env` and echoing
+        # the value into its summary; this artifact, the handoff message, and the
+        # graph-state channel are all retrievable through the API, so every one
+        # is redacted here rather than relying on the tool gateway alone.
+        redactor = SecretRedactor()
+        safe_output = redactor.redact(output.model_dump(mode="json"))
+        safe_tool_calls = redactor.redact([call.model_dump(mode="json") for call in tool_calls])
+        safe_summary = str(redactor.redact(output.summary))
         result = NodeExecutionResult(
             message_ids=(message_id,),
             artifact_ids=(artifact_id,),
             result_id=request.idempotency_uuid("result"),
             # The graph-state channel is bounded; the full summary remains in
             # the durable artifact and handoff message.
-            summary=output.summary[:2_000],
+            summary=safe_summary[:2_000],
             worktree_fingerprint=await self._worktree_fingerprint(output.changed_paths),
         )
         content = json.dumps(
@@ -634,9 +655,9 @@ class ProductionNodeExecutor:
                 "schema_version": "1.0",
                 "node": request.node_name,
                 "role": role,
-                "output": output.model_dump(mode="json"),
+                "output": safe_output,
                 "memory_ids": [str(value) for value in memory_ids],
-                "tool_calls": [call.model_dump(mode="json") for call in tool_calls],
+                "tool_calls": safe_tool_calls,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -673,7 +694,7 @@ class ProductionNodeExecutor:
                     causation_id=request.idempotency_uuid("causation"),
                     correlation_id=request.run_id,
                     artifact_ids=(artifact_id,),
-                    summary=output.summary,
+                    summary=safe_summary,
                     context_ids=memory_ids,
                 ),
             )
